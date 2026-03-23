@@ -43,7 +43,7 @@ class ModelAdapter:
             try:
                 # Actual LMS endpoint for chat
                 payload = {
-                    "model": "qwen3.5-4b", 
+                    "model": "qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2", 
                     "messages": messages, 
                     "stream": False,
                     "temperature": 0.7
