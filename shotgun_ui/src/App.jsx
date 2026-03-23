@@ -45,13 +45,12 @@ function App() {
         ]);
         setTasks(tasksRes.data);
         setMessages(msgsRes.data);
-        setSessionList(sessionsRes.data);
-      } catch (err) {
-        console.error("Fetch failed", err);
-        // Fallback to mock data if API fails, but only if no data was fetched
-        if (tasks.length === 0) setTasks(MOCK_TASKS);
-        if (messages.length === 0) setMessages(MOCK_MESSAGES);
-      }
+        const sessions = sessionsRes.data;
+        if (!sessions.includes(sessionId)) {
+            sessions.push(sessionId);
+        }
+        setSessionList(sessions);
+      } catch (err) { console.error("Fetch failed", err); }
     };
     fetchData();
     const interval = setInterval(fetchData, 3000);
@@ -78,10 +77,12 @@ function App() {
   };
 
   const startNewChat = () => {
-    setSessionId('default'); // Or generate a new unique ID
+    const newId = `session-${Date.now()}`;
+    setSessionId(newId);
     setMessages([]);
-    // Optionally, clear tasks related to the previous session if applicable
+    setInputText('');
   };
+
 
   const deleteSession = async (idToDelete) => {
     try {
@@ -188,8 +189,9 @@ function App() {
             <AnimatePresence>
               {messages.map((msg, i) => (
                 <motion.div 
-                  key={msg.id} 
+                  key={msg.id || i} 
                   initial={{ opacity: 0, y: 10 }}
+
                   animate={{ opacity: 1, y: 0 }}
                   style={{ 
                     alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
