@@ -1,3 +1,47 @@
+- summary: Manages the vector memory (ChromaDB) for the swarm.
+  inputs: 'persist_directory: where to save vectors'
+  outputs: side-effect driven (vector storage initialization)
+  side_effects: writes to 'memory' directory on disk
+  depends: chromadb
+  invariants: always returns a list (empty if no matches).
+  symbol: SemanticMemory
+  kind: class
+  path: shotgun_tokens/memory/semantic.py
+- summary: Universal bridge between the orchestrator and local inference engines.
+  inputs: 'endpoint: local model URL'
+  outputs: side-effect driven (network calls) or completion strings
+  side_effects: initiates HTTP POST requests to local APIs
+  depends: httpx, json, yaml
+  invariants: does not expose API keys if built locally (defaults to local-no-auth)
+  symbol: ModelAdapter
+  kind: class
+  path: shotgun_tokens/models/adapter.py
+- summary: Structured output of a research phase, summarizing findings.
+  inputs: none (Pydantic model)
+  outputs: none (Pydantic model)
+  invariants: Findings must be actionable for the next agent stage.
+  symbol: ResearchReport
+  kind: class
+  path: shotgun_tokens/schemas/core.py
+- summary: Structured framing of a coding task context.
+  inputs: none (Pydantic model)
+  outputs: none (Pydantic model)
+  invariants: ensures the agent understands the repository and goals.
+  symbol: TaskFraming
+  kind: class
+  path: shotgun_tokens/schemas/core.py
+- summary: Blueprint for a single atom of work (leaf task).
+  inputs: none (Pydantic model)
+  outputs: none (Pydantic model)
+  symbol: LeafTaskPrototype
+  kind: class
+  path: shotgun_tokens/schemas/core.py
+- summary: Complete decomposition of a root task into parallelizable steps.
+  inputs: none (Pydantic model)
+  outputs: none (Pydantic model)
+  symbol: TaskDecomposition
+  kind: class
+  path: shotgun_tokens/schemas/core.py
 - summary: Represents a root or leaf coding task in the dependency graph.
   inputs: none (ORM entity)
   outputs: none (ORM entity)
@@ -38,3 +82,152 @@
   symbol: MessageModel
   kind: class
   path: shotgun_tokens/storage/models.py
+- summary: Manages structured task storage and retrieval using SQLAlchemy.
+  inputs: 'session: SQLAlchemy Session'
+  outputs: side-effect driven (DB mutations) or TaskModel objects
+  side_effects: writes to 'tasks' and 'task_dependencies' tables
+  depends: storage.models.TaskModel
+  invariants: does not commit the session (left to orchestrator)
+  symbol: TaskRepository
+  kind: class
+  path: shotgun_tokens/storage/repositories/tasks.py
+- summary: Manages the chat history and user intervention messages in SQL.
+  inputs: 'session: SQLAlchemy Session'
+  outputs: side-effect driven (DB mutations) or MessageModel objects
+  side_effects: writes to 'messages' table
+  depends: storage.models.MessageModel
+  invariants: does not commit the session.
+  symbol: MessageRepository
+  kind: class
+  path: shotgun_tokens/storage/repositories/messages.py
+- summary: Central entrypoint for database access.
+  inputs: 'db_url: SQLite path or other SQLAlchemy URL'
+  outputs: side-effect driven (DB initialization)
+  side_effects: creates tables, manages DB connections
+  depends: storage.repositories.tasks, storage.models
+  invariants: does not expose raw sessions to the orchestrator layer directly.
+  symbol: StorageManager
+  kind: class
+  path: shotgun_tokens/storage/services/main.py
+- summary: Dependency provider for the shared StorageManager.
+  inputs: none
+  outputs: StorageManager instance
+  symbol: get_storage
+  kind: function
+  path: shotgun_tokens/api/main.py
+- summary: Retrieve all active work contexts from the swarm.
+  inputs: 'storage: injected StorageManager'
+  outputs: List of task objects in JSON format
+  symbol: list_tasks
+  kind: function
+  path: shotgun_tokens/api/main.py
+- summary: Retrieve the chat history for the orchestrator.
+  symbol: get_messages
+  kind: function
+  path: shotgun_tokens/api/main.py
+- summary: Process a user chat message.
+  inputs: 'payload: { role: ''user'', content: ''...'' }'
+  outputs: assistant response acknowledgement
+  side_effects: triggers orchestrator if task-related
+  symbol: post_chat
+  kind: function
+  path: shotgun_tokens/api/main.py
+- summary: Manually enqueue a new task into the swarm.
+  inputs: 'task_data: JSON payload with title/description'
+  outputs: The created task record
+  side_effects: writes a new row to the database
+  symbol: create_task
+  kind: function
+  path: shotgun_tokens/api/main.py
+- summary: Instruct the swarm to initialize and frame a new coding objective.
+  symbol: CreateTaskAction
+  kind: class
+  path: shotgun_tokens/orchestrator/command.py
+- summary: Manually change a task's progress state (e.g. to archive or block).
+  symbol: UpdateStatusAction
+  kind: class
+  path: shotgun_tokens/orchestrator/command.py
+- summary: Steer the swarm by shifting relative task importance.
+  symbol: PrioritizeAction
+  kind: class
+  path: shotgun_tokens/orchestrator/command.py
+- summary: Mark a task as inactive and hide from the primary swarm dashboard.
+  symbol: ArchiveAction
+  kind: class
+  path: shotgun_tokens/orchestrator/command.py
+- summary: Unified wrapper for a tool-call emitted by the Chat Agent.
+  symbol: SwarmCommand
+  kind: class
+  path: shotgun_tokens/orchestrator/command.py
+- summary: Executes the research phase for a given task, querying repo metadata.
+  inputs: 'model: ModelAdapter, storage: StorageManager'
+  outputs: ResearchReport containing synthesized context
+  side_effects: requests completions from the LLM adapter
+  depends: models.adapter, schemas.core.ResearchReport
+  invariants: always returns a ResearchReport regardless of findings
+  symbol: ResearchModule
+  kind: class
+  path: shotgun_tokens/orchestrator/research.py
+- summary: Coordinates the full Shotgun Tokens task execution flow.
+  inputs: storage_manager, model_adapter, sandbox_provider
+  outputs: side-effect driven (updates DB tasks, creates candidates)
+  side_effects: creates worktrees, writes to DB, triggers LLM calls
+  depends: storage.manager, models.adapter, sandbox.local
+  symbol: SkeletonOrchestrator
+  kind: class
+  path: shotgun_tokens/orchestrator/skeleton.py
+- summary: Manages the leaf-level execution of a code transformation task.
+  inputs: 'model: ModelAdapter, storage: StorageManager, researcher: ResearchModule'
+  outputs: List of candidate IDs
+  side_effects: requests completions from the LLM adapter, writes candidates to storage
+  depends: orchestrator.research.ResearchModule, models.adapter
+  invariants: does not mutate the main branch (uses candidates/worktrees)
+  symbol: ImplementationModule
+  kind: class
+  path: shotgun_tokens/orchestrator/implementation.py
+- summary: Ranks candidate implementations for a specific task using a Borda-weighted
+    voting system.
+  inputs: 'model: ModelAdapter, storage: StorageManager'
+  outputs: Ranked list of candidate IDs with score breakdowns
+  side_effects: requests completions from the LLM adapter
+  depends: models.adapter, schemas.core.TaskFraming
+  invariants: candidates with same score occupy adjacent ranks
+  symbol: JudgeModule
+  kind: class
+  path: shotgun_tokens/orchestrator/judge.py
+- summary: Analyzes a task and uses LLM to generate a structured decomposition.
+  inputs: 'model: ModelAdapter, storage: StorageManager'
+  outputs: TaskDecomposition object
+  side_effects: requests completions from the LLM adapter
+  depends: models.adapter, schemas.core.TaskDecomposition
+  invariants: total_estimated_budget in decomposition is > 0
+  symbol: DecompositionModule
+  kind: class
+  path: shotgun_tokens/orchestrator/decomposition.py
+- summary: Provides top-down task selection logic for the swarm.
+  inputs: 'storage: StorageManager'
+  outputs: The next 'ready-to-work' TaskModel
+  side_effects: reads from DB session
+  depends: storage.models.TaskModel
+  invariants: always prefers higher priority over lower, then older over newer.
+  symbol: SchedulerModule
+  kind: class
+  path: shotgun_tokens/orchestrator/scheduler.py
+- summary: Provides high-performance local and remote search for the swarm.
+  inputs: none (initializes self)
+  outputs: 'results: list of contextual snippets'
+  side_effects: initiates HTTP GET requests to external or local URLs
+  depends: httpx, bs4 (BeautifulSoup)
+  invariants: does not perform write operations on the filesystem.
+  symbol: BrowsingModule
+  kind: class
+  path: shotgun_tokens/orchestrator/browsing.py
+- summary: Consolidates multiple child task artifacts into a single coherent patch.
+  inputs: 'model: ModelAdapter, storage: StorageManager'
+  outputs: Resulting synthesis patch or file
+  side_effects: requests completions from the LLM adapter
+  depends: models.adapter, schemas.core.TaskDecomposition
+  invariants: does not produce a patch that breaks existing tests
+  symbol: SynthesisModule
+  kind: class
+  path: shotgun_tokens/orchestrator/synthesis.py

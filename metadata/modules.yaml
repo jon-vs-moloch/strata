@@ -1,3 +1,23 @@
+- module: memory.semantic
+  purpose: Provide long-term semantic persistence (RAG) for task memories and code
+    patterns.
+  owns: vector storage (ChromaDB), embedding generation, semantic retrieval
+  does_not_own: specific LLM inference, database models (SQL)
+  key_exports: SemanticMemory
+  side_effects: initiates vector DB database creation and storage
+  path: shotgun_tokens/memory/semantic.py
+- module: models.adapter
+  purpose: Provide a unified interface for local model interaction (Ollama/LM Studio).
+  owns: LLM prompting, response normalization, JSON/YAML extraction
+  does_not_own: specific task business logic, DB persistence
+  key_exports: ModelAdapter
+  path: shotgun_tokens/models/adapter.py
+- module: schemas.core
+  purpose: Define Pydantic schemas for structured LLM communication.
+  owns: TaskFraming, TaskDecomposition, LeafTaskPrototypes, CandidateSchema
+  does_not_own: Database models (TaskModel), DB storage logic
+  key_exports: TaskFraming, TaskDecomposition, LeafTaskPrototype, ResearchReport
+  path: shotgun_tokens/schemas/core.py
 - module: storage.models
   purpose: Define SQLAlchemy ORM models for the Shotgun Tokens orchestrator.
   owns: database schemas, relationship mappings
@@ -6,3 +26,95 @@
     TaskStatus
   side_effects: none
   path: shotgun_tokens/storage/models.py
+- path: shotgun_tokens/storage/__init__.py
+- module: storage.repositories.tasks
+  purpose: High-level CRUD operations for the TaskModel entity.
+  owns: task creation, status updates, dependency management (SQL layer)
+  does_not_own: session lifecycle management, business logic orchestration
+  key_exports: TaskRepository
+  path: shotgun_tokens/storage/repositories/tasks.py
+- path: shotgun_tokens/storage/repositories/__init__.py
+- module: storage.repositories.messages
+  purpose: High-level CRUD operations for the MessageModel (Chat history).
+  owns: chat message persistence, intervention tracking
+  does_not_own: business logic orchestration, database connection lifecycle
+  key_exports: MessageRepository
+  path: shotgun_tokens/storage/repositories/messages.py
+- path: shotgun_tokens/storage/services/__init__.py
+- module: storage.services.main
+  purpose: Coordinate multiple database domains into a unified storage entrypoint.
+  owns: session lifecycle, task/candidate/prompt repository instantiation
+  does_not_own: specific SQL logic (delegates to repositories)
+  key_exports: StorageManager
+  path: shotgun_tokens/storage/services/main.py
+- module: api.main
+  purpose: Expose internal storage and orchestrator state to the UI via REST.
+  owns: API routing, JSON serialization, StorageManager lifecycle
+  does_not_own: business logic orchestration, database schema definitions
+  key_exports: app
+  path: shotgun_tokens/api/main.py
+- module: orchestrator.command
+  purpose: Pydantic schemas and logic for tool-calling from the Chat Agent to the
+    swarm.
+  owns: task_tool_definitions, command_schemas, prioritization_logic
+  does_not_own: specific LLM inference, DB session management
+  key_exports: TaskActionRequest, CreateTaskAction, UpdateStatusAction, PrioritizeAction
+  path: shotgun_tokens/orchestrator/command.py
+- module: orchestrator.research
+  purpose: Gather and synthesize contextual information prior to task execution or
+    decomposition.
+  owns: metadata retrieval, documentation search, context synthesis
+  does_not_own: LLM API interactions directly (uses ModelAdapter), or task state mutations
+  key_exports: ResearchModule
+  side_effects: none
+  path: shotgun_tokens/orchestrator/research.py
+- module: orchestrator.skeleton
+  purpose: Primary loop for coordinating multi-candidate coding workflows.
+  owns: task lifecycle, stage transitions, worker parallelization
+  does_not_own: code synthesis logic, evaluation sandboxes, git operations
+  key_exports: SkeletonOrchestrator
+  path: shotgun_tokens/orchestrator/skeleton.py
+- module: orchestrator.implementation
+  purpose: Execute leaf-level coding tasks and generate implementation candidates.
+  owns: code generation, local research (file-level), staging of candidate artifacts
+  does_not_own: task decomposition, synthesis, or evaluation
+  key_exports: ImplementationModule
+  side_effects: initiates code writing to temporary worktrees or buffer files
+  path: shotgun_tokens/orchestrator/implementation.py
+- module: orchestrator.judge
+  purpose: Rank and judge multiple candidate generations using a Borda-weighted scoring
+    rubric.
+  owns: rubric based evaluation, candidate comparison, ranking generation
+  does_not_own: candidate generation execution, code execution (sandboxing)
+  key_exports: JudgeModule
+  side_effects: none
+  path: shotgun_tokens/orchestrator/judge.py
+- module: orchestrator.decomposition
+  purpose: Decompose a high-level task into a directed acyclic graph (DAG) of leaf
+    tasks.
+  owns: task framing, dependency graph generation, leaf task prototyping
+  does_not_own: research execution, task status management, LLM completions
+  key_exports: DecompositionModule
+  side_effects: none
+  path: shotgun_tokens/orchestrator/decomposition.py
+- module: orchestrator.scheduler
+  purpose: Implement 'Code Rails' for task prioritization and swarm flow control.
+  owns: task sorting, worker allocation (logic), 'next task' selection
+  does_not_own: specific LLM inference, DB session management
+  key_exports: SchedulerModule
+  side_effects: none
+  path: shotgun_tokens/orchestrator/scheduler.py
+- module: orchestrator.browsing
+  purpose: Provide read-only search capabilities across local and remote sources.
+  owns: local file search, documentation scraping, search results synthesis
+  does_not_own: specific file system mutations, LLM processing
+  key_exports: BrowsingModule
+  side_effects: none
+  path: shotgun_tokens/orchestrator/browsing.py
+- module: orchestrator.synthesis
+  purpose: Fuses multiple subtask patches into a unified parent task solution.
+  owns: patch merging, conflict resolution logic, final artifact generation
+  does_not_own: code execution (sandboxing), candidate generation
+  key_exports: SynthesisModule
+  side_effects: none
+  path: shotgun_tokens/orchestrator/synthesis.py
