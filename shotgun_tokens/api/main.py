@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 from shotgun_tokens.storage.services.main import StorageManager
 from shotgun_tokens.storage.models import TaskModel
+from shotgun_tokens.models.adapter import ModelAdapter
+from shotgun_tokens.orchestrator.command import SwarmCommand, CreateTaskAction, PrioritizeAction
 
 app = FastAPI(title="Shotgun Tokens API")
 
@@ -24,6 +26,7 @@ app.add_middleware(
 
 # Global storage instance
 _storage = StorageManager()
+_model = ModelAdapter() # Defaults to local Ollama
 
 def get_storage():
     """
@@ -74,14 +77,29 @@ async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(g
     # 1. Store the user message
     storage.messages.create(role=payload['role'], content=payload['content'])
     
-    # 2. ANALYSIS: Is this a task instruction?
-    # For now, we mock the "Assistant" acknowledging and starting a task.
-    # In live, this would trigger the SkeletonOrchestrator.
-    response_content = "Understood. I'm initiating the research swarm for that objective."
+    # 2. Call the Real Brain
+    # Note: Using a simplified prompt for the bootstrap
+    prompt = f"User said: {payload['content']}. If this is a task, respond with a tool call. Otherwise, respond naturally."
+    model_response = await _model.chat([{"role": "user", "content": prompt}])
+    
+    # 3. Handle Tool Logic (Simplified for Genesis)
+    response_content = model_response.get("content", "I encountered an error processing that.")
+    
+    # HEURISTIC: Does it look like a task request?
+    lower_content = payload['content'].lower()
+    if any(word in lower_content for word in ["build", "create", "refactor", "task", "implement"]):
+        # Automatic task creation for the Genesis instruction
+        task = storage.tasks.create(
+            title=f"Auto-Task: {payload['content'][:30]}...",
+            description=payload['content']
+        )
+        response_content = f"Tool Call Executed: create_task. I've initialized the swarm for: '{task.title}'."
+
     storage.messages.create(role="assistant", content=response_content)
     
     storage.commit()
     return {"status": "ok", "reply": response_content}
+
 
 
 @app.post("/tasks")
