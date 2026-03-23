@@ -176,6 +176,14 @@ Example:
 """
 ```
 
+### 7.5 Documentation requirements
+Every public symbol MUST include:
+- A `@summary` of its purpose.
+- Explicit `@inputs` and `@outputs`.
+- A description of any `@side_effects`.
+- A list of `@depends` (which modules/classes it uses).
+- **CRITICAL**: Code should be "self-documenting" for models. If a logic block is complex, add a comment explaining the *intent*, not just the *action*.
+
 ## 8. Public symbol semantic headers
 
 Every public function/class should have a compact semantic header.
@@ -225,6 +233,10 @@ Make dependencies obvious and favor acyclic relationships.
 
 The repository should maintain a machine-readable symbol index (e.g. `symbols.jsonl`, `modules.jsonl`).
 
-## 12. Summary freshness policy
+## 12. Summary freshness and completeness policy
 
-Metadata must not silently rot. When code changes for a symbol, mark its metadata as stale.
+Metadata and documentation must not silently rot.
+- When code changes for a symbol, its metadata MUST be updated.
+- The **Judge Module** MUST penalize any candidate that lacks a proper semantic header or documentation block.
+- A "pass" in the shotgun swarm includes a verification of documentation quality.
+
