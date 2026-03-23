@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from shotgun_tokens.storage.models import Base
 from shotgun_tokens.storage.repositories.tasks import TaskRepository
+from shotgun_tokens.storage.repositories.messages import MessageRepository
 
 class StorageManager:
     """
@@ -33,6 +34,7 @@ class StorageManager:
         
         # Repositories for domain-specific logic
         self.tasks = TaskRepository(self.session)
+        self.messages = MessageRepository(self.session)
         # self.candidates = CandidateRepository(self.session)
         # self.prompts = PromptRepository(self.session)
 

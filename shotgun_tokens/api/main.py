@@ -50,6 +50,40 @@ async def list_tasks(storage: StorageManager = Depends(get_storage)):
         "depth": t.depth
     } for t in tasks]
 
+@app.get("/messages")
+async def get_messages(storage: StorageManager = Depends(get_storage)):
+    """
+    @summary Retrieve the chat history for the orchestrator.
+    """
+    msgs = storage.messages.get_history()
+    return [{
+        "role": m.role,
+        "content": m.content,
+        "is_intervention": m.is_intervention,
+        "task_id": m.associated_task_id
+    } for m in msgs]
+
+@app.post("/chat")
+async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    """
+    @summary Process a user chat message.
+    @inputs payload: { role: 'user', content: '...' }
+    @outputs assistant response acknowledgement
+    @side_effects triggers orchestrator if task-related
+    """
+    # 1. Store the user message
+    storage.messages.create(role=payload['role'], content=payload['content'])
+    
+    # 2. ANALYSIS: Is this a task instruction?
+    # For now, we mock the "Assistant" acknowledging and starting a task.
+    # In live, this would trigger the SkeletonOrchestrator.
+    response_content = "Understood. I'm initiating the research swarm for that objective."
+    storage.messages.create(role="assistant", content=response_content)
+    
+    storage.commit()
+    return {"status": "ok", "reply": response_content}
+
+
 @app.post("/tasks")
 async def create_task(task_data: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
     """
