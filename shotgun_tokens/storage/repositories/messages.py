@@ -6,9 +6,9 @@
 @key_exports MessageRepository
 """
 
-from typing import List, Optional
+from typing import List, Dict, Any, Optional
+from sqlalchemy import select, desc, distinct
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 from shotgun_tokens.storage.models import MessageModel
 
 class MessageRepository:
@@ -43,10 +43,44 @@ class MessageRepository:
         self.session.flush()
         return msg
 
-    def get_history(self, limit: int = 50) -> List[MessageModel]:
+    def get_all(self, session_id: Optional[str] = None) -> List[MessageModel]:
+
         """
-        @summary Retrieve the most recent chat log.
-        @outputs list of MessageModel objects
+        @summary Fetch all active (non-archived) messages, optionally filtered by session.
+        @inputs session_id: optional group ID
+        @outputs list of message models
         """
-        stmt = select(MessageModel).order_by(MessageModel.created_at.desc()).limit(limit)
-        return list(self.session.scalars(stmt).all()[::-1])
+        stmt = select(MessageModel).filter(MessageModel.is_archived == False)
+        if session_id:
+            stmt = stmt.filter(MessageModel.session_id == session_id)
+        stmt = stmt.order_by(MessageModel.created_at.asc())
+        return list(self.session.scalars(stmt).all())
+
+    def get_sessions(self) -> List[str]:
+        """
+        @summary Fetch a list of all unique session IDs.
+        @outputs list of session strings
+        """
+        stmt = select(distinct(MessageModel.session_id))
+        results = self.session.scalars(stmt).all()
+        return [str(r) for r in results if r is not None] # Ensure non-None and convert to string
+
+    def archive_session(self, session_id: str):
+        """
+        @summary Mark all messages in a session as archived.
+        """
+        stmt = select(MessageModel).filter(MessageModel.session_id == session_id)
+        for msg in self.session.scalars(stmt):
+            msg.is_archived = True
+        # self.session.query(MessageModel).filter(MessageModel.session_id == session_id).update({"is_archived": True})
+        # self.session.commit() # The repository should not commit, the unit of work should.
+
+    def delete_session(self, session_id: str):
+        """
+        @summary Permanently remove all messages in a session.
+        """
+        stmt = select(MessageModel).filter(MessageModel.session_id == session_id)
+        for msg in self.session.scalars(stmt):
+            self.session.delete(msg)
+        # self.session.query(MessageModel).filter(MessageModel.session_id == session_id).delete()
+        # self.session.commit() # The repository should not commit, the unit of work should.

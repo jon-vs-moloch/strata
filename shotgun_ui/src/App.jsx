@@ -31,27 +31,32 @@ function App() {
   const [tasks, setTasks] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [sessionId, setSessionId] = useState('default');
+  const [sessionList, setSessionList] = useState([]);
 
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [tasksRes, msgsRes] = await Promise.all([
+        const [tasksRes, msgsRes, sessionsRes] = await Promise.all([
           axios.get('http://localhost:8000/tasks'),
-          axios.get('http://localhost:8000/messages')
+          axios.get(`http://localhost:8000/messages?session_id=${sessionId}`),
+          axios.get('http://localhost:8000/sessions')
         ]);
-        setTasks(tasksRes.data.length > 0 ? tasksRes.data : MOCK_TASKS);
-        setMessages(msgsRes.data.length > 0 ? msgsRes.data : MOCK_MESSAGES);
+        setTasks(tasksRes.data);
+        setMessages(msgsRes.data);
+        setSessionList(sessionsRes.data);
       } catch (err) {
-        console.error("Failed to fetch data.", err);
-        setTasks(MOCK_TASKS);
-        setMessages(MOCK_MESSAGES);
+        console.error("Fetch failed", err);
+        // Fallback to mock data if API fails, but only if no data was fetched
+        if (tasks.length === 0) setTasks(MOCK_TASKS);
+        if (messages.length === 0) setMessages(MOCK_MESSAGES);
       }
     };
     fetchData();
     const interval = setInterval(fetchData, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [sessionId]);
 
   const handleSendMessage = async () => {
     if (!inputText.trim() || isSending) return;
@@ -59,38 +64,124 @@ function App() {
     setInputText('');
     setIsSending(true);
     try {
-        await axios.post('http://localhost:8000/chat', { role: 'user', content: text });
+        await axios.post('http://localhost:8000/chat', { 
+            role: 'user', 
+            content: text,
+            session_id: sessionId
+        });
     } catch (err) {
+
         console.error("Failed to send message.", err);
     } finally {
         setIsSending(false);
     }
   };
 
+  const startNewChat = () => {
+    setSessionId('default'); // Or generate a new unique ID
+    setMessages([]);
+    // Optionally, clear tasks related to the previous session if applicable
+  };
 
+  const deleteSession = async (idToDelete) => {
+    try {
+      await axios.delete(`http://localhost:8000/sessions/${idToDelete}`);
+      setSessionList(prev => prev.filter(s => s !== idToDelete));
+      if (sessionId === idToDelete) {
+        setSessionId('default'); // Switch to default session if current is deleted
+        setMessages([]);
+      }
+    } catch (err) {
+      console.error("Failed to delete session.", err);
+    }
+  };
 
 
   return (
     <div className="app-container" style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0a0a0c' }}>
       
       {/* COLUMN 1: NAVIGATION & PERSISTENCE (LEFT) */}
-      <aside style={{ width: '80px', background: '#141418', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 0', gap: '24px' }}>
-        <div style={{ width: '40px', height: '40px', background: 'linear-gradient(135deg, #8257e5, #00d9ff)', borderRadius: '10px' }} />
-        <nav style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-           <div style={{ color: '#8257e5', padding: '12px', background: 'rgba(130, 87, 229, 0.1)', borderRadius: '12px' }}><MessageSquare size={24} /></div>
-           <div style={{ color: '#9499ad', padding: '12px' }}><History size={24} /></div>
-           <div style={{ color: '#9499ad', padding: '12px' }}><Cpu size={24} /></div>
-        </nav>
-      </aside>
+        {/* SIDEBAR NAVIGATION */}
+        <div style={{ width: '80px', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 0', gap: '32px' }}>
+          <div style={{ width: '40px', height: '40px', borderRadius: '12px', background: 'linear-gradient(135deg, #8257e5, #5e33ba)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>
+            <Zap size={24} weight="fill" />
+          </div>
+          <nav style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            <MessageSquare size={24} color={activeTab === 'chat' ? '#8257e5' : '#4d4d56'} style={{ cursor: 'pointer' }} onClick={() => setActiveTab('chat')} />
+            <Layers size={24} color={activeTab === 'tasks' ? '#8257e5' : '#4d4d56'} style={{ cursor: 'pointer' }} onClick={() => setActiveTab('tasks')} />
+            <Cpu size={24} color="#4d4d56" style={{ cursor: 'pointer' }} />
+            <History size={24} color="#4d4d56" style={{ cursor: 'pointer' }} />
+          </nav>
+        </div>
+
+        {/* SESSION LIST / SUB-NAV */}
+        <div style={{ width: '260px', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', background: '#0c0c0e' }}>
+          <header style={{ padding: '24px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+            <h2 style={{ fontSize: '14px', fontWeight: 600, color: '#edeeef', letterSpacing: '0.05em' }}>SESSIONS</h2>
+          </header>
+          
+          <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
+            <button 
+                onClick={() => {
+                   const newId = `session-${Date.now()}`;
+                   setSessionId(newId);
+                }}
+                style={{ 
+                    width: '100%', 
+                    padding: '12px', 
+                    background: 'rgba(130, 87, 229, 0.1)', 
+                    border: '1px solid rgba(130, 87, 229, 0.3)', 
+                    borderRadius: '8px', 
+                    color: '#8257e5', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center', 
+                    gap: '8px',
+                    cursor: 'pointer',
+                    marginBottom: '24px',
+                    fontSize: '13px',
+                    fontWeight: 600
+                }}
+            >
+                <Plus size={16} /> New Chat
+            </button>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {sessionList.map(s => (
+                    <div 
+                        key={s} 
+                        onClick={() => setSessionId(s)}
+                        style={{ 
+                            padding: '10px 12px', 
+                            borderRadius: '8px', 
+                            background: sessionId === s ? 'rgba(255,255,255,0.03)' : 'transparent',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            color: sessionId === s ? '#8257e5' : '#888',
+                            fontSize: '13px',
+                            transition: 'all 0.2s'
+                        }}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            <MessageSquare size={14} opacity={sessionId === s ? 1 : 0.5} />
+                            {s === 'default' ? 'Genesis Session' : s.replace('session-', '')}
+                        </div>
+                    </div>
+                ))}
+            </div>
+          </div>
+        </div>
 
       {/* COLUMN 2: CHAT INTERFACE (MIDDLE - PRIMARY) */}
       <section style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0a0a0c', borderRight: '1px solid rgba(255,255,255,0.05)' }}>
-        <header style={{ padding: '24px 32px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between' }}>
+        <header style={{ padding: '24px 32px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h2 style={{ fontSize: '18px', fontWeight: 700 }}>Orchestrator Chat</h2>
-            <p style={{ fontSize: '12px', color: '#9499ad' }}>Session: Session-Alpha-42</p>
+            <h1 style={{ fontSize: '20px', fontWeight: 700, color: 'white' }}>Orchestrator Chat</h1>
+            <p style={{ fontSize: '13px', color: '#888', marginTop: '4px' }}>Session: {sessionId}</p>
           </div>
-          <Zap size={20} style={{ color: '#00f294' }} />
+          <Zap size={20} color="#00ff88" style={{ cursor: 'pointer' }} />
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '32px', display: 'flex', flexDirection: 'column', gap: '24px' }}>

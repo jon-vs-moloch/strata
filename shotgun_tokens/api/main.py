@@ -6,9 +6,9 @@
 @key_exports app
 """
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from shotgun_tokens.storage.services.main import StorageManager
 from shotgun_tokens.storage.models import TaskModel
 from shotgun_tokens.models.adapter import ModelAdapter
@@ -54,28 +54,50 @@ async def list_tasks(storage: StorageManager = Depends(get_storage)):
     } for t in tasks]
 
 @app.get("/messages")
-async def get_messages(storage: StorageManager = Depends(get_storage)):
+async def get_messages(session_id: Optional[str] = None, storage: StorageManager = Depends(get_storage)):
     """
-    @summary Retrieve the chat history for the orchestrator.
+    @summary Retrieve chat history, optionally filtered by session.
     """
-    msgs = storage.messages.get_history()
-    return [{
-        "role": m.role,
-        "content": m.content,
-        "is_intervention": m.is_intervention,
-        "task_id": m.associated_task_id
-    } for m in msgs]
+    history = storage.messages.get_all(session_id=session_id)
+    return [
+        {
+            "id": m.id,
+            "session_id": m.session_id,
+            "role": m.role,
+            "content": m.content,
+            "is_intervention": m.is_intervention,
+            "created_at": m.created_at.isoformat()
+        } for m in history
+    ]
+
+@app.get("/sessions")
+async def get_sessions(storage: StorageManager = Depends(get_storage)):
+    """
+    @summary Retrieve unique session list.
+    """
+    return storage.messages.get_sessions()
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, storage: StorageManager = Depends(get_storage)):
+    """
+    @summary Archive a session.
+    """
+    storage.messages.archive_session(session_id)
+    storage.commit()
+    return {"status": "ok"}
+
 
 @app.post("/chat")
 async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
     """
     @summary Process a user chat message.
-    @inputs payload: { role: 'user', content: '...' }
+    @inputs payload: { role: 'user', content: '...', session_id: '...' }
     @outputs assistant response acknowledgement
     @side_effects triggers orchestrator if task-related
     """
     # 1. Store the user message
-    storage.messages.create(role=payload['role'], content=payload['content'])
+    session_id = payload.get('session_id', 'default')
+    storage.messages.create(role=payload['role'], content=payload['content'], session_id=session_id)
     
     # 2. Call the Real Brain
     # Note: Using a simplified prompt for the bootstrap
@@ -95,7 +117,8 @@ async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(g
         )
         response_content = f"Tool Call Executed: create_task. I've initialized the swarm for: '{task.title}'."
 
-    storage.messages.create(role="assistant", content=response_content)
+    storage.messages.create(role="assistant", content=response_content, session_id=session_id)
+
     
     storage.commit()
     return {"status": "ok", "reply": response_content}
