@@ -38,17 +38,17 @@ class ModelAdapter:
         print(f"Calling local model at {self.endpoint}...")
         
         # This is a sample scaffold for Ollama. 
-        # In a live setup, we'd use 'openai' SDK with base_url for LM Studio compatibility.
         async with httpx.AsyncClient() as client:
             try:
-                # Sample payload - assuming Ollama/LM Studio local defaults
-                # payload = {"model": "llama3", "messages": messages, "stream": False}
-                # response = await client.post(self.endpoint, json=payload, timeout=60.0)
-                # response.raise_for_status()
-                # result = response.json()
+                # Actual Ollama endpoint for chat
+                payload = {"model": "llama3", "messages": messages, "stream": False}
+                response = await client.post(self.endpoint, json=payload, timeout=60.0)
+                response.raise_for_status()
+                result = response.json()
                 
-                # MOCK SUCCESS FOR BOOTSTRAP
-                return {"status": "success", "content": "I have processed your request."}
+                # Extract text from Ollama's response structure
+                content = result.get("message", {}).get("content", "")
+                return {"status": "success", "content": content}
             except Exception as e:
                 print(f"Model call failed: {e}")
                 return {"status": "error", "message": str(e)}

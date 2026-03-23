@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Plus, RefreshCw, Layers, TrendingUp, Zap, 
@@ -24,8 +25,48 @@ const MOCK_MESSAGES = [
 
 function App() {
   const [activeTab, setActiveTab] = useState('tasks');
-  const [messages] = useState(MOCK_MESSAGES);
-  const [tasks] = useState(MOCK_TASKS);
+  const [messages, setMessages] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [inputText, setInputText] = useState('');
+  const [isSending, setIsSending] = useState(false);
+
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [tasksRes, msgsRes] = await Promise.all([
+          axios.get('http://localhost:8000/tasks'),
+          axios.get('http://localhost:8000/messages')
+        ]);
+        setTasks(tasksRes.data.length > 0 ? tasksRes.data : MOCK_TASKS);
+        setMessages(msgsRes.data.length > 0 ? msgsRes.data : MOCK_MESSAGES);
+      } catch (err) {
+        console.error("Failed to fetch data.", err);
+        setTasks(MOCK_TASKS);
+        setMessages(MOCK_MESSAGES);
+      }
+    };
+    fetchData();
+    const interval = setInterval(fetchData, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || isSending) return;
+    const text = inputText;
+    setInputText('');
+    setIsSending(true);
+    try {
+        await axios.post('http://localhost:8000/chat', { role: 'user', content: text });
+    } catch (err) {
+        console.error("Failed to send message.", err);
+    } finally {
+        setIsSending(false);
+    }
+  };
+
+
+
 
   return (
     <div className="app-container" style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0a0a0c' }}>
@@ -51,36 +92,56 @@ function App() {
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '32px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          {messages.map((msg) => (
-             <motion.div 
-              key={msg.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              style={{
-                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                maxWidth: '80%',
-                background: msg.is_intervention ? 'rgba(255, 77, 77, 0.05)' : (msg.role === 'user' ? '#8257e5' : '#141418'),
-                padding: '16px 20px',
-                borderRadius: '16px',
-                border: msg.is_intervention ? '1px solid #ff4d4d' : '1px solid rgba(255,255,255,0.05)',
-                color: msg.role === 'user' ? 'white' : '#edeeef'
-              }}
-             >
-               {msg.is_intervention && <div style={{ color: '#ff4d4d', fontSize: '11px', fontWeight: 800, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}><AlertCircle size={14} /> ACTION REQUIRED</div>}
-               <p style={{ fontSize: '15px', lineHeight: '1.5' }}>{msg.content}</p>
-             </motion.div>
-          ))}
+            <AnimatePresence>
+              {messages.map((msg, i) => (
+                <motion.div 
+                  key={msg.id} 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  style={{ 
+                    alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                    background: msg.is_intervention ? 'rgba(255, 77, 77, 0.05)' : (msg.role === 'user' ? '#8257e5' : '#141418'),
+                    padding: '16px 20px',
+                    borderRadius: '16px',
+                    border: msg.is_intervention ? '1px solid #ff4d4d' : '1px solid rgba(255,255,255,0.05)',
+                    maxWidth: '80%',
+                    color: msg.role === 'user' ? 'white' : '#edeeef'
+                  }}
+                >
+                  {msg.is_intervention && <div style={{ color: '#ff4d4d', fontSize: '11px', fontWeight: 800, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}><AlertCircle size={14} /> ACTION REQUIRED</div>}
+                  <p style={{ fontSize: '15px', lineHeight: '1.5' }}>{msg.content}</p>
+                </motion.div>
+              ))}
+              {isSending && (
+                <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 0.6 }}
+                    style={{ alignSelf: 'flex-start', background: '#1c1c22', padding: '12px 18px', borderRadius: '16px', color: '#aaa', fontSize: '13px', fontStyle: 'italic' }}
+                >
+                    Swarm is formulating response...
+                </motion.div>
+              )}
+            </AnimatePresence>
         </div>
 
         <div style={{ padding: '24px 32px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
           <div style={{ background: '#141418', borderRadius: '12px', padding: '12px 20px', display: 'flex', alignItems: 'center', gap: '16px', border: '1px solid rgba(255,255,255,0.1)' }}>
-            <input 
-              placeholder="Give an instruction to the swarm..." 
-              style={{ flex: 1, background: 'transparent', border: 'none', color: 'white', outline: 'none', fontSize: '15px' }} 
-            />
-            <button style={{ background: '#8257e5', border: 'none', color: 'white', padding: '8px', borderRadius: '8px', cursor: 'pointer' }}>
-              <Send size={18} />
-            </button>
+                <div style={{ display: 'flex', gap: '10px', flex: 1 }}>
+                  <input 
+                    type="text" 
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                    placeholder="Describe a goal or intervene..." 
+                    style={{ flex: 1, background: '#1c1c22', border: '1px solid #333', borderRadius: '8px', padding: '12px', color: '#fff', outline: 'none' }}
+                  />
+                  <button 
+                    onClick={handleSendMessage}
+                    style={{ background: 'linear-gradient(135deg, #7c3aed, #4f46e5)', border: 'none', borderRadius: '8px', padding: '0 20px', color: '#fff', fontWeight: 'bold', cursor: 'pointer' }}
+                  >
+                    Send
+                  </button>
+                </div>
           </div>
         </div>
       </section>
