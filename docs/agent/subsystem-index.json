@@ -1,0 +1,20 @@
+{
+  "subsystem": "core",
+  "purpose": "Generate, synthesize, evaluate, and promote task resolutions.",
+  "key_modules": [
+    "shotgun_tokens/orchestrator/skeleton.py",
+    "shotgun_tokens/orchestrator/decomposition.py",
+    "shotgun_tokens/orchestrator/judge.py",
+    "shotgun_tokens/orchestrator/synthesis.py",
+    "shotgun_tokens/orchestrator/promotion.py"
+  ],
+  "common_failure_modes": [
+    "LLM returning malformed JSON",
+    "dependency resolution gridlocks",
+    "worktree cleanup failures"
+  ],
+  "key_metrics": [
+    "Tasks completed properly",
+    "Pass@N validation"
+  ]
+}
