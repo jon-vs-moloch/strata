@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { 
   Plus, RefreshCw, Layers, TrendingUp, Zap, 
   MessageSquare, Send, History, Cpu, 
@@ -109,8 +111,13 @@ function App() {
                   }}
                 >
                   {msg.is_intervention && <div style={{ color: '#ff4d4d', fontSize: '11px', fontWeight: 800, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}><AlertCircle size={14} /> ACTION REQUIRED</div>}
-                  <p style={{ fontSize: '15px', lineHeight: '1.5' }}>{msg.content}</p>
+                  <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.6' }}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
                 </motion.div>
+
               ))}
               {isSending && (
                 <motion.div 
