@@ -20,7 +20,7 @@ class ModelAdapter:
     @depends httpx, json, yaml
     @invariants does not expose API keys if built locally (defaults to local-no-auth)
     """
-    def __init__(self, endpoint: str = "http://localhost:11434/api/chat"):
+    def __init__(self, endpoint: str = "http://127.0.0.1:1234/v1/chat/completions"):
         """
         @summary Initialize the ModelAdapter.
         @inputs endpoint: local LLM completion URL
@@ -29,6 +29,7 @@ class ModelAdapter:
         self.endpoint = endpoint
 
     async def chat(self, messages: List[Dict[str, str]], format: str = "json") -> Dict[str, Any]:
+
         """
         @summary Send a chat message list to the model and return a structured response.
         @inputs messages: context list, format: desired output ('json' or 'yaml')
@@ -37,17 +38,22 @@ class ModelAdapter:
         """
         print(f"Calling local model at {self.endpoint}...")
         
-        # This is a sample scaffold for Ollama. 
+        # This is a sample scaffold for LM Studio (OpenAI Compatible)
         async with httpx.AsyncClient() as client:
             try:
-                # Actual Ollama endpoint for chat
-                payload = {"model": "llama3", "messages": messages, "stream": False}
+                # Actual LMS endpoint for chat
+                payload = {
+                    "model": "qwen3.5-4b", 
+                    "messages": messages, 
+                    "stream": False,
+                    "temperature": 0.7
+                }
                 response = await client.post(self.endpoint, json=payload, timeout=60.0)
                 response.raise_for_status()
                 result = response.json()
                 
-                # Extract text from Ollama's response structure
-                content = result.get("message", {}).get("content", "")
+                # Extract text from OpenAI-compatible structure
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 return {"status": "success", "content": content}
             except Exception as e:
                 print(f"Model call failed: {e}")
