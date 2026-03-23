@@ -11,8 +11,14 @@ from typing import List, Optional
 from uuid import uuid4
 from datetime import datetime
 
-from shotgun_tokens.schemas.core import ResearchReport
+from shotgun_tokens.schemas.core import ResearchReport, TaskDecomposition
 from shotgun_tokens.orchestrator.research import ResearchModule
+from shotgun_tokens.orchestrator.scheduler import SchedulerModule
+from shotgun_tokens.orchestrator.decomposition import DecompositionModule
+from shotgun_tokens.orchestrator.implementation import ImplementationModule
+from shotgun_tokens.orchestrator.judge import JudgeModule
+from shotgun_tokens.orchestrator.synthesis import SynthesisModule
+from shotgun_tokens.storage.models import TaskStatus
 
 class SkeletonOrchestrator:
     """
@@ -33,6 +39,11 @@ class SkeletonOrchestrator:
         self.model = model
         self.sandbox = sandbox
         self.researcher = ResearchModule(model_adapter=model, storage_manager=storage)
+        self.scheduler = SchedulerModule(storage_manager=storage)
+        self.decomposer = DecompositionModule(model_adapter=model, storage_manager=storage)
+        self.executor = ImplementationModule(model_adapter=model, storage_manager=storage, research_module=self.researcher)
+        self.judger = JudgeModule(model_adapter=model, storage_manager=storage)
+        self.synthesizer = SynthesisModule(model_adapter=model, storage_manager=storage)
 
     async def process_task(self, task_id: str):
         """
@@ -42,21 +53,57 @@ class SkeletonOrchestrator:
         @side_effects triggers decomposition, implementation candidates, and evaluation
         @invariants task status correctly updated at each stage.
         """
-        print(f"Orchestrating task: {task_id}")
-        
-        # Phase 0.5: Research
-        research_report: ResearchReport = await self.researcher.conduct_research(
-            task_description=f"Task ID {task_id}"
-        )
-        print(f"Research finalized. Suggested approach: {research_report.suggested_approach}")
+        # 🟢 Priority-Aware Step: Pull the Next Best Task
+        task = self.scheduler.get_next_runnable_task()
+        if not task:
+            print("No runnable tasks. Swarm in idle state.")
+            return False
 
-        # 1. Fetch task and set to RUNNING
-        # 2. Frame & Decompose (utilizing research_report)
-        # 3. Generate N implementation candidates (utilizing research_report)
-        # 4. Run Evaluations in parallel
-        # 5. Judge & Summarize failures
-        # 6. Repair or Synthesize
-        # 7. Promote to git branch
+        print(f"Orchestrating task: {task.task_id} ({task.title})")
+        
+        # Phase 1: GLOBAL Research (Arch & Constraints)
+        global_research: ResearchReport = await self.researcher.conduct_research(
+            task_description=f"Initial research for root task: {task.title}"
+        )
+        print(f"Global research complete. {len(global_research.key_constraints_discovered)} constraints found.")
+
+        # Phase 2: Frame & Decompose (if parent)
+        decomposition: TaskDecomposition = await self.decomposer.decompose_task(
+            task_title=task.title,
+            task_desc=task.description,
+            research=global_research
+        )
+        print(f"Decomposition complete. Found {len(decomposition.subtasks)} subtasks.")
+
+        # Phase 3: Leaf-Level Implementation with LOCAL Research
+        # In a real run, this would loop over decomposition.subtasks in parallel
+        for sub_id, sub_proto in decomposition.subtasks.items():
+             # Creating child task records in DB
+             child = self.storage.tasks.create(
+                 parent_task_id=task.task_id,
+                 title=sub_proto.title,
+                 description=sub_proto.description,
+                 depth=task.depth + 1
+             )
+             self.storage.commit()
+             
+             # IMPLEMENT: Includes Second 'Local' Research Pass internally
+             candidate_ids = await self.executor.implement_task(
+                 task_id=child.task_id, 
+                 global_research=global_research
+             )
+             
+             # Phase 4: Parallelize Evaluation & Judge
+             rankings = await self.judger.judge_candidates(child.task_id, candidate_ids)
+             print(f"Judged {len(rankings)} candidates for subtask {sub_id}.")
+
+        # Phase 5: Synthesis & Promotion
+        # Final pass merging all child patches
+        # synthesis_patch = await self.synthesizer.synthesize_subtasks(task.task_id, ...)
+        
+        # Phase 6: Terminate
+        self.storage.tasks.update_status(task.task_id, TaskStatus.COMPLETED)
+        self.storage.commit()
         
         return True
 
