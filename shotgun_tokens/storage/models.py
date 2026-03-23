@@ -156,8 +156,11 @@ class MessageModel(Base):
     __tablename__ = "messages"
     
     message_id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String, default="default", index=True)
     role: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(String)
     is_intervention: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     associated_task_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
