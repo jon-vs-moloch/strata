@@ -11,6 +11,9 @@ from typing import List, Optional
 from uuid import uuid4
 from datetime import datetime
 
+from shotgun_tokens.schemas.core import ResearchReport
+from shotgun_tokens.orchestrator.research import ResearchModule
+
 class SkeletonOrchestrator:
     """
     @summary Coordinates the full Shotgun Tokens task execution flow.
@@ -29,6 +32,7 @@ class SkeletonOrchestrator:
         self.storage = storage
         self.model = model
         self.sandbox = sandbox
+        self.researcher = ResearchModule(model_adapter=model, storage_manager=storage)
 
     async def process_task(self, task_id: str):
         """
@@ -38,14 +42,22 @@ class SkeletonOrchestrator:
         @side_effects triggers decomposition, implementation candidates, and evaluation
         @invariants task status correctly updated at each stage.
         """
+        print(f"Orchestrating task: {task_id}")
+        
+        # Phase 0.5: Research
+        research_report: ResearchReport = await self.researcher.conduct_research(
+            task_description=f"Task ID {task_id}"
+        )
+        print(f"Research finalized. Suggested approach: {research_report.suggested_approach}")
+
         # 1. Fetch task and set to RUNNING
-        # 2. Frame & Decompose (if parent)
-        # 3. Generate N implementation candidates
+        # 2. Frame & Decompose (utilizing research_report)
+        # 3. Generate N implementation candidates (utilizing research_report)
         # 4. Run Evaluations in parallel
         # 5. Judge & Summarize failures
         # 6. Repair or Synthesize
         # 7. Promote to git branch
-        print(f"Orchestrating task: {task_id}")
+        
         return True
 
     def _build_implementation_prompt(self, task, framing) -> str:

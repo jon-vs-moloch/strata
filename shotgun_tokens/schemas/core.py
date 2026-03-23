@@ -3,12 +3,25 @@
 @purpose Define Pydantic schemas for structured LLM communication.
 @owns TaskFraming, TaskDecomposition, LeafTaskPrototypes, CandidateSchema
 @does_not_own Database models (TaskModel), DB storage logic
-@key_exports TaskFraming, TaskDecomposition, LeafTaskPrototype
+@key_exports TaskFraming, TaskDecomposition, LeafTaskPrototype, ResearchReport
 """
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from enum import Enum
+
+class ResearchReport(BaseModel):
+    """
+    @summary Structured output of a research phase, summarizing findings.
+    @inputs none (Pydantic model)
+    @outputs none (Pydantic model)
+    @invariants Findings must be actionable for the next agent stage.
+    """
+    context_gathered: str = Field(description="Summary of documentation or code analyzed.")
+    key_constraints_discovered: List[str] = Field(description="Hidden rules or limitations found during research.")
+    suggested_approach: str = Field(description="High-level recommendation based on research.")
+    reference_urls: List[str] = Field(default_factory=list, description="URLs or local file paths referenced.")
+
 
 class TaskFraming(BaseModel):
     """
@@ -21,6 +34,7 @@ class TaskFraming(BaseModel):
     problem_statement: str = Field(description="Concrete goal being addressed.")
     constraints: List[str] = Field(description="Strict rules for implementation.")
     success_criteria: List[str] = Field(description="How to verify the fix.")
+    research_summary: Optional[ResearchReport] = Field(default=None, description="Prior research context if available.")
 
 class LeafTaskPrototype(BaseModel):
     """
