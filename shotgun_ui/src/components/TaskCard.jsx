@@ -63,9 +63,13 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
   const accentColor = typeInfo ? typeInfo.color : style.color;
 
   const children = task.children || [];
-  const pastTasks = children.filter(c => ['complete', 'abandoned', 'cancelled'].includes(c.status));
-  const presentTasks = children.filter(c => ['working', 'blocked', 'pushed'].includes(c.status));
-  const futureTasks = children.filter(c => ['pending'].includes(c.status));
+  const pastStatuses = ['complete', 'abandoned', 'cancelled'];
+  const futureStatuses = ['pending'];
+  
+  const pastTasks = children.filter(c => pastStatuses.includes(c.status));
+  const futureTasks = children.filter(c => futureStatuses.includes(c.status));
+  // Fallback: If it's not past or future, it belongs in present
+  const presentTasks = children.filter(c => !pastStatuses.includes(c.status) && !futureStatuses.includes(c.status));
   
   const hasChildren = children.length > 0 || (task.attempts && task.attempts.length > 0);
 

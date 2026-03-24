@@ -81,6 +81,19 @@ TOOLS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_swarm_status",
+            "description": "Query the database to check the real-time status of all active, pending, or recently completed swarm tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Optional specific task ID to lookup. If omitted, returns a summary of all active tasks."}
+                }
+            }
+        }
     }
 ]
 
@@ -247,80 +260,103 @@ DO NOT output headers like '# Deep Web Research' without calling a tool. If you 
             return {"status": "ok", "reply": chain_of_thought.strip()}
             
         if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
-            call = tool_calls[0]
-            func_name = call.get("function", {}).get("name")
             import json
-            try:
-                args = json.loads(call.get("function", {}).get("arguments", "{}"))
-            except:
-                args = {}
-                
-            # Fallback message if model silent
-            if not chain_of_thought or not chain_of_thought.strip():
-                if func_name == "search_web":
-                    chain_of_thought = f"I'm going to quickly query the web for: `{args.get('query', '...')}`"
-                elif func_name == "kickoff_background_research":
-                    chain_of_thought = f"I am kicking off an asynchronous {args.get('target_scope', 'codebase')} research task to compile data on this."
+            tool_outputs_generated = False
+            async_task_ids = []
+            
+            # Save the human-readable CoT if provided
+            if chain_of_thought and chain_of_thought.strip():
+                 storage.messages.create(role="assistant", content=chain_of_thought.strip(), session_id=session_id)
+                 storage.commit()
+            else:
+                 # Generate a fallback CoT message if the model was silent
+                 names = [c.get("function", {}).get("name") for c in tool_calls]
+                 chain_of_thought = f"Invoking system tools: {', '.join(names)}"
+                 storage.messages.create(role="assistant", content=chain_of_thought, session_id=session_id)
+                 storage.commit()
+
+            # Record the tool calls in the message history for the LLM's next turn
+            messages.append({
+                "role": "assistant",
+                "content": chain_of_thought if chain_of_thought and chain_of_thought.strip() else None,
+                "tool_calls": tool_calls
+            })
+
+            for call in tool_calls:
+                func_name = call.get("function", {}).get("name")
+                tool_call_id = call.get("id", "call_xyz")
+                try:
+                    args = json.loads(call.get("function", {}).get("arguments", "{}"))
+                except:
+                    args = {}
+
+                if func_name == "kickoff_background_research":
+                    desc = args.get("description", content)
+                    scope = args.get("target_scope", "codebase")
+                    task = storage.tasks.create(
+                        title=f"Research [{scope.upper()}]: {desc[:50]}",
+                        description=desc,
+                        session_id=session_id,
+                        state=TaskState.PENDING,
+                        constraints={"target_scope": scope}
+                    )
+                    task.type = TaskType.RESEARCH
+                    storage.commit()
+                    await _worker.enqueue(task.task_id)
+                    async_task_ids.append(task.task_id)
+                    tool_content = f"Successfully enqueued background research task {task.task_id}."
+
                 elif func_name == "kickoff_swarm_task":
-                    chain_of_thought = f"Let me initialize an agent swarm to handle implementation for `{args.get('title', 'this task')}`."
-                else:
-                    chain_of_thought = f"Invoking tool: {func_name}"
+                    title = args.get("title", f"Auto-Task: {content[:30]}...")
+                    desc = args.get("description", content)
+                    task = storage.tasks.create(
+                        title=title,
+                        description=desc,
+                        session_id=session_id,
+                        state=TaskState.PENDING,
+                    )
+                    storage.commit()
+                    await _worker.enqueue(task.task_id)
+                    async_task_ids.append(task.task_id)
+                    tool_content = f"Successfully enqueued swarm implementation task {task.task_id}."
 
-            storage.messages.create(role="assistant", content=chain_of_thought, session_id=session_id)
-            storage.commit()
+                elif func_name == "search_web":
+                    query = args.get("query", content)
+                    search_results = await _perform_web_search(query)
+                    tool_content = f"Search Results for '{query}':\n{search_results}"
+                    tool_outputs_generated = True
 
-            if func_name == "kickoff_background_research":
-                desc = args.get("description", content)
-                scope = args.get("target_scope", "codebase")
-                task = storage.tasks.create(
-                    title=f"Research [{scope.upper()}]: {desc[:50]}",
-                    description=desc,
-                    session_id=session_id,
-                    state=TaskState.PENDING,
-                    constraints={"target_scope": scope}
-                )
-                task.type = TaskType.RESEARCH
-                storage.commit()
-                await _worker.enqueue(task.task_id)
-                # This breaks the loop
-                reply = chain_of_thought.strip() if chain_of_thought and chain_of_thought.strip() else f"Starting background research on: *{desc}*\\n\\nI've kicked off an asynchronous swarm task. I'll post the results here when done."
-                return {"status": "ok", "reply": reply, "task_id": task.task_id}
-
-            elif func_name == "kickoff_swarm_task":
-                title = args.get("title", f"Auto-Task: {content[:30]}...")
-                desc = args.get("description", content)
-                task = storage.tasks.create(
-                    title=title,
-                    description=desc,
-                    session_id=session_id,
-                    state=TaskState.PENDING,
-                )
-                storage.commit()
-                # Breaks the loop
-                reply = chain_of_thought.strip() if chain_of_thought and chain_of_thought.strip() else f"Tool Call Executed: kickoff_swarm_task. Initialized implementation swarm for: *{title}*"
-                return {"status": "ok", "reply": reply, "task_id": task.task_id}
-
-            elif func_name == "search_web":
-                query = args.get("query", content)
-                search_results = await _perform_web_search(query)
+                elif func_name == "check_swarm_status":
+                    target_id = args.get("task_id")
+                    if target_id:
+                        tasks = storage.session.query(TaskModel).filter(TaskModel.task_id == target_id).all()
+                    else:
+                        tasks = storage.session.query(TaskModel).filter(TaskModel.state != TaskState.COMPLETE).all()
+                    
+                    if not tasks:
+                        tool_content = "No active or matching tasks found in the database."
+                    else:
+                        lines = [f"- {t.title} ({t.task_id}): {t.state.value}" for t in tasks]
+                        tool_content = "Current Swarm Status:\n" + "\n".join(lines)
+                    tool_outputs_generated = True
                 
-                # Setup context for the next iteration of the loop!
-                # We need to append the model's message that contained the tool call
-                messages.append({
-                    "role": "assistant",
-                    "content": chain_of_thought if chain_of_thought and chain_of_thought.strip() else None,
-                    "tool_calls": [call]
-                })
-                # We append the tool output
+                else:
+                    tool_content = f"Error: Tool '{func_name}' not implemented."
+
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": call.get("id", "call_xyz"),
-                    "name": "search_web",
-                    "content": f"Search Results for '{query}':\\n{search_results}\\n\\nCRITICAL INSTRUCTION: You MUST now synthesize the above results into a final answer for the user. Do " "NOT say 'Let me check again', do NOT output another tool call. Provide the final textual response now."
+                    "tool_call_id": tool_call_id,
+                    "name": func_name,
+                    "content": tool_content
                 })
-                # Continue loop!
+
+            if tool_outputs_generated:
+                # If we have immediate data (search or status), loop back so the LLM can respond to them
                 iteration += 1
                 continue
+            else:
+                # If only async tasks were kicked off, we can finish immediately
+                return {"status": "ok", "reply": chain_of_thought.strip(), "task_ids": async_task_ids}
                 
         else:
             # No tool calls, we either got an answer or a fallback error

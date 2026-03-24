@@ -47,6 +47,20 @@ class ImplementationModule:
             repo_path=task.repo_path
         )
 
+        # Get past failures to avoid infinite loops
+        from shotgun_tokens.storage.models import AttemptModel, AttemptOutcome
+        failed_attempts = self.storage.session.query(AttemptModel).filter(
+            AttemptModel.task_id == task_id,
+            AttemptModel.outcome == AttemptOutcome.FAILED
+        ).order_by(AttemptModel.started_at.asc()).all()
+        
+        failure_log = "None."
+        if failed_attempts:
+            failure_log = "\n".join([
+                f"- Attempt {i+1} Failed: {a.reason or 'Unknown error'}. Resolution: {a.resolution.value if a.resolution else 'None'}."
+                for i, a in enumerate(failed_attempts)
+            ])
+
         system_prompt = f"""You are an Senior Implementation Engineer. 
         Your goal is to write code that satisfies the following task:
         
@@ -59,6 +73,9 @@ class ImplementationModule:
         LOCAL IMPLEMENTATION DETAILS:
         {local_research.context_gathered}
         CONSTRAINTS: {local_research.key_constraints_discovered}
+        
+        PAST ATTEMPTS TO AVOID:
+        {failure_log}
         
         YOU MUST OUTPUT THE ENTIRE UPDATED FILE CONTENT OR A NEW FILE CONTENT.
         Output format:
