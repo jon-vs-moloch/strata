@@ -35,7 +35,27 @@ class SynthesisModule:
         @outputs consolidated patch string
         @side_effects uses LLM to handle complex conflict resolution
         """
-        print(f"Synthesizing {len(subtask_patches)} subtask patches into parent task: {task_id}...")
+        # 3. Construct a prompt array for the model.chat() method
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert code integration engine. Your job is to take multiple "
+                    "non-conflicting code patches/snippets and merge them into a single, cohesive "
+                    "file or patch. If you detect overlapping changes, harmonize them logically."
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Please synthesize the following subtask patches for parent task '{task_id}':\n\n" +
+                    "\n\n".join([f"### Subtask {tid}:\n```\n{patch}\n```" for tid, patch in subtask_patches.items()])
+                )
+            }
+        ]
         
-        # MOCK RETURN FOR BOOTSTRAP
-        return "# Consolidated patch with merged logic from all subtasks."
+        # 4. Execute the LLM call
+        response = await self.model.chat(messages)
+        
+        # 5. Extract and return the content
+        return response.get("content", "# Synthesis failed or returned empty.")

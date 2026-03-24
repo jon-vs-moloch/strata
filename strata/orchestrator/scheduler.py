@@ -34,22 +34,20 @@ class SchedulerModule:
         @side_effects none (read-only)
         @invariants Skip tasks that are BLOCKED or WAITING_DEPENDENCIES.
         """
-        # Fetch all tasks that could potentially run
+        from strata.storage.models import TaskState
+        
+        # Build query to fetch the next runnable task
+        # Patch Objective: Push dependency filtering to the database for O(1) performance
         stmt = (
             self.storage.session.query(TaskModel)
             .filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
+            # Exclude tasks that have incomplete dependencies:
+            # ~TaskModel.dependencies.any(TaskModel.state != TaskState.COMPLETE)
+            .filter(~TaskModel.dependencies.any(TaskModel.state != TaskState.COMPLETE))
             .order_by(TaskModel.priority.desc(), TaskModel.created_at.asc())
         )
         
-        candidates = stmt.all()
-        
-        # Filter out anything waiting on a dependency
-        for task in candidates:
-            # Simple check: are all dependencies COMPLETE?
-            if all(dep.state == TaskState.COMPLETE for dep in task.dependencies):
-                return task
-        
-        return None
+        return stmt.first()
 
     def select_best_model(self, task_type: str, fallback_model: str = "qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2") -> str:
         """

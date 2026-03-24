@@ -37,63 +37,64 @@ class ModelAdapter:
         @outputs dictionary representing the model's structured decision
         @side_effects makes network calls to the model provider
         """
-        print(f"Calling local model at {self.endpoint}...")
+        import asyncio
+        import httpx
         
-        async with httpx.AsyncClient() as client:
+        max_retries = 3
+        backoff_time = 2.0
+        
+        for retry in range(max_retries):
             try:
-                payload = {
-                    "model": self.active_model, 
-                    "messages": messages, 
-                    "stream": False,
-                    "temperature": 0.1 if response_format else 0.7
-                }
-                if tools:
-                    payload["tools"] = tools
-                if response_format:
-                    payload["response_format"] = response_format
+                async with httpx.AsyncClient() as client:
+                    payload = {
+                        "model": self.active_model, 
+                        "messages": messages, 
+                        "stream": False,
+                        "temperature": 0.1 if response_format else 0.7
+                    }
+                    if tools:
+                        payload["tools"] = tools
+                    if response_format:
+                        payload["response_format"] = response_format
 
-                # Use a long read-timeout for reasoning models (they can think for many seconds)
-                # but keep the connect-timeout short so a dead server fails fast.
-                timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=5.0)
-                response = await client.post(self.endpoint, json=payload, timeout=timeout)
-                response.raise_for_status()
-                result = response.json()
-                
-                message_obj = result.get("choices", [{}])[0].get("message", {})
-                content = message_obj.get("content", "")
-                tool_calls = message_obj.get("tool_calls", None)
-                
-                # Fallback: Some models (like M37) inject tool calls into the content as XML blocks 
-                # instead of returning a proper tool_calls array. Let's parse them out.
-                if not tool_calls and "<tool_call>" in content and "</tool_call>" in content:
-                    import re
-                    # Extract the JSON block between the tags
-                    match = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.DOTALL | re.IGNORECASE)
-                    if match:
-                        try:
-                            # It should be a JSON string like {"name": "search_web", "arguments": {...}}
-                            parsed_tool = json.loads(match.group(1).strip())
-                            
-                            # Normalize it into the standard OpenAI tool_calls structure
-                            tool_calls = [{
-                                "id": f"call_xml_{len(content)}",
-                                "type": "function",
-                                "function": {
-                                    "name": parsed_tool.get("name"),
-                                    "arguments": json.dumps(parsed_tool.get("arguments", {}))
-                                }
-                            }]
-                            
-                            # Optionally strip the tool call from the visible content to avoid UI artifacts
-                            content = content.replace(match.group(0), "").strip()
-                            
-                        except:
-                            pass # If it's malformed JSON, we ignore the fallback attempt
+                    timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=5.0)
+                    response = await client.post(self.endpoint, json=payload, timeout=timeout)
+                    response.raise_for_status()
+                    result = response.json()
+                    
+                    message_obj = result.get("choices", [{}])[0].get("message", {})
+                    content = message_obj.get("content", "")
+                    tool_calls = message_obj.get("tool_calls", None)
+                    
+                    # Fallback Xml tool parsing ...
+                    if not tool_calls and "<tool_call>" in content and "</tool_call>" in content:
+                        import re
+                        match = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.DOTALL | re.IGNORECASE)
+                        if match:
+                            try:
+                                parsed_tool = json.loads(match.group(1).strip())
+                                tool_calls = [{
+                                    "id": f"call_xml_{len(content)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": parsed_tool.get("name"),
+                                        "arguments": json.dumps(parsed_tool.get("arguments", {}))
+                                    }
+                                }]
+                                content = content.replace(match.group(0), "").strip()
+                            except: pass
 
-                return {"status": "success", "content": content, "tool_calls": tool_calls}
+                    return {"status": "success", "content": content, "tool_calls": tool_calls}
             except Exception as e:
-                print(f"Model call failed: {e}")
-                return {"status": "error", "message": str(e)}
+                if retry < max_retries - 1:
+                    print(f"Model call failed, retrying in {backoff_time}s... Error: {e}")
+                    await asyncio.sleep(backoff_time)
+                    backoff_time *= 2 # Exponential backoff
+                    continue
+                else:
+                    print(f"Model call permanently failed after {max_retries} retries: {e}")
+                    return {"status": "error", "message": str(e)}
+        
         return {"status": "error", "message": "Failed to complete model call"}
 
     def extract_yaml(self, raw_content: str) -> Dict[str, Any]:
