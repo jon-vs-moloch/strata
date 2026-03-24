@@ -42,6 +42,9 @@ class ExperimentRunner:
         """
         @summary Run a batch of tasks in weak-eval mode and compare results against a recorded baseline.
         """
+        from strata.orchestrator.worker.attempt_runner import run_attempt
+        from strata.storage.models import AttemptOutcome
+        
         logger.info(f"Starting experiment for candidate change {candidate_change_id}...")
         
         # 1. Prepare Isolated Context
@@ -50,15 +53,47 @@ class ExperimentRunner:
             candidate_change_id=candidate_change_id,
             evaluation_run=True
         )
+        # Bind once to ensure the model adapter is in the right state
+        self.model.bind_execution_context(context)
         
-        # 2. Reset / Initialize metrics for this candidate
-        
-        # 3. Execution (This would typically call the BackgroundWorker or a specialized TaskRunner)
-        # For this patch, we'll assume the tasks are run externally or we provide a helper to run them.
-        
-        # 4. Collection Logic (Mocked for first ignition)
+        # 2. Execution Loop
+        for task_id in eval_task_ids:
+            task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+            if not task:
+                logger.warning(f"Task {task_id} not found, skipping in experiment.")
+                continue
+            
+            logger.info(f"Running eval task {task_id} under experiment {candidate_change_id}...")
+            
+            async def notify_noop(tid, state): pass
+            async def enqueue_noop(tid): pass
+            
+            success, error, attempt = await run_attempt(
+                task, self.storage, self.model, notify_noop, enqueue_noop
+            )
+            
+            # 3. Explicitly Record High-Level Metrics (Success/Failure)
+            # (EvaluationPipeline records the internal fitness metrics like valid_candidate_rate)
+            m_id = f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}"
+            t_type = task.type.value if hasattr(task.type, "value") else str(task.type)
+            
+            record_metric(
+                self.storage,
+                metric_name="task_success" if success else "task_failure",
+                value=1.0,
+                model_id=m_id,
+                task_id=task_id,
+                task_type=t_type,
+                run_mode="weak_eval",
+                execution_context="weak",
+                candidate_change_id=candidate_change_id,
+                details={"error": str(error)} if not success else {}
+            )
+
+        # 4. Collection Logic
         candidate_metrics = self._gather_metrics(candidate_change_id)
-        baseline_metrics = self._gather_metrics("baseline") # logical baseline
+        # Baseline is normally change_id="baseline" or None depending on how it was recorded
+        baseline_metrics = self._gather_metrics("baseline") 
         
         # 5. Delta Analysis
         deltas = self._calculate_deltas(baseline_metrics, candidate_metrics)
