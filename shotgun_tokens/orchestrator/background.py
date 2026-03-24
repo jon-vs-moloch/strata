@@ -146,9 +146,47 @@ class BackgroundWorker:
                 # Trigger autonomous behavior after ~30 seconds of idle time
                 if idle_ticks >= 30:
                     await self._generate_autonomous_task()
+                    await self._synthesize_model_performance()
                     idle_ticks = 0
             except asyncio.CancelledError:
                 break
+
+    async def _synthesize_model_performance(self):
+        """
+        @summary Periodically summarize model performance intelligence from telemetry to a markdown file.
+        """
+        import os
+        from datetime import datetime
+        storage = self._storage_factory()
+        try:
+            from shotgun_tokens.storage.models import ModelTelemetry
+            from sqlalchemy import func
+            results = (
+                storage.session.query(
+                    ModelTelemetry.model_id,
+                    ModelTelemetry.task_type,
+                    func.avg(ModelTelemetry.score).label("avg_score")
+                )
+                .group_by(ModelTelemetry.model_id, ModelTelemetry.task_type)
+                .all()
+            )
+            
+            if not results:
+                return
+                
+            md = ["# Model Performance Intel", f"*Synthesized on: {datetime.utcnow().isoformat()}*\n"]
+            for r in results:
+                md.append(f"- **{r.model_id}** ({r.task_type}): {r.avg_score:.2f} avg score")
+            
+            os.makedirs(".knowledge", exist_ok=True)
+            with open(".knowledge/model_performance_intel.md", "w") as f:
+                f.write("\n".join(md))
+                
+            logger.info("Synthesized model performance report to .knowledge/model_performance_intel.md")
+        except Exception as e:
+            logger.error(f"Failed to synthesize model performance: {e}")
+        finally:
+            storage.session.close()
     def pause(self):
         self._paused = True
         logger.info("Worker PAUSED")
@@ -172,29 +210,47 @@ class BackgroundWorker:
 
     async def _generate_autonomous_task(self):
         """
-        @summary When idle, the system puts itself through its paces by generating maintainence tasks.
+        @summary When idle, the system aligns itself with the User Spec/Constitution.
         """
         storage = self._storage_factory()
+        import os
         try:
-            logger.info("System is idle. Generating autonomous maintenance task.")
+            logger.info("System is idle. Triggering Constitutional Alignment Task.")
             
-            # Target any recently abandoned tasks to prioritize autonomous self-repair
-            from shotgun_tokens.storage.models import TaskModel, TaskState
-            abandoned_task = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.ABANDONED).order_by(TaskModel.task_id.desc()).first()
-            
-            if abandoned_task:
-                sys_prompt = f"You are an autonomous AI swarm orchestrator. The system is currently idle, but a previous task was abandoned: '{abandoned_task.title}' (Description: {abandoned_task.description[:100]}). Propose exactly ONE task you should research or perform to investigate why this task was abandoned or how to fix the underlying issue. Reply with ONLY a single sentence describing the task."
-            else:
-                sys_prompt = "You are an autonomous AI swarm orchestrator. The system is currently idle. Propose exactly ONE task you should research or maintain in the current codebase (e.g. finding bugs, test gaps, architecture flaws, or performance bottlenecks). Reply with ONLY a single sentence describing the task."
-                
+            # 1. Read the user specifications
+            kb_dir = ".knowledge/specs"
+            global_spec = "None."
+            project_spec = "None."
+            if os.path.exists(os.path.join(kb_dir, "global_spec.md")):
+                with open(os.path.join(kb_dir, "global_spec.md"), "r") as f:
+                    global_spec = f.read()
+            if os.path.exists(os.path.join(kb_dir, "project_spec.md")):
+                with open(os.path.join(kb_dir, "project_spec.md"), "r") as f:
+                    project_spec = f.read()
+
+            # 2. Prompt for Alignment
+            from shotgun_tokens.storage.models import TaskModel, TaskState, TaskType
+            sys_prompt = f"""You are the Alignment Module for the Strata Swarm.
+The system is currently IDLE. You must identify gaps between the user's vision and the current codebase state.
+
+USER GLOBAL PREFERENCES:
+{global_spec}
+
+PROJECT GOALS:
+{project_spec}
+
+TASK: Identify the LARGEST delta between the vision and the current implementation.
+Propose exactly ONE task (maintenance, research, or refinement) to close that gap.
+Reply with ONLY a single sentence describing the task.
+"""
             messages = [{"role": "system", "content": sys_prompt}]
             response = await self._model.chat(messages)
             task_desc = response.get("content", "").strip()
             if not task_desc:
-                task_desc = "Autonomously investigate errors in the orchestrator pipeline."
+                task_desc = "Autonomously align codebase with user specifications."
                 
             task = storage.tasks.create(
-                title=f"Auto-Maintenance: {task_desc[:40]}...",
+                title=f"Alignment: {task_desc[:40]}...",
                 description=task_desc,
                 session_id="default",
                 state=TaskState.PENDING,
@@ -205,7 +261,7 @@ class BackgroundWorker:
             
             storage.messages.create(
                 role="assistant",
-                content=f"🧠 **Idle Policy Activated**\\nI noticed the swarm was idle, so I'm putting myself to work. I've autonomously spawned a background task to investigate:\\n*{task_desc}*",
+                content=f"🧠 **Constitutional Alignment Policy Active**\nI've analyzed the project specs and identified a gap. I've autonomously spawned an alignment task:\n*{task_desc}*",
                 session_id="default"
             )
             storage.commit()

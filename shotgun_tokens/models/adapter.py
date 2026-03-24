@@ -107,3 +107,26 @@ class ModelAdapter:
             return yaml.safe_load(raw_content)
         except Exception:
             return {"error": "Failed to parse YAML"}
+
+    async def discover_available_models(self) -> List[str]:
+        """
+        @summary Dynamic discovery of available models from the provider's /v1/models endpoint.
+        @inputs none (uses internal endpoint)
+        @outputs list of model IDs matching core criteria
+        """
+        async with httpx.AsyncClient() as client:
+            try:
+                # Assuming standard OpenAI-compatible discovery route
+                base = self.endpoint.rsplit("/v1/", 1)[0]
+                resp = await client.get(f"{base}/v1/models", timeout=5.0)
+                resp.raise_for_status()
+                data = resp.json()
+                models = [m.get("id", m.get("name", "unknown")) for m in data.get("data", [])]
+                
+                # Filter criteria: identifying strings for common OSS models
+                valid = ["qwen", "llama", "phi", "mistral", "claude", "gpt", "deepseek"]
+                discovered = [m for m in models if any(v in m.lower() for v in valid)]
+                return discovered if discovered else models # Return all if none match our labels
+            except Exception as e:
+                print(f"Dynamic model discovery failed at {self.endpoint}: {e}")
+                return [self.active_model]

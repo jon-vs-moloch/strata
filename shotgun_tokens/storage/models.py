@@ -226,3 +226,14 @@ class MessageModel(Base):
     associated_task_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+class ModelTelemetry(Base):
+    """
+    @summary Persistent scoreboard of model performance by task type.
+    """
+    __tablename__ = "model_telemetry"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[str] = mapped_column(String)
+    task_type: Mapped[str] = mapped_column(String)
+    score: Mapped[float] = mapped_column(Integer) # 0-100 (using Integer column for common database compatibility in this codebase)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+

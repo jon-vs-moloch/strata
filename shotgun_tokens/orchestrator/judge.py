@@ -39,8 +39,23 @@ class JudgeModule:
         
         # In a real run, this would be a prompt sending the task.success_criteria
         # and all candidate code to the model to get a YAML-based ranking report.
-        
-        return [
+        results = [
             {"candidate_id": c_id, "score": 10.0, "reasoning": "Highest structural integrity."}
             for c_id in candidate_ids
         ]
+
+        # Record telemetry feedback for the models used
+        from shotgun_tokens.storage.models import ModelTelemetry, TaskModel, CandidateModel
+        task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+        for res in results:
+            cand = self.storage.session.query(CandidateModel).filter_by(candidate_id=res["candidate_id"]).first()
+            if cand and task:
+                telemetry = ModelTelemetry(
+                    model_id=cand.model,
+                    task_type=task.type.value,
+                    score=res["score"]
+                )
+                self.storage.session.add(telemetry)
+        
+        self.storage.commit()
+        return results

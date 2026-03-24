@@ -82,16 +82,18 @@ TOOLS = [
             }
         }
     },
+    },
     {
         "type": "function",
         "function": {
-            "name": "check_swarm_status",
-            "description": "Query the database to check the real-time status of all active, pending, or recently completed swarm tasks.",
+            "name": "amend_project_spec",
+            "description": "Permanently update the technical specification or architectural goals for this project. Use this when the user makes a significant pivot or sets new high-level constraints.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task_id": {"type": "string", "description": "Optional specific task ID to lookup. If omitted, returns a summary of all active tasks."}
-                }
+                    "amendment": {"type": "string", "description": "The new specification text or update to append/replace."}
+                },
+                "required": ["amendment"]
             }
         }
     }
@@ -338,6 +340,16 @@ DO NOT output headers like '# Deep Web Research' without calling a tool. If you 
                     else:
                         lines = [f"- {t.title} ({t.task_id}): {t.state.value}" for t in tasks]
                         tool_content = "Current Swarm Status:\n" + "\n".join(lines)
+                    tool_outputs_generated = True
+
+                elif func_name == "amend_project_spec":
+                    amendment = args.get("amendment")
+                    spec_path = ".knowledge/specs/project_spec.md"
+                    from datetime import datetime
+                    os.makedirs(".knowledge/specs", exist_ok=True)
+                    with open(spec_path, "a") as f:
+                        f.write(f"\n- [Update {datetime.utcnow().isoformat()}]: {amendment}")
+                    tool_content = "Project specification successfully amended."
                     tool_outputs_generated = True
                 
                 else:

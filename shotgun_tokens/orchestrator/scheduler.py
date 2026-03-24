@@ -51,6 +51,33 @@ class SchedulerModule:
         
         return None
 
+    def select_best_model(self, task_type: str, fallback_model: str = "qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2") -> str:
+        """
+        @summary Core empirical routing logic. Selects the highest performing model for a given task type.
+        @inputs task_type: e.g. RESEARCH, IMPL, DECOMP
+        @outputs the model_id with the highest historical throughput/score
+        """
+        from shotgun_tokens.storage.models import ModelTelemetry
+        from sqlalchemy import func
+        
+        # Query highest average score for this specific task category
+        best = (
+            self.storage.session.query(
+                ModelTelemetry.model_id, 
+                func.avg(ModelTelemetry.score).label("avg_score")
+            )
+            .filter(ModelTelemetry.task_type == task_type)
+            .group_by(ModelTelemetry.model_id)
+            .order_by(func.avg(ModelTelemetry.score).desc())
+            .first()
+        )
+        
+        if best and best.model_id:
+            print(f"Empirical Router: selected {best.model_id} for {task_type} (score: {best.avg_score:.1f})")
+            return best.model_id
+            
+        return fallback_model
+
     def rebalance_swarm(self):
         """
         @summary Analyze and log the swarm's current throughput and bottlenecking.

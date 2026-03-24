@@ -73,3 +73,30 @@ class StorageManager:
         @inputs none
         """
         self.session.close()
+
+    async def get_resource_summary(self, resource_id: str, raw_content_callback, model_adapter) -> str:
+        """
+        @summary Practical Progressive Disclosure: Returns a summary of a resource by default.
+        @inputs resource_id: key for cache, raw_content_callback: async function to fetch raw data if needed, model_adapter: for summarization
+        @outputs a concise summary + drill-down instructions
+        """
+        cache_key = f"summary_{resource_id}"
+        # If parameter doesn't exist, it returns None as default
+        summary_text = self.parameters.get_parameter(cache_key, default_value=None)
+        
+        if summary_text:
+            return summary_text + f"\n[Note: This is a cached summary. If you require the exact raw data, call the 'fetch_raw_artifact' tool with ID: {resource_id}]"
+
+        # Fetch raw data
+        raw_data = await raw_content_callback()
+        
+        # Summarize using a cheap model (Tier-0)
+        summary_prompt = f"Summarize the following data concisely for a technical agent:\n\n{raw_data[:2000]}"
+        response = await model_adapter.chat([{"role": "user", "content": summary_prompt}])
+        summary_text = response.get("content", "Summary failed.")
+        
+        # Cache and return (or use mutate_parameter if it exists)
+        self.parameters.mutate_parameter(key=cache_key, new_value=summary_text, rationale=f"Auto-generated summary for {resource_id}")
+        self.commit()
+        
+        return summary_text + f"\n[Note: This is a cached summary. If you require the exact raw data, call the 'fetch_raw_artifact' tool with ID: {resource_id}]"

@@ -166,9 +166,18 @@ You are currently focused heavily on: {target_scope.upper()} scope."""
                     filepath = args.get("filepath", "")
                     print(f"  -> Research Agent reading file: {filepath}")
                     full_path = os.path.join(root, filepath)
-                    try:
+                    
+                    async def fetch_raw_content():
                         with open(full_path, "r", encoding="utf-8") as f:
-                            tool_result = f.read()[:2000] # Cap file read to 2k chars
+                            return f.read()
+                    
+                    try:
+                        # Apply Progressive Disclosure Wrapper
+                        tool_result = await self.storage.get_resource_summary(
+                            resource_id=filepath,
+                            raw_content_callback=fetch_raw_content,
+                            model_adapter=self.model
+                        )
                     except Exception as e:
                         tool_result = f"File read failed: {e}"
                         
