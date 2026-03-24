@@ -1,81 +1,224 @@
-import React from 'react';
-import { motion } from 'framer-motion';
-import { GitBranch, Clock, CheckCircle2, PlayCircle } from 'lucide-react';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
 
-const TaskCard = ({ task }) => {
-  const getStatusStyle = (status) => {
-    switch(status) {
-      case 'completed': return { bg: 'rgba(0, 242, 148, 0.1)', color: '#00f294', label: 'Completed' };
-      case 'running': return { bg: 'rgba(0, 217, 255, 0.1)', color: '#00d9ff', label: 'Running' };
-      case 'waiting_dependencies': return { bg: 'rgba(255, 184, 77, 0.1)', color: '#ffb84d', label: 'Blocked' };
-      default: return { bg: 'rgba(148, 153, 173, 0.1)', color: '#9499ad', label: 'Queued' };
-    }
-  };
+const STATUS_MAP = {
+  complete:            { bg: 'rgba(0,242,148,0.1)',   color: '#00f294', label: 'Completed',   progress: '100%' },
+  working:             { bg: 'rgba(0,217,255,0.1)',   color: '#00d9ff', label: 'Working',     progress: '65%'  },
+  blocked:             { bg: 'rgba(255,184,77,0.1)',  color: '#ffb84d', label: 'Blocked',     progress: '30%'  },
+  abandoned:           { bg: 'rgba(255,153,0,0.1)',   color: '#ff9900', label: 'Abandoned',   progress: '100%' },
+  cancelled:           { bg: 'rgba(148,153,173,0.1)', color: '#9499ad', label: 'Cancelled',   progress: '100%' },
+  pushed:              { bg: 'rgba(130,87,229,0.1)',  color: '#8257e5', label: 'Pushed',      progress: '10%'  },
+};
+const DEFAULT_STATUS = { bg: 'rgba(148,153,173,0.1)', color: '#9499ad', label: 'Pending', progress: '0%' };
 
-  const style = getStatusStyle(task.status);
+const OUTCOME_MAP = {
+  succeeded: { color: '#00f294', Icon: CheckCircle2 },
+  failed:    { color: '#ff4d4d', Icon: XCircle },
+  cancelled: { color: '#9499ad', Icon: Clock },
+};
+
+const TYPE_MAP = {
+  research: { color: '#00e5cc', label: 'RESEARCH', Icon: FlaskConical },
+};
+
+const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  if (tasks.length === 0) return null;
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="task-card"
-      style={{
-        background: '#141418',
-        border: '1px solid rgba(255, 255, 255, 0.1)',
-        padding: '24px',
-        borderRadius: '16px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '16px',
-        cursor: 'pointer'
-      }}
-      whileHover={{ scale: 1.01, borderColor: '#8257e5' }}
-    >
-      <div className="task-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span 
-          style={{
-            padding: '4px 10px',
-            borderRadius: '40px',
-            fontSize: '11px',
-            fontWeight: 800,
-            textTransform: 'uppercase',
-            letterSpacing: '0.5px',
-            background: style.bg,
-            color: style.color
-          }}
-        >
-          {style.label}
-        </span>
-        <div style={{ color: '#9499ad', display: 'flex', gap: '8px' }}>
-          <GitBranch size={16} />
-          {task.depth && <span style={{ fontSize: '12px' }}>D{task.depth}</span>}
-        </div>
-      </div>
-
-      <div>
-        <h3 style={{ fontWeight: 600, fontSize: '18px', marginBottom: '4px' }}>{task.title}</h3>
-        <p style={{ fontSize: '14px', color: '#9499ad', lineHeight: '1.4' }}>{task.description}</p>
-      </div>
-
-      <div className="progress-container" style={{ height: '6px', background: '#0a0a0c', borderRadius: '10px', overflow: 'hidden' }}>
-        <motion.div 
-          initial={{ width: 0 }}
-          animate={{ width: task.status === 'completed' ? '100%' : '65%' }}
-          className="progress-bar"
-          style={{ height: '100%', background: 'linear-gradient(90deg, #8257e5, #00d9ff)', borderRadius: '10px' }}
-        />
-      </div>
-
-      <div style={{ display: 'flex', gap: '16px', color: '#9499ad', fontSize: '12px', fontFamily: "'JetBrains Mono', monospace" }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Clock size={14} /> 2m ago
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <PlayCircle size={14} /> 4 candidates
-        </div>
-      </div>
-    </motion.div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+      <button 
+        onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+        style={{
+          background: 'rgba(255,255,255,0.03)', border: 'none', display: 'flex', alignItems: 'center', gap: '8px',
+          color: '#666', fontSize: '10px', fontWeight: 800, textTransform: 'uppercase',
+          letterSpacing: '0.1em', cursor: 'pointer', padding: '6px 12px', borderRadius: '6px',
+          width: 'fit-content', marginLeft: '12px'
+        }}
+      >
+        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        {title} · {tasks.length}
+      </button>
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
+          >
+            {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} />)}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 };
+
+const TaskCard = ({ task, onArchive, isNested = false }) => {
+  const [isExpanded, setIsExpanded] = useState(!isNested); // Main task expanded by default, nested collapsed
+  const style = STATUS_MAP[task.status] ?? DEFAULT_STATUS;
+  const typeInfo = task.type ? TYPE_MAP[task.type] : null;
+  const accentColor = typeInfo ? typeInfo.color : style.color;
+
+  const children = task.children || [];
+  const pastTasks = children.filter(c => ['complete', 'abandoned', 'cancelled'].includes(c.status));
+  const presentTasks = children.filter(c => ['working', 'blocked', 'pushed'].includes(c.status));
+  const futureTasks = children.filter(c => ['pending'].includes(c.status));
+  
+  const hasChildren = children.length > 0 || (task.attempts && task.attempts.length > 0);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <motion.div
+        layout
+        initial={{ opacity: 0, y: 10, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="task-card"
+        onClick={() => setIsExpanded(!isExpanded)}
+        style={{
+          background: isNested ? '#1a1a20' : '#141418',
+          border: '1px solid rgba(255,255,255,0.07)',
+          padding: '16px',
+          borderRadius: '12px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          cursor: 'pointer',
+          position: 'relative',
+          overflow: 'hidden',
+          marginLeft: isNested ? '12px' : '0',
+          borderLeft: isNested ? `2px solid ${accentColor}44` : '1px solid rgba(255,255,255,0.07)'
+        }}
+        whileHover={{ borderColor: accentColor, boxShadow: `0 0 0 1px ${accentColor}33` }}
+      >
+        {!isNested && <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '1px', background: `linear-gradient(90deg, transparent, ${accentColor}44, transparent)` }} />}
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            {hasChildren && (
+              isExpanded ? <ChevronDown size={14} color="#888" /> : <ChevronRight size={14} color="#888" />
+            )}
+            {typeInfo && (
+              <span style={{
+                padding: '2px 6px', borderRadius: '40px', fontSize: '8px',
+                fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em',
+                background: `${typeInfo.color}18`, color: typeInfo.color,
+                display: 'flex', alignItems: 'center', gap: '3px'
+              }}>
+                <typeInfo.Icon size={8} /> {typeInfo.label}
+              </span>
+            )}
+            <span style={{
+              padding: '2px 8px', borderRadius: '40px', fontSize: '9px',
+              fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em',
+              background: style.bg, color: style.color
+            }}>
+              {style.label}
+            </span>
+          </div>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+             {task.depth > 0 && (
+                <div style={{ color: '#555', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', fontFamily: "'JetBrains Mono', monospace" }}>
+                  <GitBranch size={11} /> D{task.depth}
+                </div>
+             )}
+             {!isNested && onArchive && (
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onArchive(); }}
+                  style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', padding: '2px' }}
+                >
+                  <ArchiveX size={13} />
+                </button>
+             )}
+          </div>
+        </div>
+
+        <div>
+          <h3 style={{ fontWeight: 600, fontSize: '14px', color: '#edeeef', lineHeight: 1.3 }}>{task.title}</h3>
+          {(isExpanded || !isNested) && task.description && (
+            <p style={{ fontSize: '12px', color: '#6b6b7d', marginTop: '6px', lineHeight: '1.4' }}>{task.description}</p>
+          )}
+        </div>
+
+        {!isExpanded && (
+          <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: style.progress, background: accentColor, borderRadius: '10px' }} />
+          </div>
+        )}
+      </motion.div>
+
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '8px', paddingLeft: '12px' }}
+          >
+            {/* Attempts */}
+            {task.attempts && task.attempts.length > 0 && (
+               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>ATTEMPTS</div>
+                {task.attempts.map((attempt, idx) => (
+                  <AttemptRow key={attempt.id} attempt={attempt} index={idx + 1} />
+                ))}
+               </div>
+            )}
+            
+            {/* Grouped Child Tasks */}
+            <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} />
+            <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} />
+            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={false} onArchive={onArchive} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+const AttemptRow = ({ attempt, index }) => {
+  const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
+  return (
+    <div style={{ 
+      background: 'rgba(255,255,255,0.02)', 
+      border: '1px solid rgba(255,255,255,0.05)', 
+      borderRadius: '8px', 
+      padding: '10px 14px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      marginLeft: '12px',
+      borderLeft: `2px solid ${outcome.color}66`
+    }}>
+      <div style={{ fontSize: '10px', fontWeight: 800, color: '#444', fontFamily: "'JetBrains Mono', monospace" }}>
+        A{index}
+      </div>
+      <outcome.Icon size={12} color={outcome.color} />
+      <div style={{ flex: 1 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: '11px', color: '#888', fontWeight: 600, textTransform: 'uppercase' }}>
+            Attempt {attempt.outcome || 'Pending'}
+          </div>
+          <div style={{ fontSize: '9px', color: '#444' }}>
+            {new Date(attempt.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </div>
+        </div>
+        {attempt.reason && (
+          <div style={{ fontSize: '11px', color: '#555', marginTop: '2px' }}>{attempt.reason}</div>
+        )}
+        {attempt.resolution && (
+          <div style={{ fontSize: '9px', color: outcome.color, marginTop: '4px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Resolution: {attempt.resolution.replace(/_/g, ' ')}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 
 export default TaskCard;

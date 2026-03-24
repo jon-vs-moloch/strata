@@ -8,7 +8,7 @@
 """
 
 from typing import List, Optional
-from shotgun_tokens.storage.models import TaskModel, TaskStatus
+from shotgun_tokens.storage.models import TaskModel, TaskState
 
 class SchedulerModule:
     """
@@ -37,7 +37,7 @@ class SchedulerModule:
         # Fetch all tasks that could potentially run
         stmt = (
             self.storage.session.query(TaskModel)
-            .filter(TaskModel.status.in_([TaskStatus.QUEUED, TaskStatus.RUNNING]))
+            .filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
             .order_by(TaskModel.priority.desc(), TaskModel.created_at.asc())
         )
         
@@ -45,8 +45,8 @@ class SchedulerModule:
         
         # Filter out anything waiting on a dependency
         for task in candidates:
-            # Simple check: are all dependencies COMPLETED?
-            if all(dep.status == TaskStatus.COMPLETED for dep in task.dependencies):
+            # Simple check: are all dependencies COMPLETE?
+            if all(dep.state == TaskState.COMPLETE for dep in task.dependencies):
                 return task
         
         return None

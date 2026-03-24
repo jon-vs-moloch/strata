@@ -1,0 +1,49 @@
+
+> shotgun_ui@0.0.0 dev
+> vite --port 5175
+
+
+  VITE v8.0.1  ready in 269 ms
+
+  ➜  Local:   http://localhost:5175/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+6:59:37 PM [vite] (client) hmr update /src/components/TaskCard.jsx
+6:59:45 PM [vite] (client) hmr update /src/App.jsx
+7:10:21 PM [vite] (client) hmr update /src/components/TaskCard.jsx
+7:10:29 PM [vite] (client) hmr update /src/components/TaskCard.jsx
+7:10:38 PM [vite] (client) hmr update /src/App.jsx
+7:10:46 PM [vite] (client) hmr update /src/App.jsx
+7:10:59 PM [vite] (client) hmr update /src/App.jsx
+7:16:51 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:16:51 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:16:52 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:16:54 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:16:57 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:01 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:03 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:06 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:07 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:10 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:13 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:16 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:19 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:33 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:17:35 PM [vite] (client) [console.error] Fetch failed handleError@http://localhost:5175/node_modules/.vite/deps/axios.js:1979:32
+request@http://localhost:5175/node_modules/.vite/deps/axios.js:2518:54
+7:18:16 PM [vite] (client) hmr update /src/components/TaskCard.jsx
+7:18:27 PM [vite] (client) hmr update /src/components/TaskCard.jsx

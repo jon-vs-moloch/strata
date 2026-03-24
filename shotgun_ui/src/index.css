@@ -229,3 +229,75 @@ body {
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg-deep); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* MARKDOWN BODY STYLES */
+.markdown-body {
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+.markdown-body p {
+  margin-bottom: 16px;
+}
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+.markdown-body ul, .markdown-body ol {
+  margin-left: 24px;
+  margin-bottom: 16px;
+  padding-left: 8px;
+}
+.markdown-body ul:last-child, .markdown-body ol:last-child {
+  margin-bottom: 0;
+}
+.markdown-body li {
+  margin-bottom: 8px;
+}
+.markdown-body li p {
+  margin-bottom: 8px;
+}
+.markdown-body strong {
+  font-weight: 700;
+  color: #fff;
+}
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+  margin-top: 24px;
+  margin-bottom: 16px;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: -0.5px;
+}
+.markdown-body h1 {
+  font-size: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.markdown-body h2 {
+  font-size: 18px;
+}
+.markdown-body h3 {
+  font-size: 16px;
+}
+.markdown-body code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.markdown-body pre {
+  background: rgba(0, 0, 0, 0.4);
+  padding: 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}

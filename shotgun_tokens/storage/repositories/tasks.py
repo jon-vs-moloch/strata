@@ -9,7 +9,7 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from shotgun_tokens.storage.models import TaskModel, TaskStatus
+from shotgun_tokens.storage.models import TaskModel, TaskState
 
 class TaskRepository:
     """
@@ -48,13 +48,13 @@ class TaskRepository:
         """
         return self.session.get(TaskModel, task_id)
 
-    def update_status(self, task_id: str, status: TaskStatus):
+    def update_state(self, task_id: str, state: TaskState):
         """
-        @summary Transition a task to a new status.
-        @inputs task_id, status: TaskStatus enum
+        @summary Transition a task to a new state.
+        @inputs task_id, state: TaskState enum
         @outputs none
         @side_effects updates database row
         """
         task = self.get_by_id(task_id)
         if task:
-            task.status = status
+            task.state = state

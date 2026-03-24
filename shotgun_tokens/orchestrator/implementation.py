@@ -32,26 +32,67 @@ class ImplementationModule:
     async def implement_task(self, task_id: str, global_research: Optional[ResearchReport] = None) -> List[str]:
         """
         @summary Execute a coding task with a two-pass research strategy.
-        @inputs task_id: leaf task, global_research: context from the decomposition phase
-        @outputs IDs of the generated implementation candidates
-        @side_effects triggers a LOCAL research pass before code generation
         """
-        print(f"Implementing leaf task: {task_id}...")
+        # Fetch task details from DB
+        from shotgun_tokens.storage.models import TaskModel, CandidateModel
+        task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+        if not task:
+            return []
+            
+        print(f"Implementing leaf task: {task.title}...")
         
-        # 🟢 Double-Research Step: LOCAL Pass
-        # This pass searches the SPECIFIC 'target_files' to get line numbers and detailed syntax.
-        local_research: LocalResearchReport = await self.researcher.conduct_research(
-            task_description=f"Local context for leaf task {task_id}",
-            repo_path=None # In real code, focus on task.target_files
+        # Pass 2: Local Research focused on the Files
+        local_research: ResearchReport = await self.researcher.conduct_research(
+            task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
+            repo_path=task.repo_path
         )
-        print(f"Local research complete. Found file-level constraints: {local_research.key_constraints_discovered}")
 
-        # 🟠 Candidate Generation Pass
-        # Using both global_research (arch) and local_research (syntax)
-        candidate_ids = []
-        # mock loop for N candidates
-        for i in range(2):
-           # code = await self.model.generate_code(...)
-           candidate_ids.append(f"cand-{task_id}-{i}")
-           
-        return candidate_ids
+        system_prompt = f"""You are an Senior Implementation Engineer. 
+        Your goal is to write code that satisfies the following task:
+        
+        TITLE: {task.title}
+        DESCRIPTION: {task.description}
+        
+        GLOBAL ARCHITECTURAL CONTEXT:
+        {global_research.context_gathered if global_research else "None provided."}
+        
+        LOCAL IMPLEMENTATION DETAILS:
+        {local_research.context_gathered}
+        CONSTRAINTS: {local_research.key_constraints_discovered}
+        
+        YOU MUST OUTPUT THE ENTIRE UPDATED FILE CONTENT OR A NEW FILE CONTENT.
+        Output format:
+        ```python (or other language)
+        [CODE HERE]
+        ```
+        """
+        
+        response = await self.model.chat([{"role": "user", "content": system_prompt}])
+        content = response.get("content", "")
+        
+        # Create a candidate record
+        import os
+        from uuid import uuid4
+        candidate_id = str(uuid4())
+        
+        candidate = CandidateModel(
+            candidate_id=candidate_id,
+            task_id=task_id,
+            stage="impl",
+            prompt_version="v1",
+            model=self.model.active_model,
+            artifact_type="python_file",
+            content_path=f"candidates/{candidate_id}.py", # In a real system, use /tmp/ or a worktree
+            summary=f"Implementation for {task.title}",
+            proposed_files=task.constraints.get("target_files", [])
+        )
+        self.storage.session.add(candidate)
+        self.storage.commit()
+        
+        # Write the actual file artifact for future judging
+        os.makedirs("candidates", exist_ok=True)
+        with open(candidate.content_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        return [candidate_id]
+

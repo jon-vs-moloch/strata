@@ -11,6 +11,8 @@ from sqlalchemy.orm import sessionmaker, Session
 from shotgun_tokens.storage.models import Base
 from shotgun_tokens.storage.repositories.tasks import TaskRepository
 from shotgun_tokens.storage.repositories.messages import MessageRepository
+from shotgun_tokens.storage.repositories.parameters import ParameterRepository
+from shotgun_tokens.storage.repositories.attempts import AttemptRepository
 
 class StorageManager:
     """
@@ -28,6 +30,17 @@ class StorageManager:
         @outputs none
         """
         self.engine = create_engine(db_url)
+        
+        # SQLite-specific performance tuning: Enable Write-Ahead Logging (WAL)
+        if db_url.startswith("sqlite"):
+            from sqlalchemy import event
+            @event.listens_for(self.engine, "connect")
+            def set_sqlite_pragma(dbapi_connection, connection_record):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.close()
+
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         Base.metadata.create_all(self.engine)
         self.session: Session = self.SessionLocal()
@@ -35,6 +48,8 @@ class StorageManager:
         # Repositories for domain-specific logic
         self.tasks = TaskRepository(self.session)
         self.messages = MessageRepository(self.session)
+        self.parameters = ParameterRepository(self.session)
+        self.attempts = AttemptRepository(self.session)
         # self.candidates = CandidateRepository(self.session)
         # self.prompts = PromptRepository(self.session)
 

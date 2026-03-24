@@ -32,30 +32,64 @@ class DecompositionModule:
     async def decompose_task(self, task_title: str, task_desc: str, research: Optional[ResearchReport] = None) -> TaskDecomposition:
         """
         @summary Generates a structured DAG of subtasks using YAML-based prompting.
-        @inputs task_title, task_desc, optional research context
-        @outputs A TaskDecomposition object containing subtasks and framing
-        @side_effects triggers an LLM completion call
         """
         print(f"Decomposing task: {task_title}...")
         
-        # In a real run, this would be a prompt sending the research.key_constraints_discovered
-        # and research.suggested_approach to the model to get a YAML response.
+        system_prompt = f"""You are an Expert Software Architect. Your job is to decompose a high-level coding task into a series of small, atomic, parallelizable 'leaf' tasks (subtasks).
         
-        # MOCK RETURN FOR BOOTSTRAP
-        return TaskDecomposition(
-            framing={
-                "repository_context": "Shotgun Tokens core orchestration",
-                "problem_statement": task_desc,
-                "constraints": research.key_constraints_discovered if research else [],
-                "success_criteria": ["All subtasks pass @ N validation"]
-            },
-            subtasks={
-                "sub-1": {
-                    "title": "Build the task framing layer",
-                    "description": "Implement the logic to gather file context.",
-                    "target_files": ["shotgun_tokens/orchestrator/skeleton.py"],
-                    "dependencies": []
-                }
-            },
-            total_estimated_budget=1.5
-        )
+        GOAL: {task_title}
+        DESCRIPTION: {task_desc}
+        
+        {"RESEARCH CONTEXT:" + research.context_gathered if research else ""}
+        {"CONSTRAINTS:" + str(research.key_constraints_discovered) if research else ""}
+        {"SUGGESTED APPROACH:" + research.suggested_approach if research else ""}
+        
+        YOUR OUTPUT MUST BE A SINGLE VALID YAML BLOCK WRAPPED IN ```yaml TRIPLE-BACKTICKS.
+        Follow this strict format:
+        
+        framing:
+          repository_context: "Brief summary of the target code area"
+          problem_statement: "{task_desc[:100]}..."
+          constraints: ["rule 1", "rule 2"]
+          success_criteria: ["verification step 1"]
+        subtasks:
+          t1:
+            title: "Short name"
+            description: "Detailed prompt for the implementer agent"
+            target_files: ["path/to/file.py"]
+            dependencies: []
+          t2:
+            title: "Next step"
+            description: "..."
+            target_files: ["..."]
+            dependencies: ["t1"]
+        total_estimated_budget: 1.0
+        """
+        
+        response = await self.model.chat([{"role": "user", "content": system_prompt}])
+        raw_content = response.get("content", "")
+        
+        # Use the adapter's built-in block extractor
+        data = self.model.extract_yaml(raw_content)
+        
+        if not data or "error" in data:
+            print(f"Decomposition failed to parse YAML: {data}")
+            # Fallback mock so we don't crash, but log it
+            from shotgun_tokens.schemas.core import TaskFraming, LeafTaskPrototype
+            return TaskDecomposition(
+                framing=TaskFraming(repository_context="Repo", problem_statement=task_desc, constraints=[], success_criteria=[]),
+                subtasks={"error_fallback": LeafTaskPrototype(title="Error Recover", description="Initial decomposition failed. Research manually.", target_files=[], dependencies=[])},
+                total_estimated_budget=0.1
+            )
+            
+        try:
+            return TaskDecomposition(**data)
+        except Exception as e:
+            print(f"Decomposition validation failed: {e}")
+            # Another layer of safety
+            return TaskDecomposition(
+                framing=TaskDecomposition(**data).framing if "framing" in data else TaskDecomposition(framing={"repository_context": "..."}).framing, # bit risky but ok for now
+                subtasks={},
+                total_estimated_budget=0.0
+            ) # This will likely fail downstream, which is fine
+

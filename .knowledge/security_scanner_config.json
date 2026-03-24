@@ -1,0 +1,51 @@
+{
+  "description": "Configuration for security scanner that checks .env, config files, Dockerfiles for vulnerabilities",
+  "version": "1.0.0",
+  "checks": {
+    ".env" : [
+      { "pattern": "^PASSWORD\s*=\s*[A-Za-z0-9!@#$%^&*()_\\+={}|}:;?,./<>()~]", "severity": "HIGH", "issue": "Unencrypted password stored in plaintext" },
+      { "pattern": "^API_KEY\s*=\s*[A-Za-z0-9._~-]+",
+        "severity": "HIGH", "issue": "Plaintext API key exposed" },
+      { "pattern": "^SECRET\s*=\s*[A-Za-z0-9!@#$%^&*()_\\+={}|}:;?,./<>()~]", "severity": "CRITICAL", "issue": "Secret material in plaintext" },
+      { "pattern": "^DB_PASSWORD|\$PASSWORD\\d+\s*=",
+        "severity": "HIGH", "issue": "Database password exposed" },
+      { "pattern": "^AWS_ACCESS_KEY_ID\s*=\s*[A-Za-z0-9/+=]", "severity": "CRITICAL", "issue": "AWS credentials leaked" },
+      { "pattern": "^GOOGLE_API_KEY\s*=\s*[A-Za-z0-9_-]+",
+        "severity": "HIGH", "issue": "Google API key exposed" },
+      { "pattern": "^GITHUB_TOKEN\s*=\s*[A-Za-z0-9_+-]", "severity": "CRITICAL", "issue": "GitHub token leaked" }
+    ],
+    ".env.*": [
+      { "pattern": "^DEBUG\s*=\s*true",
+        "severity": "MEDIUM", "issue": "Debug mode enabled in production-like config" },
+      { "pattern": "^NODE_ENV\s*=\s*(development|test|staging)", "severity": "MEDIUM", "issue": "Development environment variable set" }
+    ],
+    ".config.json": [
+      { "pattern": "\\"password\\":\\s*{\\"type\\":\\s*\\"secret\\"}", "severity": "CRITICAL", "issue": "Plaintext password in JSON config" },
+      { "pattern": "\\"api_key\\":\\s*[A-Za-z0-9._~-]+",
+        "severity": "HIGH", "issue": "API key exposed in plaintext" }
+    ],
+    ".config.yaml": [
+      { "pattern": "password:\\s*.{1,}[^\\\"]+"", "severity": "CRITICAL", "issue": "Plaintext password in YAML config" },
+      { "pattern": "api_key:\\s*[A-Za-z0-9._~-]+",
+        "severity": "HIGH", "issue": "API key exposed in plaintext" }
+    ],
+    "Dockerfile*": [
+      { "pattern": "ADD.*\.tar\.gz|ADD.*zip", "severity": "MEDIUM", "issue": "Tarball/ZIP files may contain arbitrary code" },
+      { "pattern": "COPY .*\s+\-L",
+        "severity": "MEDIUM", "issue": "Directories copied to container root - potential security risk" },
+      { "pattern": "USER\s+(root|0)", "severity": "HIGH", "issue": "Container running as root user" },
+      { "pattern": "ENV[=:]\\s+PASSWORD|ENV[=:]\\s+SECRET",
+        "severity": "MEDIUM", "issue": "Secret passed via ENV instruction (should use ARG or secrets plugin)"
+    ],
+    ".dockerignore": [
+      { "pattern": "^\.(git|env)", "severity": "LOW", "issue": "Optional: .git and .env should be explicitly ignored" }
+    ]
+  },
+  "output_format": {
+    "enabled": true,
+    "format": "json",
+    "include_file_path": true,
+    "include_line_number": true
+  },
+  "severity_levels": { "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4 }
+}
