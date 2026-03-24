@@ -151,7 +151,7 @@ class BackgroundWorker:
                 await apply_resolution(task, resolution_data, error, storage, self.enqueue)
                 
                 # --- RECORD METRICS ---
-                from strata.storage.models import MetricModel
+                from strata.storage.models import MetricModel, CandidateModel
                 metric = MetricModel(
                     metric_name="task_failure",
                     value=1.0,
@@ -160,6 +160,37 @@ class BackgroundWorker:
                     details={"error": str(error), "resolution": resolution_data.resolution, "task_id": task_id}
                 )
                 storage.session.add(metric)
+                
+                # Record valid candidate rate if applicable
+                candidates = storage.session.query(CandidateModel).filter_by(task_id=task_id).all()
+                if candidates:
+                    from strata.orchestrator.evaluation import EvaluationPipeline
+                    evaluator = EvaluationPipeline(storage)
+                    valid_count = 0
+                    for c in candidates:
+                        sc = await evaluator.evaluate_candidate(task, c)
+                        if sc.valid:
+                            valid_count += 1
+                    
+                    storage.session.add(MetricModel(
+                        metric_name="valid_candidate_rate",
+                        value=valid_count / len(candidates),
+                        model_id=self._model.active_model,
+                        task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
+                        details={"task_id": task_id, "total": len(candidates), "valid": valid_count}
+                    ))
+                
+                storage.commit()
+            else:
+                # --- SUCCESS METRICS ---
+                from strata.storage.models import MetricModel
+                storage.session.add(MetricModel(
+                    metric_name="task_success",
+                    value=1.0,
+                    model_id=self._model.active_model,
+                    task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
+                    details={"task_id": task_id}
+                ))
                 storage.commit()
             
             # --- REVIEW ---
