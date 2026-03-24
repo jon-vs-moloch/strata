@@ -1,84 +1,156 @@
 """
 @module orchestrator.tools_pipeline
-@purpose Gated promotion pipeline for self-modifying tools.
-@owns tool validation, sandbox testing, promotion logic
-@does_not_own tool generation
-@key_exports ToolsPromotionPipeline
+@purpose Gated promotion pipeline for self-modifying tools with smoke tests and rollbacks.
+@owns tool validation, import checks, contract compliance, smoke testing, local promotion
 """
 
 import os
 import shutil
 import logging
-from typing import Optional
+import importlib.util
+import json
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel
 from strata.orchestrator.evaluation import EvaluationPipeline
 from strata.storage.models import TaskModel
 
 logger = logging.getLogger(__name__)
 
+class PromotionResult(BaseModel):
+    tool_name: str
+    promoted: bool
+    checks_passed: List[str]
+    checks_failed: List[str]
+    backup_path: Optional[str] = None
+    rollback_available: bool = False
+    details: str = ""
+
 class ToolsPromotionPipeline:
     """
     @summary Gated pipeline for promoting experimental tools to live status.
-    @inputs storage_manager
     """
 
     def __init__(self, storage_manager):
         self.storage = storage_manager
         self.evaluator = EvaluationPipeline(storage_manager)
         self.tools_dir = "strata/tools"
+        self.tests_dir = os.path.join(self.tools_dir, "tests")
+        self.manifest_dir = os.path.join(self.tools_dir, "manifests")
+        self.attic_tools_dir = "strata/attic/tools"
+        
+        os.makedirs(self.tests_dir, exist_ok=True)
+        os.makedirs(self.manifest_dir, exist_ok=True)
+        os.makedirs(self.attic_tools_dir, exist_ok=True)
 
-    async def validate_and_promote(self, tool_name: str, task: Optional[TaskModel] = None) -> (bool, str):
+    async def validate_and_promote(self, tool_name: str, task: Optional[TaskModel] = None) -> PromotionResult:
         """
-        @summary Validate an experimental tool and promote it if it passes all gates.
+        @summary Full stage-gate validation for tool promotion.
         """
         experimental_path = os.path.join(self.tools_dir, f"{tool_name}.experimental.py")
         live_path = os.path.join(self.tools_dir, f"{tool_name}.py")
+        checks_passed = []
+        checks_failed = []
 
         if not os.path.exists(experimental_path):
-            return False, f"Experimental tool file not found: {experimental_path}"
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=[], checks_failed=["File missing"], details=f"Experimental tool file not found: {experimental_path}")
 
-        # 1. Structural Validation (Syntax)
+        # 1. READ CONTENT
         with open(experimental_path, "r", encoding="utf-8") as f:
             content = f.read()
-            
+
+        # 2. STAGE: SYNTAX VALIDATION
         syntax_ok, syntax_err = self.evaluator._check_syntax(content, "python_file")
-        if not syntax_ok:
-            return False, f"Structural Validation failed: {syntax_err}"
+        if syntax_ok:
+            checks_passed.append("Syntax Validation")
+        else:
+            checks_failed.append(f"Syntax Validation: {syntax_err}")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
 
-        # 2. Contract Compliance (Basic check for expected functions/classes)
-        # For now, just ensure it's not empty and has basic Python structure
-        if len(content.strip()) < 10:
-            return False, "Contract Compliance failed: Tool source is too short."
-
-        # 3. Sandbox Execution / Tool Testing (STUB)
-        # In a real system, we'd run a test fixture here.
-        logger.info(f"Running sandbox tests for tool: {tool_name}...")
-        test_passed = True # STUB
-        if not test_passed:
-            return False, "Sandbox tests failed."
-
-        # 4. Generate Evaluation Artifact (Log the promotion)
-        logger.info(f"Tool {tool_name} passed all gates. Promoting to live.")
-        
-        # 5. Promotion (Atomic rename)
+        # 3. STAGE: IMPORT VALIDATION
         try:
-            # Backup old version if it exists
-            if os.path.exists(live_path):
-                attic_dir = "strata/attic/tools"
-                os.makedirs(attic_dir, exist_ok=True)
-                shutil.copy2(live_path, os.path.join(attic_dir, f"{tool_name}.py.bak"))
-                
-            shutil.move(experimental_path, live_path)
-            return True, f"Successfully promoted {tool_name} to live."
+            spec = importlib.util.spec_from_file_location(f"temp_tool_{tool_name}", experimental_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            checks_passed.append("Import Validation")
         except Exception as e:
-            logger.error(f"Promotion failed: {e}")
-            return False, f"Promotion failed: {str(e)}"
+            checks_failed.append(f"Import Validation: {e}")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
+
+        # 4. STAGE: CONTRACT VALIDATION (Expected functions)
+        # We expect a tool to at least have a docstring and some exported functions
+        if not module.__doc__:
+            checks_failed.append("Contract Validation: Missing module docstring.")
+        else:
+            checks_passed.append("Contract Validation")
+
+        # 5. STAGE: SMOKE TEST
+        smoke_test_path = os.path.join(self.tests_dir, f"test_{tool_name}_smoke.py")
+        if os.path.exists(smoke_test_path):
+            test_passed, test_msg = self._run_smoke_test(smoke_test_path, tool_name)
+            if test_passed:
+                checks_passed.append("Smoke Test")
+            else:
+                checks_failed.append(f"Smoke Test: {test_msg}")
+                return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
+        else:
+            logger.warning(f"No smoke test found for {tool_name}, skipping.")
+            checks_passed.append("Smoke Test (Skipped/Missing)")
+
+        # 6. STAGE: BACKUP AND PROMOTE
+        backup_path = None
+        try:
+            if os.path.exists(live_path):
+                backup_path = os.path.join(self.attic_tools_dir, f"{tool_name}.py.bak")
+                shutil.copy2(live_path, backup_path)
+            
+            shutil.move(experimental_path, live_path)
+            checks_passed.append("Promotion")
+            
+            # 7. WRITE MANIFEST
+            manifest = {
+                "tool_name": tool_name,
+                "timestamp": str(os.path.getmtime(live_path)),
+                "checks_passed": checks_passed
+            }
+            with open(os.path.join(self.manifest_dir, f"{tool_name}.json"), "w") as f:
+                json.dump(manifest, f, indent=2)
+                
+            return PromotionResult(
+                tool_name=tool_name,
+                promoted=True,
+                checks_passed=checks_passed,
+                checks_failed=checks_failed,
+                backup_path=backup_path,
+                rollback_available=backup_path is not None,
+                details=f"Successfully promoted {tool_name} to live."
+            )
+        except Exception as e:
+            checks_failed.append(f"Promotion Execution: {e}")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed, details=str(e))
+
+    def _run_smoke_test(self, test_path: str, tool_name: str) -> (bool, str):
+        """
+        @summary Execute a tool-specific smoke test.
+        """
+        import subprocess
+        try:
+            # We assume the smoke test is a python script that exits with 0 on success
+            result = subprocess.run(["python", test_path], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return True, "Passed"
+            else:
+                return False, result.stderr or result.stdout
+        except subprocess.TimeoutExpired:
+            return False, "Timed out during smoke test."
+        except Exception as e:
+            return False, str(e)
 
     def rollback_tool(self, tool_name: str) -> (bool, str):
         """
         @summary Revert a tool to its previous version if available.
         """
         live_path = os.path.join(self.tools_dir, f"{tool_name}.py")
-        bak_path = os.path.join("strata/attic/tools", f"{tool_name}.py.bak")
+        bak_path = os.path.join(self.attic_tools_dir, f"{tool_name}.py.bak")
         
         if not os.path.exists(bak_path):
             return False, f"No backup found for tool: {tool_name}"

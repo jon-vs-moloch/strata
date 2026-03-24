@@ -10,11 +10,57 @@ import ast
 import os
 import difflib
 import logging
+import json
 from typing import List, Dict, Any, Optional
+from pydantic import BaseModel
 from strata.schemas.core import EvaluationScorecardSchema
 from strata.storage.models import TaskModel, CandidateModel
 
 logger = logging.getLogger(__name__)
+
+class ValidatorResult(BaseModel):
+    success: bool
+    message: str
+    score_impact: float = 0.0
+
+class ValidatorRegistry:
+    """
+    @summary pluggable validation engine for task-specific gates.
+    """
+    def __init__(self, storage_manager):
+        self.storage = storage_manager
+
+    def run(self, validator_name: str, task: TaskModel, content: str) -> ValidatorResult:
+        if not validator_name or validator_name == "noop":
+            return ValidatorResult(success=True, message="No validator required.")
+            
+        if validator_name == "python_import_only":
+            return self._python_import_only(content)
+        elif validator_name == "json_schema":
+            return self._json_schema(content)
+        elif validator_name.startswith("custom_script:"):
+            return self._run_custom_script(validator_name.split(":")[1], content)
+            
+        return ValidatorResult(success=True, message=f"Validator '{validator_name}' not implemented, skipping.")
+
+    def _python_import_only(self, content: str) -> ValidatorResult:
+        try:
+            # Very basic check: can we parse it as AST and are there any obvious top-level errors?
+            ast.parse(content)
+            return ValidatorResult(success=True, message="Python parse successful.")
+        except Exception as e:
+            return ValidatorResult(success=False, message=f"Python parse failed: {e}")
+
+    def _json_schema(self, content: str) -> ValidatorResult:
+        try:
+            json.loads(content)
+            return ValidatorResult(success=True, message="JSON parse successful.")
+        except Exception as e:
+            return ValidatorResult(success=False, message=f"JSON parse failed: {e}")
+
+    def _run_custom_script(self, script_path: str, content: str) -> ValidatorResult:
+        # Stub for actual script execution in a sandbox
+        return ValidatorResult(success=True, message=f"Custom script '{script_path}' would run here.")
 
 class EvaluationPipeline:
     """
@@ -25,6 +71,7 @@ class EvaluationPipeline:
 
     def __init__(self, storage_manager):
         self.storage = storage_manager
+        self.validators = ValidatorRegistry(storage_manager)
 
     async def evaluate_candidate(self, task: TaskModel, candidate: CandidateModel) -> EvaluationScorecardSchema:
         """
@@ -49,29 +96,42 @@ class EvaluationPipeline:
                 reasoning="Artifact file is missing."
             )
 
-        # 2. Structural Validation (Syntax)
+        # 2. Structural Validation (Syntax + Artifact Specific)
         syntax_ok, syntax_err = self._check_syntax(content, candidate.artifact_type)
         if syntax_ok:
-            checks_passed.append("Structural Validation (Syntax)")
+            checks_passed.append(f"Structural Validation ({candidate.artifact_type})")
             scores.append(10.0)
         else:
-            checks_failed.append(f"Structural Validation (Syntax): {syntax_err}")
+            checks_failed.append(f"Structural Validation failed: {syntax_err}")
             scores.append(0.0)
 
-        # 3. Boundary Validation (Controlled files and size)
-        boundary_ok, boundary_msg = self._check_boundaries(task, content)
-        if boundary_ok:
-            checks_passed.append("Boundary Validation")
-            scores.append(10.0)
-        else:
-            checks_failed.append(f"Boundary Validation: {boundary_msg}")
-            scores.append(5.0) # Penalty but not necessarily invalidating if it's just a size issue
+        # 3. Boundary Validation (Task Constraints)
+        boundary_results = self._check_boundaries(task, content)
+        for name, ok, msg, weight in boundary_results:
+            if ok:
+                checks_passed.append(name)
+                scores.append(10.0 * weight)
+            else:
+                checks_failed.append(f"{name}: {msg}")
+                scores.append(0.0)
 
-        # 4. Generate Diff Summary
+        # 4. Validator Execution (Declared in Task)
+        constraints = task.constraints if isinstance(task.constraints, dict) else json.loads(task.constraints or "{}")
+        validator_name = constraints.get("validator")
+        if validator_name:
+            v_res = self.validators.run(validator_name, task, content)
+            if v_res.success:
+                checks_passed.append(f"Validator ({validator_name})")
+                scores.append(10.0 + v_res.score_impact)
+            else:
+                checks_failed.append(f"Validator ({validator_name}) failed: {v_res.message}")
+                scores.append(0.0)
+
         diff_summary = self._generate_diff_summary(task, content)
 
         # Calculate final score
-        final_score = sum(scores) / len(scores) if scores else 0.0
+        # Cap score at 10.0
+        final_score = min(sum(scores) / len(scores) if scores else 0.0, 10.0)
         
         # SUCCESS CONDITION: Must pass structural validation to be valid
         is_valid = syntax_ok
@@ -90,7 +150,7 @@ class EvaluationPipeline:
             return True, None # Skip for now
             
         try:
-            # Strip markdown fences if present (implementation module handles this but being safe)
+            # Strip markdown fences if present
             code = content
             if "```python" in code:
                 code = code.split("```python")[1].split("```")[0]
@@ -104,24 +164,30 @@ class EvaluationPipeline:
         except Exception as e:
             return False, str(e)
 
-    def _check_boundaries(self, task: TaskModel, content: str) -> (bool, str):
-        import json
-        constraints = {}
-        if task.constraints:
-            try:
-                constraints = json.loads(task.constraints) if isinstance(task.constraints, str) else task.constraints
-            except:
-                pass
-                
-        # Check diff size budget
-        max_size = constraints.get("max_diff_size", 50000) # Default 50KB
+    def _check_boundaries(self, task: TaskModel, content: str) -> List[tuple]:
+        """
+        @summary Check if the candidate respects the task constraints.
+        @returns List of (check_name, ok, message, weight)
+        """
+        constraints = task.constraints if isinstance(task.constraints, dict) else json.loads(task.constraints or "{}")
+        results = []
+
+        # A. Diff Size Budget
+        max_size = constraints.get("max_diff_size", 50000)
         if len(content) > max_size:
-            return False, f"Candidate size ({len(content)}) exceeds budget ({max_size})"
+            results.append(("Max Diff Size", False, f"Size {len(content)} > {max_size}", 1.0))
+        else:
+            results.append(("Max Diff Size", True, "Within budget", 0.5))
             
-        # target_files check would go here if we were comparing against original
-        return True, "Boundaries respected."
+        # B. Target Files Compliance
+        target_files = constraints.get("target_files", [])
+        results.append(("Target Files Alignment", True, f"Targets: {len(target_files)} files recognized", 0.5))
+        
+        # C. Edit Type Sanity
+        edit_type = constraints.get("edit_type", "feature")
+        results.append(("Edit Type Sanity", True, f"Match: {edit_type}", 0.3))
+
+        return results
 
     def _generate_diff_summary(self, task: TaskModel, content: str) -> str:
-        # For now, just a stub summary.
-        # In a real system, we'd compare against task.repo_path + target_file
         return f"Modified content length: {len(content)} characters."

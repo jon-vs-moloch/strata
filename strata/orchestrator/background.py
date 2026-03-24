@@ -15,6 +15,7 @@ from strata.orchestrator.worker.telemetry import synthesize_model_performance
 from strata.orchestrator.worker.attempt_runner import run_attempt
 from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
+from strata.orchestrator.worker.routing_policy import select_model_tier, is_canary_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,15 @@ class BackgroundWorker:
 
             # Mark RUNNING
             task.state = TaskState.RUNNING
+            
+            # --- ROUTING ---
+            tier = select_model_tier(task)
+            if tier == "weak" and is_canary_eligible(task):
+                # Canary logic: already weak or forced to weak
+                pass
+            self._model.set_tier(tier)
+            logger.info(f"Routing task {task_id} to {tier} model tier")
+
             storage.commit()
             await self._notify(task_id, task.state.value)
             
@@ -139,6 +149,17 @@ class BackgroundWorker:
                     logger.error(f"Invalid resolution choice: {resolution_data.resolution}")
                 
                 await apply_resolution(task, resolution_data, error, storage, self.enqueue)
+                
+                # --- RECORD METRICS ---
+                from strata.storage.models import MetricModel
+                metric = MetricModel(
+                    metric_name="task_failure",
+                    value=1.0,
+                    model_id=self._model.active_model,
+                    task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
+                    details={"error": str(error), "resolution": resolution_data.resolution, "task_id": task_id}
+                )
+                storage.session.add(metric)
                 storage.commit()
             
             # --- REVIEW ---

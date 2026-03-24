@@ -28,6 +28,17 @@ class ModelAdapter:
         """
         self.endpoint = endpoint
         self.active_model = model
+        self.strong_model = model # Default strong
+        self.weak_model = "phi-3-mini-4k-instruct" # Placeholder weak model
+
+    def set_tier(self, tier: str):
+        """
+        @summary Switch the active model based on a tier ('strong' or 'weak').
+        """
+        if tier == "strong":
+            self.active_model = self.strong_model
+        elif tier == "weak":
+            self.active_model = self.weak_model
 
     async def chat(self, messages: List[Dict[str, str]], format: str = "json", tools: Optional[List[Dict]] = None, response_format: Optional[Dict] = None) -> Dict[str, Any]:
 

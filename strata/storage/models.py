@@ -7,8 +7,8 @@
 @side_effects none
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey, Table, Enum as SQLEnum
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, Enum as SQLEnum, JSON, Float
+from sqlalchemy.orm import relationship, Mapped, mapped_column, DeclarativeBase
 from enum import Enum as PyEnum
 from typing import List, Optional, Dict
 from datetime import datetime
@@ -236,6 +236,18 @@ class ModelTelemetry(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     model_id: Mapped[str] = mapped_column(String)
     task_type: Mapped[str] = mapped_column(String)
-    score: Mapped[float] = mapped_column(Integer) # 0-100 (using Integer column for common database compatibility in this codebase)
+    score: Mapped[float] = mapped_column(Float) # 0-10.0
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+class MetricModel(Base):
+    """
+    @summary Structured measurement record for optimization loops.
+    """
+    __tablename__ = "metrics"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    metric_name: Mapped[str] = mapped_column(String) # e.g. "valid_candidate_rate", "retry_depth"
+    value: Mapped[float] = mapped_column(Float)
+    model_id: Mapped[Optional[str]] = mapped_column(String, nullable=True) # If model-specific
+    task_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True) # Extra info like task_id or specific error

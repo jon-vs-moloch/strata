@@ -7,6 +7,7 @@
 @side_effects none
 """
 
+import os
 from typing import List, Dict, Any
 from strata.schemas.core import TaskFraming
 
@@ -33,31 +34,25 @@ class JudgeModule:
 
     async def judge_candidates(self, task_id: str, candidate_ids: List[str]) -> List[Dict[str, Any]]:
         """
-        @summary Ranks candidates based on a specific task rubric using deterministic checks and optional LLM judgement.
-        @inputs task_id: the parent task, candidate_ids: the generated solutions to compare
-        @outputs list of objects containing candidate_id, score, and reasoning
-        @side_effects reads candidates and updates telemetry
+        @summary Ranks candidates based on scorecards with optional LLM tie-breaking.
         """
-        from strata.storage.models import TaskModel, CandidateModel
-        task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+        from strata.storage.models import TaskModel, CandidateModel, ModelTelemetry
+        task = self.storage.session.get(TaskModel, task_id)
         if not task:
             return []
             
         print(f"Judging {len(candidate_ids)} candidates for task: {task_id}...")
         
-        results = []
+        scored = []
         for c_id in candidate_ids:
-            candidate = self.storage.session.query(CandidateModel).filter_by(candidate_id=c_id).first()
+            candidate = self.storage.session.get(CandidateModel, c_id)
             if not candidate:
                 continue
                 
             # RUN DETERMINISTIC PIPELINE
             scorecard = await self.evaluator.evaluate_candidate(task, candidate)
             
-            # Record scorecard in DB (if CandidateModel support it, for now we just log/return)
-            # Actually, CandidateModel doesn't have a scorecard field, but we can store it in telemetry or a separate record.
-            
-            results.append({
+            scored.append({
                 "candidate_id": c_id,
                 "score": scorecard.score,
                 "valid": scorecard.valid,
@@ -66,18 +61,77 @@ class JudgeModule:
                 "checks_failed": scorecard.checks_failed,
                 "diff_summary": scorecard.diff_summary
             })
+            
+            # Record telemetry feedback
+            telemetry = ModelTelemetry(
+                model_id=candidate.model,
+                task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
+                score=scorecard.score
+            )
+            self.storage.session.add(telemetry)
 
-        # Record telemetry feedback for the models used
-        from strata.storage.models import ModelTelemetry, CandidateModel
-        for res in results:
-            cand = self.storage.session.query(CandidateModel).filter_by(candidate_id=res["candidate_id"]).first()
-            if cand:
-                telemetry = ModelTelemetry(
-                    model_id=cand.model,
-                    task_type=task.type.value,
-                    score=res["score"]
-                )
-                self.storage.session.add(telemetry)
-        
+        # 1. Separate valid from invalid
+        valid = [x for x in scored if x["valid"]]
+        invalid = [x for x in scored if not x["valid"]]
+
+        # 2. Sort valid candidates by score
+        valid.sort(key=lambda x: float(x["score"]), reverse=True)
+
+        # 3. LLM Tie-breaker if scores are close (within 2.0 points)
+        if len(valid) >= 2 and abs(float(valid[0]["score"]) - float(valid[1]["score"])) < 2.0:
+            valid = await self.maybe_llm_tiebreak(task, valid)
+
         self.storage.commit()
-        return results
+        return valid + invalid
+
+    async def maybe_llm_tiebreak(self, task, ranked_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        @summary LLM-based tie-breaker logic for cases with similar deterministic scores.
+        """
+        from strata.storage.models import CandidateModel
+        print("Scores are close. Invoking LLM tie-breaker...")
+        
+        # Take the top N candidates that are close
+        top_candidates = []
+        base_score = ranked_candidates[0]["score"]
+        for c in ranked_candidates:
+            if abs(c["score"] - base_score) < 2.0:
+                top_candidates.append(c)
+            else:
+                break
+        
+        if len(top_candidates) < 2:
+            return ranked_candidates
+            
+        # Build prompt for comparison
+        comparison_data = []
+        for c in top_candidates:
+            cand = self.storage.session.get(CandidateModel, c["candidate_id"])
+            content = ""
+            if cand and os.path.exists(cand.content_path):
+                with open(cand.content_path, "r") as f:
+                    content = f.read()
+            comparison_data.append(f"CANDIDATE: {c['candidate_id']}\nSCORE: {c['score']}\nCHANCE SUMMARY: {c['diff_summary']}\n--- CONTENT START ---\n{content}\n--- CONTENT END ---")
+            
+        system_prompt = f"""You are a High-Confidence Judge. Multiple implementation candidates have similar deterministic scores.
+Compare them and pick the one that is most robust, clean, and exactly follows the task requirements.
+
+TASK: {task.title}
+DESCRIPTION: {task.description}
+
+{chr(10).join(comparison_data)}
+
+Respond with ONLY the candidate_id you prefer.
+"""
+        response = await self.model.chat(messages=[{"role": "user", "content": system_prompt}])
+        preferred_id = response.get("content", "").strip()
+        
+        # Re-sort preferred to the top
+        for i, c in enumerate(ranked_candidates):
+            if c["candidate_id"] == preferred_id:
+                winner = ranked_candidates.pop(i)
+                winner["reasoning"] += " (Preferred by LLM Tie-breaker)"
+                ranked_candidates.insert(0, winner)
+                break
+                
+        return ranked_candidates
