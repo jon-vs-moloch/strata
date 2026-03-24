@@ -47,19 +47,56 @@ class ValidatorRegistry:
 
     def _run_pytest(self, task: TaskModel, content: str) -> ValidatorResult:
         import subprocess
-        # We write the content to a temp file and run pytest on the relevant test file if defined
-        test_file = f"strata/tools/tests/test_candidate_{task.task_id}.py"
-        # In a real system, we'd have a mapping of task to tests.
-        # For now, we'll look for a test file named after the task or use a default.
-        return ValidatorResult(success=True, message="Pytest execution (Simulator): Passed 5/5 tests.", score_impact=2.0)
+        import tempfile
+        
+        # 1. Identify test file to run
+        constraints = task.constraints if isinstance(task.constraints, dict) else json.loads(task.constraints or "{}")
+        test_file = constraints.get("test_file")
+        if not test_file:
+            # Fallback: look for test_<filename>.py in same dir or tests/
+            targets = constraints.get("target_files", [])
+            if targets:
+                base = os.path.basename(targets[0])
+                test_file = f"tests/test_{base}"
+                if not os.path.exists(test_file):
+                    test_file = os.path.join(os.path.dirname(targets[0]), f"test_{base}")
+            
+        if not test_file or not os.path.exists(test_file):
+             return ValidatorResult(success=False, message="No test file found to run pytest against.")
+
+        # 2. In a real sandbox, we would swap the files. 
+        # For this 'teeth' implementation, we'll run pytest and expect it to fail if the code is invalid.
+        # This is still a bit of a 'soft' gate without a real overlay filesystem, but much better than a stub.
+        try:
+            result = subprocess.run(["pytest", test_file], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                return ValidatorResult(success=True, message=f"Pytest passed: {result.stdout.splitlines()[-1]}", score_impact=2.0)
+            else:
+                return ValidatorResult(success=False, message=f"Pytest failed: {result.stderr or result.stdout}")
+        except Exception as e:
+            return ValidatorResult(success=False, message=f"Pytest execution error: {str(e)}")
 
     def _python_import_only(self, content: str) -> ValidatorResult:
         try:
-            # Very basic check: can we parse it as AST and are there any obvious top-level errors?
-            ast.parse(content)
-            return ValidatorResult(success=True, message="Python parse successful.")
+            # Strip markdown fences if present
+            code = content
+            if "```python" in code:
+                code = code.split("```python")[1].split("```")[0]
+            
+            # Syntax check first
+            ast.parse(code)
+            
+            # Import check: we can't easily 'import' arbitrary code safely without a sandbox
+            # but we can check if it has all the imports it needs or doesn't have banned imports
+            import re
+            banned = ["os.system", "subprocess.Popen", "eval", "exec"]
+            for b in banned:
+                if b in code:
+                    return ValidatorResult(success=False, message=f"Banned functionality detected: {b}")
+                    
+            return ValidatorResult(success=True, message="Python structural check passed (No banned opcodes).")
         except Exception as e:
-            return ValidatorResult(success=False, message=f"Python parse failed: {e}")
+            return ValidatorResult(success=False, message=f"Python check failed: {e}")
 
     def _json_schema(self, content: str) -> ValidatorResult:
         try:
@@ -69,8 +106,19 @@ class ValidatorRegistry:
             return ValidatorResult(success=False, message=f"JSON parse failed: {e}")
 
     def _run_custom_script(self, script_path: str, content: str) -> ValidatorResult:
-        # Stub for actual script execution in a sandbox
-        return ValidatorResult(success=True, message=f"Custom script '{script_path}' would run here.")
+        import subprocess
+        if not os.path.exists(script_path):
+            return ValidatorResult(success=False, message=f"Custom validation script {script_path} not found.")
+            
+        try:
+            # Pass content via stdin or temp file
+            result = subprocess.run([script_path], input=content, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return ValidatorResult(success=True, message=f"Custom script passed: {result.stdout.strip()}")
+            else:
+                return ValidatorResult(success=False, message=f"Custom script failed: {result.stderr.strip()}")
+        except Exception as e:
+            return ValidatorResult(success=False, message=f"Custom script error: {str(e)}")
 
 class EvaluationPipeline:
     """
@@ -191,7 +239,16 @@ class EvaluationPipeline:
             
         # B. Target Files Compliance
         target_files = constraints.get("target_files", [])
-        results.append(("Target Files Alignment", True, f"Targets: {len(target_files)} files recognized", 0.5))
+        if not target_files:
+            results.append(("Target Files Alignment", True, "No targets defined", 0.0))
+        else:
+            # Verify that these files actually exist in the repo (except for creation tasks)
+            edit_type = constraints.get("edit_type", "edit")
+            missing = [f for f in target_files if not os.path.exists(f)]
+            if missing and edit_type != "create":
+                results.append(("Target Files Alignment", False, f"Missing target files: {missing}", 1.0))
+            else:
+                results.append(("Target Files Alignment", True, "Targets verified", 0.5))
         
         # C. Edit Type Sanity
         edit_type = constraints.get("edit_type", "feature")
