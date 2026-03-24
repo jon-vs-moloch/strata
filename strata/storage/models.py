@@ -250,4 +250,10 @@ class MetricModel(Base):
     value: Mapped[float] = mapped_column(Float)
     model_id: Mapped[Optional[str]] = mapped_column(String, nullable=True) # If model-specific
     task_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # New Experiment Attribution Fields
+    run_mode: Mapped[Optional[str]] = mapped_column(String, nullable=True) # normal, weak_eval, strong_supervisor
+    execution_context: Mapped[Optional[str]] = mapped_column(String, nullable=True) # strong/weak
+    candidate_change_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
     details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True) # Extra info like task_id or specific error

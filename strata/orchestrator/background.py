@@ -34,6 +34,7 @@ class BackgroundWorker:
         self._running = False
         self._paused = False
         self._current_process: Optional[asyncio.Task] = None
+        self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
 
     async def start(self):
         if self._running:
@@ -114,16 +115,21 @@ class BackgroundWorker:
             if not task or task.state in [TaskState.COMPLETE, TaskState.CANCELLED]:
                 return
 
-            # Mark RUNNING
-            task.state = TaskState.RUNNING
-            
             # --- ROUTING ---
-            tier = select_model_tier(task)
-            if tier == "weak" and is_canary_eligible(task):
-                # Canary logic: already weak or forced to weak
-                pass
-            self._model.set_tier(tier)
-            logger.info(f"Routing task {task_id} to {tier} model tier")
+            from strata.orchestrator.worker.routing_policy import select_model_tier
+            context = select_model_tier(task)
+            
+            # Application of experimental override if active
+            if self._active_experiment_id:
+                from strata.schemas.execution import WeakExecutionContext
+                context = WeakExecutionContext(
+                    run_id=f"exp_{task_id}",
+                    candidate_change_id=self._active_experiment_id,
+                    evaluation_run=True
+                )
+            
+            self._model.bind_execution_context(context)
+            logger.info(f"Routing task {task_id} to {context.mode} execution context [Exp: {self._active_experiment_id}]")
 
             storage.commit()
             await self._notify(task_id, task.state.value)
@@ -133,6 +139,13 @@ class BackgroundWorker:
                 task, storage, self._model, self._notify, self.enqueue
             )
             
+            # Determine execution context details for metrics
+            run_mode = getattr(context, "run_mode", "normal") if hasattr(context, "run_mode") else "normal"
+            if getattr(context, "evaluation_run", False):
+                run_mode = "weak_eval"
+            ctx_mode = context.mode
+            change_id = getattr(context, "candidate_change_id", None)
+
             if not success:
                 # --- RESOLUTION ---
                 resolution_data = await determine_resolution(task, error, self._model, storage)
@@ -151,46 +164,60 @@ class BackgroundWorker:
                 await apply_resolution(task, resolution_data, error, storage, self.enqueue)
                 
                 # --- RECORD METRICS ---
-                from strata.storage.models import MetricModel, CandidateModel
-                metric = MetricModel(
+                from strata.orchestrator.worker.telemetry import record_metric
+                record_metric(
+                    storage,
                     metric_name="task_failure",
                     value=1.0,
-                    model_id=self._model.active_model,
+                    model_id=f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
                     task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
-                    details={"error": str(error), "resolution": resolution_data.resolution, "task_id": task_id}
+                    task_id=task_id,
+                    run_mode=run_mode,
+                    execution_context=ctx_mode,
+                    candidate_change_id=change_id,
+                    details={"error": str(error), "resolution": resolution_data.resolution}
                 )
-                storage.session.add(metric)
                 
                 # Record valid candidate rate if applicable
+                from strata.storage.models import CandidateModel
                 candidates = storage.session.query(CandidateModel).filter_by(task_id=task_id).all()
                 if candidates:
                     from strata.orchestrator.evaluation import EvaluationPipeline
-                    evaluator = EvaluationPipeline(storage)
+                    evaluator = EvaluationPipeline(storage, context=context)
                     valid_count = 0
                     for c in candidates:
                         sc = await evaluator.evaluate_candidate(task, c)
                         if sc.valid:
                             valid_count += 1
                     
-                    storage.session.add(MetricModel(
+                    record_metric(
+                        storage,
                         metric_name="valid_candidate_rate",
                         value=valid_count / len(candidates),
-                        model_id=self._model.active_model,
+                        model_id=f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
                         task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
-                        details={"task_id": task_id, "total": len(candidates), "valid": valid_count}
-                    ))
+                        task_id=task_id,
+                        run_mode=run_mode,
+                        execution_context=ctx_mode,
+                        candidate_change_id=change_id,
+                        details={"total": len(candidates), "valid": valid_count}
+                    )
                 
                 storage.commit()
             else:
                 # --- SUCCESS METRICS ---
-                from strata.storage.models import MetricModel
-                storage.session.add(MetricModel(
+                from strata.orchestrator.worker.telemetry import record_metric
+                record_metric(
+                    storage,
                     metric_name="task_success",
                     value=1.0,
-                    model_id=self._model.active_model,
+                    model_id=f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
                     task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
-                    details={"task_id": task_id}
-                ))
+                    task_id=task_id,
+                    run_mode=run_mode,
+                    execution_context=ctx_mode,
+                    candidate_change_id=change_id
+                )
                 storage.commit()
             
             # --- REVIEW ---

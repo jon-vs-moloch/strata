@@ -18,7 +18,10 @@ def record_metric(
     model_id: str | None = None,
     task_type: str | None = None,
     task_id: str | None = None,
-    details: dict | None = None
+    details: dict | None = None,
+    run_mode: str | None = None, # New
+    execution_context: str | None = None, # New
+    candidate_change_id: str | None = None # New
 ):
     """
     @summary Persist a structured architectural fitness signal.
@@ -29,6 +32,9 @@ def record_metric(
             value=value,
             model_id=model_id,
             task_type=task_type,
+            run_mode=run_mode,
+            execution_context=execution_context,
+            candidate_change_id=candidate_change_id,
             details=details or {}
         )
         if task_id:

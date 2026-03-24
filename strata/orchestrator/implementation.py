@@ -224,7 +224,7 @@ class ImplementationModule:
             task_id=task_id,
             stage="impl",
             prompt_version="v1",
-            model=self.model.active_model,
+            model=f"{response.get('provider')}/{response.get('model')}",
             artifact_type="python_file",
             content_path=f"strata/experimental/candidates/{candidate_id}.py",
             summary=f"Implementation for {task.title}",

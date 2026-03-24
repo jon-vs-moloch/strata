@@ -33,6 +33,12 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
 
         # If we got here without exception, it succeeded
         storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
+        
+        # Populate operational artifacts for the attempt
+        if hasattr(model_adapter, 'last_response') and model_adapter.last_response:
+            attempt.artifacts["model"] = model_adapter.last_response.model
+            attempt.artifacts["provider"] = model_adapter.last_response.provider
+            
         task.state = TaskState.COMPLETED
         storage.commit()
         await notify_fn(task.task_id, task.state.value)

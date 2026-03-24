@@ -159,9 +159,10 @@ class EvaluationPipeline:
     @outputs EvaluationScorecardSchema
     """
 
-    def __init__(self, storage_manager):
+    def __init__(self, storage_manager, context: Optional[Any] = None):
         self.storage = storage_manager
         self.validators = ValidatorRegistry(storage_manager)
+        self.context = context
 
     async def evaluate_candidate(self, task: TaskModel, candidate: CandidateModel) -> EvaluationScorecardSchema:
         """
@@ -170,6 +171,18 @@ class EvaluationPipeline:
         checks_passed = []
         checks_failed = []
         scores = []
+        
+        # Determine execution context details for metrics
+        run_mode = "normal"
+        ctx_mode = "strong"
+        change_id = None
+        if self.context:
+            run_mode = getattr(self.context, "run_mode", "normal") if hasattr(self.context, "run_mode") else "normal"
+            # If our context doesn't have run_mode, maybe it has evaluation_run flag
+            if getattr(self.context, "evaluation_run", False):
+                run_mode = "weak_eval"
+            ctx_mode = getattr(self.context, "mode", "strong")
+            change_id = getattr(self.context, "candidate_change_id", None)
         
         # 1. Read candidate content
         content = ""
@@ -240,7 +253,11 @@ class EvaluationPipeline:
             "candidate_validity", 
             1.0 if is_valid else 0.0, 
             task_type=t_type, 
-            task_id=task.task_id
+            task_id=task.task_id,
+            model_id=candidate.model,
+            run_mode=run_mode,
+            execution_context=ctx_mode,
+            candidate_change_id=change_id
         )
         if validator_name and validator_name != "noop":
             record_metric(
@@ -249,6 +266,10 @@ class EvaluationPipeline:
                 1.0 if validator_ok else 0.0, 
                 task_type=t_type, 
                 task_id=task.task_id, 
+                model_id=candidate.model,
+                run_mode=run_mode,
+                execution_context=ctx_mode,
+                candidate_change_id=change_id,
                 details={"validator": validator_name}
             )
         

@@ -1,20 +1,19 @@
-"""
-@module orchestrator.worker.routing_policy
-@purpose Explicit routing of tasks to strong or weak models based on risk and scope.
-"""
-
-from typing import Literal
+from typing import Literal, Union
 from strata.storage.models import TaskModel, TaskType
+from strata.schemas.execution import ExecutionContext, StrongExecutionContext, WeakExecutionContext
 
-ModelTier = Literal["strong", "weak"]
-
-def select_model_tier(task: TaskModel) -> ModelTier:
+def select_model_tier(task: TaskModel) -> ExecutionContext:
     """
-    @summary routing logic for strong->weak handoff.
+    @summary routing logic for resolving the appropriate execution context.
     """
+    run_id = f"run_{task.task_id}"
+    
     # 1. Architectural tasks always go to strong models
-    if task.type in [TaskType.DECOMP, TaskType.RESEARCH] or task.risk == "high":
-        return "strong"
+    is_architectural = (hasattr(task, 'type') and task.type in [TaskType.DECOMP, TaskType.RESEARCH])
+    is_risky = getattr(task, 'risk', 'low') == "high"
+    
+    if is_architectural or is_risky:
+        return StrongExecutionContext(run_id=run_id)
         
     # 2. Check for well-formed constraints (Target for weak models)
     import json
@@ -24,17 +23,9 @@ def select_model_tier(task: TaskModel) -> ModelTier:
         # If we have target files and a validator, it's a candidate for weak model
         if constraints.get("target_files") and constraints.get("validator"):
               # Canary logic could go here (e.g. 20% to weak model even if risky)
-              return "weak"
+              return WeakExecutionContext(run_id=run_id)
     except:
         pass
         
     # 3. Default to strong for safety
-    return "strong"
-
-def is_canary_eligible(task: TaskModel) -> bool:
-    """
-    @summary Determine if a task is eligible for canary routing to a weak model.
-    """
-    import random
-    # Implementation of 20% canary for testing new harness components
-    return random.random() < 0.2
+    return StrongExecutionContext(run_id=run_id)
