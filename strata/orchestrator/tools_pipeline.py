@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel
 from strata.orchestrator.evaluation import EvaluationPipeline
 from strata.storage.models import TaskModel
+from strata.orchestrator.worker.telemetry import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,16 @@ class ToolsPromotionPipeline:
             checks_failed.append(f"Syntax Validation: {syntax_err}")
             return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
 
-        # 3. STAGE: IMPORT VALIDATION
+        # 3. LOAD MANIFEST (MANDATORY)
+        manifest_path = os.path.join(self.manifest_dir, f"{tool_name}.json")
+        if not os.path.exists(manifest_path):
+            checks_failed.append("Promotion Policy: Missing mandatory tool manifest.")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
+            
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+            
+        # 4. STAGE: IMPORT VALIDATION
         try:
             spec = importlib.util.spec_from_file_location(f"temp_tool_{tool_name}", experimental_path)
             module = importlib.util.module_from_spec(spec)
@@ -75,16 +85,23 @@ class ToolsPromotionPipeline:
         except Exception as e:
             checks_failed.append(f"Import Validation: {e}")
             return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
-
-        # 4. STAGE: CONTRACT VALIDATION (Expected functions)
-        # We expect a tool to at least have a docstring and some exported functions
-        if not module.__doc__:
-            checks_failed.append("Contract Validation: Missing module docstring.")
+            
+        # 5. STAGE: CONTRACT & VALIDATOR POLICY
+        validator_name = manifest.get("validator")
+        if not validator_name:
+            checks_failed.append("Promotion Policy: Manifest missing declared validator.")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
+        
+        # Check if validator exists in registry
+        v_res = self.evaluator.validators.run(validator_name, None, content)
+        if v_res.success:
+            checks_passed.append(f"Contract Validation ({validator_name})")
         else:
-            checks_passed.append("Contract Validation")
+            checks_failed.append(f"Contract Validation ({validator_name}) failed: {v_res.message}")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
 
-        # 5. STAGE: SMOKE TEST
-        smoke_test_path = os.path.join(self.tests_dir, f"test_{tool_name}_smoke.py")
+        # 6. STAGE: SMOKE TEST
+        smoke_test_path = manifest.get("smoke_test") or os.path.join(self.tests_dir, f"test_{tool_name}_smoke.py")
         if os.path.exists(smoke_test_path):
             test_passed, test_msg = self._run_smoke_test(smoke_test_path, tool_name)
             if test_passed:
@@ -93,7 +110,7 @@ class ToolsPromotionPipeline:
                 checks_failed.append(f"Smoke Test: {test_msg}")
                 return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
         else:
-            checks_failed.append("Smoke Test: Missing required smoke test fixture.")
+            checks_failed.append(f"Smoke Test: Missing required smoke test fixture at {smoke_test_path}.")
             return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
 
         # 6. STAGE: BACKUP AND PROMOTE
@@ -106,15 +123,13 @@ class ToolsPromotionPipeline:
             shutil.move(experimental_path, live_path)
             checks_passed.append("Promotion")
             
-            # 7. WRITE MANIFEST
-            manifest = {
-                "tool_name": tool_name,
-                "timestamp": str(os.path.getmtime(live_path)),
-                "checks_passed": checks_passed
-            }
+            # 8. UPDATE MANIFEST
+            manifest["timestamp"] = str(os.path.getmtime(live_path))
+            manifest["checks_passed"] = checks_passed
             with open(os.path.join(self.manifest_dir, f"{tool_name}.json"), "w") as f:
                 json.dump(manifest, f, indent=2)
                 
+            record_metric(self.storage, "tool_promotion_success", 1.0, details={"tool_name": tool_name})
             return PromotionResult(
                 tool_name=tool_name,
                 promoted=True,
@@ -125,6 +140,7 @@ class ToolsPromotionPipeline:
                 details=f"Successfully promoted {tool_name} to live."
             )
         except Exception as e:
+            record_metric(self.storage, "tool_promotion_success", 0.0, details={"tool_name": tool_name, "error": str(e)})
             checks_failed.append(f"Promotion Execution: {e}")
             return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed, details=str(e))
 

@@ -10,6 +10,7 @@
 import os
 from typing import List, Dict, Any
 from strata.schemas.core import TaskFraming
+from strata.orchestrator.worker.telemetry import record_metric
 
 class JudgeModule:
     """
@@ -79,7 +80,10 @@ class JudgeModule:
 
         # 3. LLM Tie-breaker if scores are close (within 2.0 points)
         if len(valid) >= 2 and abs(float(valid[0]["score"]) - float(valid[1]["score"])) < 2.0:
+            record_metric(self.storage, "tie_break_triggered", 1.0, task_id=task.task_id)
             valid = await self.maybe_llm_tiebreak(task, valid)
+        else:
+            record_metric(self.storage, "tie_break_triggered", 0.0, task_id=task.task_id)
 
         self.storage.commit()
         return valid + invalid

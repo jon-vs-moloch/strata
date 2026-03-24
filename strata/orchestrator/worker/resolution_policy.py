@@ -9,6 +9,7 @@ import asyncio
 from typing import Optional, List
 from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, TaskState, TaskType
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
+from strata.core.policy import requires_validator
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,10 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                     depth=task.depth + 1
                 )
                 sub.type = TaskType.IMPL
+                # Mandatory policy check
+                if requires_validator(sub):
+                    sub.constraints["validator_required"] = True
+                    logger.warning(f"Task {sub.task_id} requires a validator per system policy.")
                 storage.commit()
                 await enqueue_fn(sub.task_id)
             task.state = TaskState.WORKING

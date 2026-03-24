@@ -15,6 +15,8 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from strata.schemas.core import EvaluationScorecardSchema
 from strata.storage.models import TaskModel, CandidateModel
+from strata.core.policy import requires_validator
+from strata.orchestrator.worker.telemetry import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +45,17 @@ class ValidatorRegistry:
         elif validator_name.startswith("custom_script:"):
             return self._run_custom_script(validator_name.split(":")[1], content)
             
-        return ValidatorResult(success=True, message=f"Validator '{validator_name}' not implemented, skipping.")
+        return ValidatorResult(success=False, message=f"Validator '{validator_name}' not implemented.")
 
     def _run_pytest(self, task: TaskModel, content: str) -> ValidatorResult:
         import subprocess
         import tempfile
+        import shutil
         
         # 1. Identify test file to run
         constraints = task.constraints if isinstance(task.constraints, dict) else json.loads(task.constraints or "{}")
         test_file = constraints.get("test_file")
         if not test_file:
-            # Fallback: look for test_<filename>.py in same dir or tests/
             targets = constraints.get("target_files", [])
             if targets:
                 base = os.path.basename(targets[0])
@@ -64,17 +66,47 @@ class ValidatorRegistry:
         if not test_file or not os.path.exists(test_file):
              return ValidatorResult(success=False, message="No test file found to run pytest against.")
 
-        # 2. In a real sandbox, we would swap the files. 
-        # For this 'teeth' implementation, we'll run pytest and expect it to fail if the code is invalid.
-        # This is still a bit of a 'soft' gate without a real overlay filesystem, but much better than a stub.
-        try:
-            result = subprocess.run(["pytest", test_file], capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                return ValidatorResult(success=True, message=f"Pytest passed: {result.stdout.splitlines()[-1]}", score_impact=2.0)
-            else:
-                return ValidatorResult(success=False, message=f"Pytest failed: {result.stderr or result.stdout}")
-        except Exception as e:
-            return ValidatorResult(success=False, message=f"Pytest execution error: {str(e)}")
+        # 2. CREATE ISOLATED WORKSPACE
+        # We use a temporary directory to avoid side effects and ensure we test the candidate
+        with tempfile.TemporaryDirectory() as td:
+            # Copy skeleton (we only need the current project files roughly)
+            # In a real system, we'd use a docker container or a pre-built env.
+            # Here, we'll copy the project excluding large/runtime dirs
+            def ignore_func(path, names):
+                return {".git", "__pycache__", "strata/runtime", "strata/experimental"}
+            
+            # Simple copy tree to the temp dir
+            # Note: shutil.copytree(src, dst) - dst must not exist, which td is empty.
+            # But the 'td' IS the dst. We should copy TO a subdir.
+            sandbox_path = os.path.join(td, "sandbox")
+            shutil.copytree(".", sandbox_path, ignore=ignore_func, dirs_exist_ok=True)
+            
+            # 3. OVERWRITE TARGET WITH CANDIDATE
+            targets = constraints.get("target_files", [])
+            if targets:
+                primary_target = os.path.join(sandbox_path, targets[0])
+                os.makedirs(os.path.dirname(primary_target), exist_ok=True)
+                with open(primary_target, "w", encoding="utf-8") as f:
+                    f.write(content)
+            
+            # 4. RUN PYTEST
+            try:
+                # We run pytest from the sandbox root
+                staged_test = os.path.join(sandbox_path, test_file)
+                result = subprocess.run(
+                    ["pytest", staged_test], 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=30,
+                    cwd=sandbox_path
+                )
+                if result.returncode == 0:
+                    summary = result.stdout.splitlines()[-1] if result.stdout.splitlines() else "Passed"
+                    return ValidatorResult(success=True, message=f"Pytest passed: {summary}", score_impact=2.0)
+                else:
+                    return ValidatorResult(success=False, message=f"Pytest failed in isolation:\n{result.stdout}\n{result.stderr}")
+            except Exception as e:
+                return ValidatorResult(success=False, message=f"Pytest execution error: {str(e)}")
 
     def _python_import_only(self, content: str) -> ValidatorResult:
         try:
@@ -164,7 +196,7 @@ class EvaluationPipeline:
             scores.append(0.0)
 
         # 3. Boundary Validation (Task Constraints)
-        boundary_results = self._check_boundaries(task, content)
+        boundary_results = self._check_boundaries(task, candidate, content)
         for name, ok, msg, weight in boundary_results:
             if ok:
                 checks_passed.append(name)
@@ -186,8 +218,8 @@ class EvaluationPipeline:
                 checks_failed.append(f"Validator ({validator_name}) failed: {v_res.message}")
                 scores.append(0.0)
                 validator_ok = False
-        elif task.type.value == "impl": # Require validator for implementation tasks
-            checks_failed.append("Validator Policy: Declared implementation task missing validator.")
+        elif requires_validator(task): # Mandate policy from core.policy
+            checks_failed.append("Validator Policy: Declared task violates validator requirement.")
             scores.append(0.0)
             validator_ok = False
 
@@ -200,6 +232,25 @@ class EvaluationPipeline:
         # SUCCESS CONDITION: Must pass structural, boundary, AND validator checks
         boundary_ok = all([r[1] for r in boundary_results])
         is_valid = syntax_ok and boundary_ok and validator_ok
+        
+        # Record Fitness Signals
+        t_type = task.type.value if hasattr(task.type, "value") else str(task.type)
+        record_metric(
+            self.storage, 
+            "candidate_validity", 
+            1.0 if is_valid else 0.0, 
+            task_type=t_type, 
+            task_id=task.task_id
+        )
+        if validator_name and validator_name != "noop":
+            record_metric(
+                self.storage, 
+                "validator_pass_rate", 
+                1.0 if validator_ok else 0.0, 
+                task_type=t_type, 
+                task_id=task.task_id, 
+                details={"validator": validator_name}
+            )
         
         return EvaluationScorecardSchema(
             valid=is_valid,
@@ -229,7 +280,7 @@ class EvaluationPipeline:
         except Exception as e:
             return False, str(e)
 
-    def _check_boundaries(self, task: TaskModel, content: str) -> List[tuple]:
+    def _check_boundaries(self, task: TaskModel, candidate: CandidateModel, content: str) -> List[tuple]:
         """
         @summary Check if the candidate respects the task constraints.
         @returns List of (check_name, ok, message, weight)
@@ -244,18 +295,31 @@ class EvaluationPipeline:
         else:
             results.append(("Max Diff Size", True, "Within budget", 0.5))
             
-        # B. Target Files Compliance
+        # B. Target Files Compliance (Confinement)
         target_files = constraints.get("target_files", [])
         if not target_files:
             results.append(("Target Files Alignment", True, "No targets defined", 0.0))
         else:
-            # Verify that these files actually exist in the repo (except for creation tasks)
+            # 1. Verify existence in repo (for non-create tasks)
             edit_type = constraints.get("edit_type", "edit")
             missing = [f for f in target_files if not os.path.exists(f)]
             if missing and edit_type != "create":
                 results.append(("Target Files Alignment", False, f"Missing target files: {missing}", 1.0))
             else:
-                results.append(("Target Files Alignment", True, "Targets verified", 0.5))
+                # 2. Verify confinement: check candidate's intended impact
+                import json
+                proposed = candidate.proposed_files if isinstance(candidate.proposed_files, list) else json.loads(candidate.proposed_files or "[]")
+                
+                # Filter out empty or nulls
+                proposed = [f for f in proposed if f]
+                
+                illegal = [f for f in proposed if f not in target_files]
+                if illegal:
+                    results.append(("Target Files Confinement", False, f"Illegal modifications to: {illegal}", 1.0))
+                elif not proposed:
+                    results.append(("Target Files Confinement", False, "No target files declared in candidate.", 1.0))
+                else:
+                    results.append(("Target Files Confinement", True, f"Confined to: {proposed}", 0.5))
         
         # C. Edit Type Sanity
         edit_type = constraints.get("edit_type", "feature")

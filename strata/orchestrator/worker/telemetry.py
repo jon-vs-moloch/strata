@@ -7,9 +7,37 @@ import os
 import logging
 from datetime import datetime
 from sqlalchemy import func, select
-from strata.storage.models import ModelTelemetry, AttemptModel, AttemptOutcome, TaskModel, TaskType
+from strata.storage.models import ModelTelemetry, AttemptModel, AttemptOutcome, TaskModel, TaskType, MetricModel
 
 logger = logging.getLogger(__name__)
+
+def record_metric(
+    storage,
+    metric_name: str,
+    value: float,
+    model_id: str | None = None,
+    task_type: str | None = None,
+    task_id: str | None = None,
+    details: dict | None = None
+):
+    """
+    @summary Persist a structured architectural fitness signal.
+    """
+    try:
+        metric = MetricModel(
+            metric_name=metric_name,
+            value=value,
+            model_id=model_id,
+            task_type=task_type,
+            details=details or {}
+        )
+        if task_id:
+            metric.details["task_id"] = task_id
+            
+        storage.session.add(metric)
+        storage.commit()
+    except Exception as e:
+        logger.error(f"Failed to record metric {metric_name}: {e}")
 
 async def synthesize_model_performance(storage_factory):
     """
