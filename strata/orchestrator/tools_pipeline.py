@@ -93,8 +93,8 @@ class ToolsPromotionPipeline:
                 checks_failed.append(f"Smoke Test: {test_msg}")
                 return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
         else:
-            logger.warning(f"No smoke test found for {tool_name}, skipping.")
-            checks_passed.append("Smoke Test (Skipped/Missing)")
+            checks_failed.append("Smoke Test: Missing required smoke test fixture.")
+            return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed)
 
         # 6. STAGE: BACKUP AND PROMOTE
         backup_path = None

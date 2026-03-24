@@ -176,7 +176,8 @@ class EvaluationPipeline:
         # 4. Validator Execution (Declared in Task)
         constraints = task.constraints if isinstance(task.constraints, dict) else json.loads(task.constraints or "{}")
         validator_name = constraints.get("validator")
-        if validator_name:
+        validator_ok = True
+        if validator_name and validator_name != "noop":
             v_res = self.validators.run(validator_name, task, content)
             if v_res.success:
                 checks_passed.append(f"Validator ({validator_name})")
@@ -184,6 +185,11 @@ class EvaluationPipeline:
             else:
                 checks_failed.append(f"Validator ({validator_name}) failed: {v_res.message}")
                 scores.append(0.0)
+                validator_ok = False
+        elif task.type.value == "impl": # Require validator for implementation tasks
+            checks_failed.append("Validator Policy: Declared implementation task missing validator.")
+            scores.append(0.0)
+            validator_ok = False
 
         diff_summary = self._generate_diff_summary(task, content)
 
@@ -191,8 +197,9 @@ class EvaluationPipeline:
         # Cap score at 10.0
         final_score = min(sum(scores) / len(scores) if scores else 0.0, 10.0)
         
-        # SUCCESS CONDITION: Must pass structural validation to be valid
-        is_valid = syntax_ok
+        # SUCCESS CONDITION: Must pass structural, boundary, AND validator checks
+        boundary_ok = all([r[1] for r in boundary_results])
+        is_valid = syntax_ok and boundary_ok and validator_ok
         
         return EvaluationScorecardSchema(
             valid=is_valid,
