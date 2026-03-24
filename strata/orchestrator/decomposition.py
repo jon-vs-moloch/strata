@@ -44,33 +44,30 @@ class DecompositionModule:
         {"CONSTRAINTS:" + str(research.key_constraints_discovered) if research else ""}
         {"SUGGESTED APPROACH:" + research.suggested_approach if research else ""}
         
-        YOUR OUTPUT MUST BE A SINGLE VALID YAML BLOCK WRAPPED IN ```yaml TRIPLE-BACKTICKS.
-        Follow this strict format:
-        
-        framing:
-          repository_context: "Brief summary of the target code area"
-          problem_statement: "{task_desc[:100]}..."
-          constraints: ["rule 1", "rule 2"]
-          success_criteria: ["verification step 1"]
-        subtasks:
-          t1:
-            title: "Short name"
-            description: "Detailed prompt for the implementer agent"
-            target_files: ["path/to/file.py"]
-            dependencies: []
-          t2:
-            title: "Next step"
-            description: "..."
-            target_files: ["..."]
-            dependencies: ["t1"]
-        total_estimated_budget: 1.0
+        Respond with a structured decomposition of the task into subtasks.
         """
         
-        response = await self.model.chat([{"role": "user", "content": system_prompt}])
-        raw_content = response.get("content", "")
+        response = await self.model.chat(
+            messages=[{"role": "user", "content": system_prompt}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "task_decomposition",
+                    "strict": True,
+                    "schema": TaskDecomposition.model_json_schema()
+                }
+            }
+        )
+        raw_content = response.get("content", "{}")
         
-        # Use the adapter's built-in block extractor
-        data = self.model.extract_yaml(raw_content)
+        import json
+        try:
+            # Handle potential markdown fence if the model ignored response_format (rare)
+            if "```json" in raw_content:
+                raw_content = raw_content.split("```json")[1].split("```")[0]
+            data = json.loads(raw_content)
+        except Exception:
+            data = {"error": "Failed to parse JSON"}
         
         if not data or "error" in data:
             print(f"Decomposition failed to parse YAML: {data}")

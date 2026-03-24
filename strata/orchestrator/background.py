@@ -48,16 +48,19 @@ class BackgroundWorker:
     @invariants Each task is processed exactly once; failures are caught and logged.
     """
 
-    def __init__(self, storage_factory, model_adapter):
+    def __init__(self, storage_factory, model_adapter, memory=None):
         """
         @summary Initialise worker (does not start it yet).
-        @inputs storage_factory: zero-arg callable → StorageManager (fresh session per task)
+        @inputs storage_factory: zero-arg callable → StorageManager
         @inputs model_adapter: ModelAdapter instance
+        @inputs memory: Optional SemanticMemory instance
         """
         self._storage_factory = storage_factory
         self._model = model_adapter
+        self._memory = memory
         self._queue: asyncio.Queue = asyncio.Queue()
         self._running_task: Optional[asyncio.Task] = None
+        self._on_update_callback = None
         self._running = False
         self._paused = False
         self._current_process: Optional[asyncio.Task] = None # In-flight task processing
@@ -107,6 +110,20 @@ class BackgroundWorker:
             except asyncio.CancelledError:
                 pass
         logger.info("BackgroundWorker stopped")
+
+    def set_on_update(self, callback):
+        """Register a callback for task status updates."""
+        self._on_update_callback = callback
+        
+    async def _notify(self, task_id: str, state: str):
+        if self._on_update_callback:
+            try:
+                if asyncio.iscoroutinefunction(self._on_update_callback):
+                    await self._on_update_callback(task_id, state)
+                else:
+                    self._on_update_callback(task_id, state)
+            except Exception as e:
+                logger.error(f"Failed to notify update: {e}")
 
     async def enqueue(self, task_id: str):
         """
@@ -294,8 +311,9 @@ Reply with ONLY a single sentence describing the task.
                 return
 
             # Mark working
-            task.state = TaskState.WORKING
+            task.state = TaskState.RUNNING
             storage.commit()
+            await self._notify(task_id, task.state.value)
             
             # Start a new Attempt
             attempt = storage.attempts.create(task_id=task.task_id)
@@ -316,8 +334,10 @@ Reply with ONLY a single sentence describing the task.
 
                 # If we got here without exception, it succeeded
                 storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
-                task.state = TaskState.COMPLETE
+                task.state = TaskState.COMPLETED
                 storage.commit()
+                await self._notify(task_id, task.state.value)
+                logger.info(f"Task {task_id} completed successfully.")
 
             except Exception as e:
                 storage.rollback() # Rollback any partial progress in repositories if possible
@@ -360,6 +380,7 @@ RESOLUTIONS:
 - decompose: The goal is too large; break it into simpler subtasks.
 - internal_replan: The current approach/method is flawed; replan at this level.
 - abandon_to_parent: This leaf task is impossible OR requires architectural decisions beyond this scope.
+- blocked: Use when the task is blocked by a missing physical requirement that ONLY a human can provide (e.g. missing API keys, manual environment setup, clarification on ambiguous user intent, access to a private resource).
 
 Respond with structured reasoning first, then the resolution choice.
 """
@@ -396,6 +417,16 @@ Respond with structured reasoning first, then the resolution choice.
         @summary Apply the SLM's structural resolution to the task graph.
         """
         from strata.storage.models import TaskState, TaskType
+        # 5. Index into long-term semantic memory for future RAG retrieval
+        if self._memory:
+            try:
+                self._memory.upsert_task_memory(
+                    task_id=task.task_id,
+                    content=f"TASK: {task.title}\nDESCRIPTION: {task.description}\nRESOLUTION: {resolution_data.resolution}\nRATIONALE: {resolution_data.reasoning}",
+                    metadata={"type": task.type.value, "status": task.state.value}
+                )
+            except Exception as e:
+                logger.error(f"Failed to index task memory: {e}")
         res = resolution_data.resolution
         logger.info(f"Applying SLM Resolution: {res.upper()} for task {task.task_id} ({resolution_data.reasoning})")
         
@@ -462,6 +493,27 @@ Respond with structured reasoning first, then the resolution choice.
             
             # 4. Enqueue the repair task
             await self.enqueue(repair_task.task_id)
+
+        elif res == "blocked":
+            import json
+            task.state = TaskState.BLOCKED
+            task.human_intervention_required = True
+            
+            # Post a structured system intervention message to the chat
+            storage.messages.create(
+                role="system",
+                content=json.dumps({
+                    "error": "Task Blocked",
+                    "reasoning": resolution_data.reasoning,
+                    "task_id": task.task_id,
+                    "title": task.title
+                }),
+                session_id=task.session_id or "default",
+                is_intervention=True,
+                task_id=task.task_id
+            )
+            storage.commit()
+            logger.info(f"Task {task.task_id} is now BLOCKED. Awaiting human intervention.")
 
     async def _run_research(self, task: "TaskModel", storage):
         """

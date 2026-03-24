@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
 
@@ -52,6 +53,70 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  );
+};
+
+const InterventionWidget = ({ taskId, onResolve }) => {
+  const [input, setInput] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+    setIsSubmitting(true);
+    try {
+      await axios.post(`http://localhost:8000/tasks/${taskId}/intervene`, {
+        override: input
+      });
+      if (onResolve) onResolve();
+      // Optionally reload the page or trigger a re-fetch
+      window.location.reload(); 
+    } catch (err) {
+      console.error('Intervention failed:', err);
+      alert('Failed to submit intervention. Check console.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="intervention-widget" style={{
+      background: 'rgba(255,184,77,0.05)',
+      border: '1px solid rgba(255,184,77,0.2)',
+      borderRadius: '8px',
+      padding: '12px',
+      marginTop: '8px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px'
+    }}>
+      <div style={{ fontSize: '11px', color: '#ffb84d', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        Human Intervention Required
+      </div>
+      <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px' }}>
+        <input 
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Provide missing context or instructions..."
+          style={{
+            flex: 1, background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,119,0,0.2)',
+            borderRadius: '6px', padding: '6px 10px', color: '#fff', fontSize: '12px',
+            outline: 'none'
+          }}
+        />
+        <button 
+          type="submit"
+          disabled={isSubmitting}
+          style={{
+            background: '#ffb84d', color: '#000', border: 'none', borderRadius: '6px',
+            padding: '4px 12px', fontSize: '11px', fontWeight: 800, cursor: 'pointer',
+            opacity: isSubmitting ? 0.5 : 1
+          }}
+        >
+          {isSubmitting ? '...' : 'SUBMIT'}
+        </button>
+      </form>
     </div>
   );
 };
@@ -147,6 +212,12 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
             <p style={{ fontSize: '12px', color: '#6b6b7d', marginTop: '6px', lineHeight: '1.4' }}>{task.description}</p>
           )}
         </div>
+
+        {task.status === 'blocked' && (
+          <div onClick={(e) => e.stopPropagation()}>
+            <InterventionWidget taskId={task.id} />
+          </div>
+        )}
 
         {!isExpanded && (
           <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden' }}>

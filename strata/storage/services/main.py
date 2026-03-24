@@ -23,12 +23,14 @@ class StorageManager:
     @depends storage.repositories.tasks, storage.models
     @invariants does not expose raw sessions to the orchestrator layer directly.
     """
-    def __init__(self, db_url: str = "sqlite:///strata.db"):
+    def __init__(self, db_url: str = None):
         """
         @summary Initialize the StorageManager and repositories.
-        @inputs connection string (default local sqlite)
+        @inputs connection string (default local sqlite or DATABASE_URL env)
         @outputs none
         """
+        import os
+        db_url = db_url or os.getenv("DATABASE_URL", "sqlite:///strata.db")
         self.engine = create_engine(db_url)
         
         # SQLite-specific performance tuning: Enable Write-Ahead Logging (WAL)

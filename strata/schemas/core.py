@@ -25,7 +25,7 @@ class AttemptResolutionSchema(BaseModel):
         ..., 
         description="Explain exactly why the attempt failed and evaluate the best path forward before choosing a resolution."
     )
-    resolution: Literal["reattempt", "decompose", "internal_replan", "abandon_to_parent", "improve_tooling"] = Field(
+    resolution: Literal["reattempt", "decompose", "internal_replan", "abandon_to_parent", "improve_tooling", "blocked"] = Field(
         ...,
         description="The structural decision for how to handle this failure."
     )

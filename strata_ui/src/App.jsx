@@ -480,8 +480,28 @@ function App() {
 
   useEffect(() => {
     fetchData(true);
-    const interval = setInterval(fetchData, 3000);
-    return () => clearInterval(interval);
+    
+    // Replace polling with Server-Sent Events (SSE)
+    const es = new EventSource(`${API}/events`);
+    
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        console.log('SSE Event:', data);
+        if (data.type === 'task_update' || data.type === 'message') {
+          fetchData(true);
+        }
+      } catch (err) {
+        console.error('SSE Parse Error:', err);
+      }
+    };
+
+    es.onerror = (err) => {
+      console.error('SSE Error:', err);
+      // Fallback: stay on polling if SSE fails
+    };
+
+    return () => es.close();
   }, [fetchData]);
 
   const handleSendMessage = async () => {

@@ -9,15 +9,19 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional, Union
+import json
+import asyncio
 from strata.storage.services.main import StorageManager
 from strata.storage.models import TaskModel, TaskType, TaskState
 from strata.models.adapter import ModelAdapter
 from strata.orchestrator.background import BackgroundWorker
 from strata.api.hotreload import HotReloader
-from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchReport
+from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchReport, TaskDecomposition, AttemptResolutionSchema
+from strata.memory.semantic import SemanticMemory
 import importlib.util
 import glob
 
@@ -32,10 +36,20 @@ _storage = StorageManager()
 _model = ModelAdapter()
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _hotreloader = HotReloader(_BASE_DIR)
+_memory = SemanticMemory()
 _worker = BackgroundWorker(
     storage_factory=StorageManager,   # each task gets a fresh session
-    model_adapter=_model
+    model_adapter=_model,
+    memory=_memory
 )
+_event_queue = asyncio.Queue()
+
+async def _broadcast_event(data: Dict[str, Any]):
+    """Push event to SSE queue for UI consumption."""
+    await _event_queue.put(data)
+
+# Register worker update listener
+_worker.set_on_update(lambda tid, state: asyncio.create_task(_broadcast_event({"type": "task_update", "task_id": tid, "state": state})))
 
 # ── True Tool Calling ──────────────────────────────────────────────────────────
 # We no longer use string heuristics. Instead, we provide the LLM with explicitly 
@@ -263,27 +277,32 @@ async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(g
     storage.commit()
 
     # 2. Re-construct conversation history for the LLM
-    # In a real system, we'd limit context window.
+    # Use Semantic Memory to retrieve similar past tasks/decisions
+    past_memories = _memory.query_memory(content, n_results=5)
+    memory_context = ""
+    if isinstance(past_memories, dict) and past_memories.get("documents") and past_memories["documents"][0]:
+        memory_context = "\n\nRELEVANT PAST CONTEXT:\n" + "\n".join(past_memories["documents"][0])
+
+    messages = [
+        {
+            "role": "system", 
+            "content": f"""You are Strata, a unified AI engineering system. You manage a swarm of background agents, but present yourself as a single, first-person entity.
+If internal processes hit a BLOCKED state, explain the issue to the USER directly.
+{memory_context}
+
+Available Tools:
+- search_web: Get facts/docs.
+- create_task: Spawn background work.
+- list_tasks: Check status.
+- get_task: View details.
+- list_active_tools: See what implementation agents can do.
+"""
+        }
+    ]
+    
+    # Keep the immediate dialogue context (last 5 messages)
     history_records = storage.messages.get_all(session_id=session_id)
-    messages = []
-    # Optionally inject a system prompt here
-    messages.append({
-        "role": "system",
-        "content": """You are the Strata Orchestrator. You are a STRICT ROUTING AGENT. 
-Your ONLY goal is to route user requests to the correct subsystem. 
-
-FOLLOW THESE HIERARCHICAL RULES:
-1. NEVER attempt to research the web or explain complex codebase architecture yourself. 
-2. If the user asks for DEEP research, broad context, or multi-source synthesis (web or codebase), YOU MUST CALL 'kickoff_background_research'.
-3. If the user asks for a simple fact (weather, population, simple library syntax), YOU MUST CALL 'search_web'.
-4. If the user asks to build, fix, refactor, or implement code, YOU MUST CALL 'kickoff_swarm_task'.
-5. ONLY answer as a human if the user is just saying 'hello', asking how you are, or discussing the status of existing tasks.
-
-CRITICAL: When you call a tool, you MUST simultaneously output a short human-readable message explaining what you are doing. For example: "I am kicking off a deep web research protocol to look into this." or "Let me query the web for the current weather." or "I am configuring a swarm task to implement that."
-
-DO NOT output headers like '# Deep Web Research' without calling a tool. If you decide to research, CALL THE TOOL."""
-    })
-    for m in history_records[-10:]: # last 10
+    for m in history_records[-5:]:
         messages.append({"role": m.role, "content": m.content})
 
     # 3. Handle tools with iterative looping
@@ -305,6 +324,7 @@ DO NOT output headers like '# Deep Web Research' without calling a tool. If you 
             # Done! Plain chat fallback, answered without tools
             storage.messages.create(role="assistant", content=chain_of_thought.strip(), session_id=session_id)
             storage.commit()
+            await _broadcast_event({"type": "message", "session_id": session_id})
             return {"status": "ok", "reply": chain_of_thought.strip()}
             
         if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
@@ -435,7 +455,11 @@ DO NOT output headers like '# Deep Web Research' without calling a tool. If you 
             storage.commit()
             return {"status": "ok", "reply": final_reply}
             
-    # If the loop exhausted its iterations
+    # If the loop exhausted its iterations, force synthesis
+    messages.append({
+        "role": "system",
+        "content": "You have reached the tool call limit. You MUST synthesize the data gathered so far and reply to the user immediately. Do not attempt further tool calls."
+    })
     final_response = await _model.chat(messages) # Strip the tools, force an answer
     reply = final_response.get("content", "I hit the maximum iteration limit for synchronous tool usage without reaching a conclusion.")
     
@@ -453,6 +477,41 @@ async def create_task(task_data: Dict[str, Any], storage: StorageManager = Depen
     task = storage.tasks.create(**task_data)
     storage.commit()
     return {"id": task.task_id, "status": task.state.value}
+
+
+@app.post("/tasks/{task_id}/intervene")
+async def task_intervene(task_id: str, payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    """
+    @summary Resolve a blocked task with human override context.
+    """
+    task = storage.tasks.get_by_id(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    override = payload.get("override")
+    if not override:
+        raise HTTPException(status_code=400, detail="Override content required")
+        
+    # Append intervention to description to provide context to the agent
+    task.description += f"\n\n[USER INTERVENTION]: {override}"
+    task.state = TaskState.PENDING
+    task.human_intervention_required = False
+    storage.commit()
+    
+    # Re-enqueue the task for the background worker
+    await _worker.enqueue(task.task_id)
+    
+    # Log it to the chat for transparency
+    storage.messages.create(
+        role="user",
+        content=f"Sub-agent intervention for task '{task.title}': {override}",
+        session_id=task.session_id or "default",
+        is_intervention=True,
+        task_id=task.task_id
+    )
+    storage.commit()
+    
+    return {"status": "ok"}
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
@@ -569,6 +628,20 @@ async def resume_worker():
 async def stop_worker():
     aborted = _worker.stop_current()
     return {"status": "stopped", "aborted": aborted}
+
+
+@app.get("/events")
+async def sse_events():
+    """Stream events to the UI for real-time reactivity."""
+    async def event_generator():
+        while True:
+            try:
+                data = await _event_queue.get()
+                yield f"data: {json.dumps(data)}\n\n"
+            except Exception as e:
+                logger.error(f"SSE disconnection: {e}")
+                break
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
