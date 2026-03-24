@@ -57,3 +57,11 @@ class AttemptRepository:
         attempt = self.get_by_id(attempt_id)
         if attempt:
             attempt.resolution = resolution
+
+    def set_plan_review(self, attempt_id: str, plan_review: dict):
+        """
+        @summary Update the plan review for an attempt.
+        """
+        attempt = self.get_by_id(attempt_id)
+        if attempt:
+            attempt.plan_review = plan_review

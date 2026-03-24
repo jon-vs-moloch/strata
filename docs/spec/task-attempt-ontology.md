@@ -133,7 +133,13 @@ Attempts are:
   "reason": "string",
   "evidence": [],
   "artifacts": {},
-  "resolution": "reattempt | decompose | internal_replan | abandon_to_parent"
+  "resolution": "reattempt | decompose | internal_replan | abandon_to_parent",
+  "plan_review": {
+    "plan_health": "healthy | uncertain | degraded | invalid",
+    "recommendation": "continue | reattempt | decompose | internal_replan | abandon_to_parent",
+    "confidence": 0.0,
+    "rationale": "string"
+  }
 }
 
 
@@ -393,6 +399,7 @@ The system must support status like:
 	6.	Parent tasks are not failed by child failure
 	7.	Root tasks cannot use abandon_to_parent
 	8.	Abandoned tasks do not automatically imply parent abandonment
+	9.	Every attempt must include a plan review to assess the continued viability of the broader task strategy.
 
 ⸻
 

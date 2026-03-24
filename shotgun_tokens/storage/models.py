@@ -113,6 +113,12 @@ class AttemptModel(Base):
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
     artifacts: Mapped[dict] = mapped_column(JSON, default=dict)
     resolution: Mapped[Optional[AttemptResolution]] = mapped_column(SQLEnum(AttemptResolution), nullable=True)
+    plan_review: Mapped[dict] = mapped_column(JSON, default=lambda: {
+        "plan_health": "healthy",
+        "recommendation": "continue",
+        "confidence": 1.0,
+        "rationale": "Initial state"
+    })
 
     task: Mapped[TaskModel] = relationship(back_populates="attempts")
 
