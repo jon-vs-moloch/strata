@@ -67,12 +67,13 @@ class TaskFraming(BaseModel):
 class LeafTaskPrototype(BaseModel):
     """
     @summary Blueprint for a single atom of work (leaf task).
-    @inputs none (Pydantic model)
-    @outputs none (Pydantic model)
     """
     title: str
     description: str
     target_files: List[str]
+    edit_type: Literal["refactor", "feature", "test", "fix", "chore"] = Field(default="feature")
+    validator: Optional[str] = Field(None, description="The specific validation engine to use (e.g., 'pytest', 'lint', 'sandbox').")
+    max_diff_size: int = Field(default=50000, description="Maximum characters allowed in the resulting artifact.")
     dependencies: List[str] = Field(default_factory=list, description="IDs of other leaf tasks in the same decomposition.")
 
 class TaskDecomposition(BaseModel):
@@ -84,3 +85,14 @@ class TaskDecomposition(BaseModel):
     framing: TaskFraming
     subtasks: Dict[str, LeafTaskPrototype] = Field(description="Mapping of task IDs to their prototypes.")
     total_estimated_budget: float = Field(description="Tokens or seconds.")
+
+class EvaluationScorecardSchema(BaseModel):
+    """
+    @summary Structured results of a deterministic evaluation of a candidate.
+    """
+    valid: bool = Field(description="True if the candidate passes all hard validation gates.")
+    checks_passed: List[str] = Field(description="Names of the specific validation checks that passed.")
+    checks_failed: List[str] = Field(description="Names of the specific validation checks that failed.")
+    diff_summary: str = Field(description="Short summary of the structural changes suggested by the candidate.")
+    score: float = Field(description="The numeric fitness signal (0.0 to 10.0).")
+    reasoning: str = Field(description="Brief explanation of the score and validity.")

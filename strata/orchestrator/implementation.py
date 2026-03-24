@@ -56,11 +56,11 @@ IMPLEMENTATION_META_TOOLS = [
         "type": "function",
         "function": {
             "name": "trigger_tool_promotion",
-            "description": "Promotes an .experimental.py tool file to a live .py file and triggers hot-reloading.",
+            "description": "Gated tool promotion. Validates .experimental.py for syntax, contract compliance, and sandbox tests before promoting it to .py (live). Provides a hard fitness signal.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tool_name": {"type": "string", "description": "The name of the tool to promote."}
+                    "tool_name": {"type": "string", "description": "The name of the tool to promote (e.g., 'example_tool')."}
                 },
                 "required": ["tool_name"]
             }
@@ -86,6 +86,9 @@ class ImplementationModule:
         self.model = model_adapter
         self.storage = storage_manager
         self.researcher = research_module
+        
+        from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
+        self.tools_pipeline = ToolsPromotionPipeline(self.storage)
 
     async def implement_task(self, task_id: str, global_research: Optional[ResearchReport] = None) -> List[str]:
         """
@@ -193,14 +196,9 @@ class ImplementationModule:
                         
                     elif func_name == "trigger_tool_promotion":
                         name = args["tool_name"]
-                        # Internal promotion logic: rename experimental to live
-                        src = f"strata/tools/{name}.experimental.py"
-                        dst = f"strata/tools/{name}.py"
-                        if os.path.exists(src):
-                            os.rename(src, dst)
-                            tool_result = f"Promoted {name} to live. The API will now use the new version."
-                        else:
-                            tool_result = f"Experimental file for {name} missing."
+                        # Use the gated pipeline for promotion
+                        success, message = await self.tools_pipeline.validate_and_promote(name)
+                        tool_result = message
                             
                     messages.append({
                         "role": "tool",
@@ -228,7 +226,7 @@ class ImplementationModule:
             prompt_version="v1",
             model=self.model.active_model,
             artifact_type="python_file",
-            content_path=f"candidates/{candidate_id}.py",
+            content_path=f"strata/experimental/candidates/{candidate_id}.py",
             summary=f"Implementation for {task.title}",
             proposed_files=task.constraints.get("target_files", [])
         )
@@ -236,7 +234,7 @@ class ImplementationModule:
         self.storage.commit()
         
         # Write the actual file artifact
-        os.makedirs("candidates", exist_ok=True)
+        os.makedirs("strata/experimental/candidates", exist_ok=True)
         with open(candidate.content_path, "w", encoding="utf-8") as f:
             f.write(content)
             

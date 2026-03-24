@@ -27,29 +27,51 @@ class JudgeModule:
         """
         self.model = model_adapter
         self.storage = storage_manager
+        
+        from strata.orchestrator.evaluation import EvaluationPipeline
+        self.evaluator = EvaluationPipeline(self.storage)
 
     async def judge_candidates(self, task_id: str, candidate_ids: List[str]) -> List[Dict[str, Any]]:
         """
-        @summary Ranks candidates based on a specific task rubric.
+        @summary Ranks candidates based on a specific task rubric using deterministic checks and optional LLM judgement.
         @inputs task_id: the parent task, candidate_ids: the generated solutions to compare
         @outputs list of objects containing candidate_id, score, and reasoning
-        @side_effects reads candidates from storage
+        @side_effects reads candidates and updates telemetry
         """
+        from strata.storage.models import TaskModel, CandidateModel
+        task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+        if not task:
+            return []
+            
         print(f"Judging {len(candidate_ids)} candidates for task: {task_id}...")
         
-        # In a real run, this would be a prompt sending the task.success_criteria
-        # and all candidate code to the model to get a YAML-based ranking report.
-        results = [
-            {"candidate_id": c_id, "score": 10.0, "reasoning": "Highest structural integrity."}
-            for c_id in candidate_ids
-        ]
+        results = []
+        for c_id in candidate_ids:
+            candidate = self.storage.session.query(CandidateModel).filter_by(candidate_id=c_id).first()
+            if not candidate:
+                continue
+                
+            # RUN DETERMINISTIC PIPELINE
+            scorecard = await self.evaluator.evaluate_candidate(task, candidate)
+            
+            # Record scorecard in DB (if CandidateModel support it, for now we just log/return)
+            # Actually, CandidateModel doesn't have a scorecard field, but we can store it in telemetry or a separate record.
+            
+            results.append({
+                "candidate_id": c_id,
+                "score": scorecard.score,
+                "valid": scorecard.valid,
+                "reasoning": scorecard.reasoning,
+                "checks_passed": scorecard.checks_passed,
+                "checks_failed": scorecard.checks_failed,
+                "diff_summary": scorecard.diff_summary
+            })
 
         # Record telemetry feedback for the models used
-        from strata.storage.models import ModelTelemetry, TaskModel, CandidateModel
-        task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+        from strata.storage.models import ModelTelemetry, CandidateModel
         for res in results:
             cand = self.storage.session.query(CandidateModel).filter_by(candidate_id=res["candidate_id"]).first()
-            if cand and task:
+            if cand:
                 telemetry = ModelTelemetry(
                     model_id=cand.model,
                     task_type=task.type.value,

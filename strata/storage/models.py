@@ -45,6 +45,8 @@ class AttemptResolution(PyEnum):
     DECOMPOSE = "decompose"
     INTERNAL_REPLAN = "internal_replan"
     ABANDON_TO_PARENT = "abandon_to_parent"
+    IMPROVE_TOOLING = "improve_tooling"
+    BLOCKED = "blocked"
 
 # Association table for task dependencies
 task_dependencies = Table(

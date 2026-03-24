@@ -7,8 +7,12 @@
 @side_effects none
 """
 
+import logging
+from datetime import datetime
 from typing import List, Optional
 from strata.storage.models import TaskModel, TaskState
+
+logger = logging.getLogger(__name__)
 
 class SchedulerModule:
     """
@@ -28,26 +32,56 @@ class SchedulerModule:
 
     def get_next_runnable_task(self) -> Optional[TaskModel]:
         """
-        @summary Core logic for swarm prioritization.
-        @inputs none (reads from DB)
-        @outputs the TaskModel the swarm should focus on now
-        @side_effects none (read-only)
-        @invariants Skip tasks that are BLOCKED or WAITING_DEPENDENCIES.
+        @summary Formalized swarm prioritization using a scoring function.
+        @outputs the TaskModel with the highest calculated fitness score.
         """
-        from strata.storage.models import TaskState
+        from strata.storage.models import TaskState, TaskType
+        from sqlalchemy import func
         
-        # Build query to fetch the next runnable task
-        # Patch Objective: Push dependency filtering to the database for O(1) performance
-        stmt = (
+        # 1. Fetch all candidate runnable tasks (not blocked)
+        runnable_tasks = (
             self.storage.session.query(TaskModel)
             .filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
-            # Exclude tasks that have incomplete dependencies:
-            # ~TaskModel.dependencies.any(TaskModel.state != TaskState.COMPLETE)
             .filter(~TaskModel.dependencies.any(TaskModel.state != TaskState.COMPLETE))
-            .order_by(TaskModel.priority.desc(), TaskModel.created_at.asc())
+            .all()
         )
         
-        return stmt.first()
+        if not runnable_tasks:
+            return None
+            
+        # 2. Score each task
+        scored_tasks = []
+        for task in runnable_tasks:
+            score = 0.0
+            
+            # A. Base Priority (0-100)
+            score += task.priority
+            
+            # B. Unblock Potential (Number of blocked descendants)
+            # This is a bit expensive to query for every task, but for small swarms it's ok.
+            # For now, let's use a placeholder for unblock potential.
+            unblock_potential = len(task.blocked_tasks) if hasattr(task, 'blocked_tasks') else 0
+            score += unblock_potential * 10.0
+            
+            # C. Recency Penalty (Prefer older tasks to avoid starvation)
+            # (Higher score for older tasks)
+            age_seconds = (datetime.utcnow() - task.created_at).total_seconds()
+            score += min(age_seconds / 60.0, 50.0) # Up to 50 points for being an hour old
+            
+            # D. Task Type Weighting (Prioritize DECOMP/RESEARCH to unblock parallel work)
+            if task.type == TaskType.DECOMP:
+                score += 30.0
+            elif task.type == TaskType.RESEARCH:
+                score += 15.0
+                
+            scored_tasks.append((score, task))
+            
+        # 3. Select the winner
+        scored_tasks.sort(key=lambda x: x[0], reverse=True)
+        winner = scored_tasks[0][1]
+        
+        logger.info(f"Scheduler selected {winner.task_id} (Score: {scored_tasks[0][0]:.2f})")
+        return winner
 
     def select_best_model(self, task_type: str, fallback_model: str = "qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2") -> str:
         """

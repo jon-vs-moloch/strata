@@ -34,7 +34,6 @@ class DecompositionModule:
         @summary Generates a structured DAG of subtasks using YAML-based prompting.
         """
         print(f"Decomposing task: {task_title}...")
-        
         system_prompt = f"""You are an Expert Software Architect. Your job is to decompose a high-level coding task into a series of small, atomic, parallelizable 'leaf' tasks (subtasks).
         
         GOAL: {task_title}
@@ -45,6 +44,12 @@ class DecompositionModule:
         {"SUGGESTED APPROACH:" + research.suggested_approach if research else ""}
         
         Respond with a structured decomposition of the task into subtasks.
+        
+        CRITICAL: For each subtask, you MUST provide:
+        - target_files: The exact list of files to be modified.
+        - edit_type: 'refactor', 'feature', 'test', 'fix', or 'chore'.
+        - validator: The specific validation engine (e.g., 'pytest', 'lint', 'sandbox').
+        - max_diff_size: A character-count budget for the file change (default 50000).
         """
         
         response = await self.model.chat(

@@ -30,7 +30,7 @@ class StorageManager:
         @outputs none
         """
         import os
-        db_url = db_url or os.getenv("DATABASE_URL", "sqlite:///strata.db")
+        db_url = db_url or os.getenv("DATABASE_URL", "sqlite:///strata/runtime/strata.db")
         self.engine = create_engine(db_url)
         
         # SQLite-specific performance tuning: Enable Write-Ahead Logging (WAL)
