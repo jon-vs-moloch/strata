@@ -291,7 +291,7 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
           }}>
             <div>
               <div style={{ fontSize: '14px', fontWeight: 600, color: '#edeeef', marginBottom: '4px' }}>Reset Database</div>
-              <div style={{ fontSize: '12px', color: '#888' }}>Wipes shotgun.db — all tasks and sessions are lost.</div>
+              <div style={{ fontSize: '12px', color: '#888' }}>Wipes strata.db — all tasks and sessions are lost.</div>
             </div>
             <button
               onClick={handleReset}

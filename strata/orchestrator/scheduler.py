@@ -8,7 +8,7 @@
 """
 
 from typing import List, Optional
-from shotgun_tokens.storage.models import TaskModel, TaskState
+from strata.storage.models import TaskModel, TaskState
 
 class SchedulerModule:
     """
@@ -57,7 +57,7 @@ class SchedulerModule:
         @inputs task_type: e.g. RESEARCH, IMPL, DECOMP
         @outputs the model_id with the highest historical throughput/score
         """
-        from shotgun_tokens.storage.models import ModelTelemetry
+        from strata.storage.models import ModelTelemetry
         from sqlalchemy import func
         
         # Query highest average score for this specific task category

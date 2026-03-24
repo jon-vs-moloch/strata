@@ -13,15 +13,15 @@ Strata is a powerful agentic task orchestration platform designed for managing c
 
 1.  **Backend:**
     ```bash
-    PYTHONPATH=. ./venv/bin/python shotgun_tokens/api/main.py
+    PYTHONPATH=. ./venv/bin/python strata/api/main.py
     ```
 2.  **Orchestrator:**
     ```bash
-    PYTHONPATH=. ./venv/bin/python shotgun_tokens/orchestrator/background.py
+    PYTHONPATH=. ./venv/bin/python strata/orchestrator/background.py
     ```
 3.  **Frontend:**
     ```bash
-    npm run dev --prefix shotgun_ui
+    npm run dev --prefix strata_ui
     ```
 
 Navigate to `http://localhost:5173` to view the Strata dashboard.

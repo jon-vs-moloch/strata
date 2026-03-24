@@ -1,0 +1,244 @@
+"""
+@module orchestrator.implementation
+@purpose Execute leaf-level coding tasks and generate implementation candidates.
+@owns code generation, local research (file-level), staging of candidate artifacts
+@does_not_own task decomposition, synthesis, or evaluation
+@key_exports ImplementationModule
+@side_effects initiates code writing to temporary worktrees or buffer files
+"""
+
+from typing import List, Dict, Any, Optional
+from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchReport
+import os
+import json
+import httpx
+from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
+
+IMPLEMENTATION_META_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_active_tools",
+            "description": "Returns the names and descriptions of currently loaded tools available to the orchestrator.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_tool_source",
+            "description": "Returns the raw Python file contents of a specific dynamic tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "The name of the tool (filename without extension)."}
+                },
+                "required": ["tool_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upsert_tool_source",
+            "description": "Writes new or updated logic to strata/tools/{tool_name}.experimental.py.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "The name of the tool."},
+                    "source": {"type": "string", "description": "The full Python source code for the tool file."}
+                },
+                "required": ["tool_name", "source"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trigger_tool_promotion",
+            "description": "Promotes an .experimental.py tool file to a live .py file and triggers hot-reloading.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "The name of the tool to promote."}
+                },
+                "required": ["tool_name"]
+            }
+        }
+    }
+]
+
+class ImplementationModule:
+    """
+    @summary Manages the leaf-level execution of a code transformation task.
+    @inputs model: ModelAdapter, storage: StorageManager, researcher: ResearchModule
+    @outputs List of candidate IDs
+    @side_effects requests completions from the LLM adapter, writes candidates to storage
+    @depends orchestrator.research.ResearchModule, models.adapter
+    @invariants does not mutate the main branch (uses candidates/worktrees)
+    """
+    def __init__(self, model_adapter, storage_manager, research_module):
+        """
+        @summary Initialize the ImplementationModule.
+        @inputs model_adapter instance, storage_manager instance, research_module instance
+        @outputs none
+        """
+        self.model = model_adapter
+        self.storage = storage_manager
+        self.researcher = research_module
+
+    async def implement_task(self, task_id: str, global_research: Optional[ResearchReport] = None) -> List[str]:
+        """
+        @summary Execute a coding task with a two-pass research strategy.
+        """
+        # Fetch task details from DB
+        from strata.storage.models import TaskModel, CandidateModel
+        task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+        if not task:
+            return []
+            
+        print(f"Implementing leaf task: {task.title}...")
+        
+        # Pass 2: Local Research focused on the Files
+        local_research: ResearchReport = await self.researcher.conduct_research(
+            task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
+            repo_path=task.repo_path
+        )
+
+        # Get past failures to avoid infinite loops
+        from strata.storage.models import AttemptModel, AttemptOutcome
+        failed_attempts = self.storage.session.query(AttemptModel).filter(
+            AttemptModel.task_id == task_id,
+            AttemptModel.outcome == AttemptOutcome.FAILED
+        ).order_by(AttemptModel.started_at.asc()).all()
+        
+        failure_log = "None."
+        if failed_attempts:
+            failure_log = "\n".join([
+                f"- Attempt {i+1} Failed: {a.reason or 'Unknown error'}. Resolution: {a.resolution.value if a.resolution else 'None'}."
+                for i, a in enumerate(failed_attempts)
+            ])
+
+        system_prompt = f"""You are an Senior Implementation Engineer. 
+        Your goal is to write code that satisfies the following task:
+        
+        TITLE: {task.title}
+        DESCRIPTION: {task.description}
+        
+        GLOBAL ARCHITECTURAL CONTEXT:
+        {global_research.context_gathered if global_research else "None provided."}
+        
+        LOCAL IMPLEMENTATION DETAILS:
+        {local_research.context_gathered}
+        CONSTRAINTS: {local_research.key_constraints_discovered}
+        
+        PAST ATTEMPTS TO AVOID:
+        {failure_log}
+        
+        YOU MUST OUTPUT THE ENTIRE UPDATED FILE CONTENT OR A NEW FILE CONTENT.
+        Output format:
+        ```python (or other language)
+        [CODE HERE]
+        ```
+        """
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        iteration = 0
+        max_iters = 5
+        
+        while iteration < max_iters:
+            response = await self.model.chat(messages, tools=IMPLEMENTATION_META_TOOLS)
+            content = response.get("content", "")
+            tool_calls = response.get("tool_calls", None)
+            
+            if not tool_calls:
+                # If no tool calls, this is our final implementation output
+                break
+                
+            messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+            
+            for call in tool_calls:
+                func_name = call["function"]["name"]
+                args = json.loads(call["function"]["arguments"])
+                tool_result = ""
+                
+                try:
+                    if func_name == "list_active_tools":
+                        # We hit the API endpoint or just list files
+                        tools_dir = "strata/tools"
+                        os.makedirs(tools_dir, exist_ok=True)
+                        files = [f for f in os.listdir(tools_dir) if f.endswith(".py") or f.endswith(".experimental.py")]
+                        tool_result = f"Dynamic files in tools/: {files}"
+                        
+                    elif func_name == "read_tool_source":
+                        name = args["tool_name"]
+                        path = f"strata/tools/{name}.py"
+                        if not os.path.exists(path):
+                            path = f"strata/tools/{name}.experimental.py"
+                        
+                        if os.path.exists(path):
+                            with open(path, "r") as f:
+                                tool_result = f.read()
+                        else:
+                            tool_result = f"Tool {name} not found."
+                            
+                    elif func_name == "upsert_tool_source":
+                        name = args["tool_name"]
+                        source = args["source"]
+                        os.makedirs("strata/tools", exist_ok=True)
+                        path = f"strata/tools/{name}.experimental.py"
+                        with open(path, "w") as f:
+                            f.write(source)
+                        tool_result = f"Successfully wrote to {path}. You must call trigger_tool_promotion to make it live."
+                        
+                    elif func_name == "trigger_tool_promotion":
+                        name = args["tool_name"]
+                        # Internal promotion logic: rename experimental to live
+                        src = f"strata/tools/{name}.experimental.py"
+                        dst = f"strata/tools/{name}.py"
+                        if os.path.exists(src):
+                            os.rename(src, dst)
+                            tool_result = f"Promoted {name} to live. The API will now use the new version."
+                        else:
+                            tool_result = f"Experimental file for {name} missing."
+                            
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": func_name,
+                        "content": tool_result
+                    })
+                except Exception as e:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": func_name,
+                        "content": f"Error: {str(e)}"
+                    })
+            iteration += 1
+
+        # Create a candidate record
+        from uuid import uuid4
+        candidate_id = str(uuid4())
+        
+        candidate = CandidateModel(
+            candidate_id=candidate_id,
+            task_id=task_id,
+            stage="impl",
+            prompt_version="v1",
+            model=self.model.active_model,
+            artifact_type="python_file",
+            content_path=f"candidates/{candidate_id}.py",
+            summary=f"Implementation for {task.title}",
+            proposed_files=task.constraints.get("target_files", [])
+        )
+        self.storage.session.add(candidate)
+        self.storage.commit()
+        
+        # Write the actual file artifact
+        os.makedirs("candidates", exist_ok=True)
+        with open(candidate.content_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        return [candidate_id]
+

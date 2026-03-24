@@ -8,7 +8,7 @@
 
 from typing import Any, Optional
 from sqlalchemy.orm import Session
-from shotgun_tokens.storage.models import ParameterModel
+from strata.storage.models import ParameterModel
 
 class ParameterRepository:
     """

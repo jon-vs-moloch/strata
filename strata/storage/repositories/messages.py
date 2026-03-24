@@ -9,7 +9,7 @@
 from typing import List, Dict, Any, Optional
 from sqlalchemy import select, desc, distinct
 from sqlalchemy.orm import Session
-from shotgun_tokens.storage.models import MessageModel
+from strata.storage.models import MessageModel
 
 class MessageRepository:
     """

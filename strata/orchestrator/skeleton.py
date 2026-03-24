@@ -11,18 +11,18 @@ from typing import List, Optional
 from uuid import uuid4
 from datetime import datetime
 
-from shotgun_tokens.schemas.core import ResearchReport, TaskDecomposition
-from shotgun_tokens.orchestrator.research import ResearchModule
-from shotgun_tokens.orchestrator.scheduler import SchedulerModule
-from shotgun_tokens.orchestrator.decomposition import DecompositionModule
-from shotgun_tokens.orchestrator.implementation import ImplementationModule
-from shotgun_tokens.orchestrator.judge import JudgeModule
-from shotgun_tokens.orchestrator.synthesis import SynthesisModule
-from shotgun_tokens.storage.models import TaskStatus
+from strata.schemas.core import ResearchReport, TaskDecomposition
+from strata.orchestrator.research import ResearchModule
+from strata.orchestrator.scheduler import SchedulerModule
+from strata.orchestrator.decomposition import DecompositionModule
+from strata.orchestrator.implementation import ImplementationModule
+from strata.orchestrator.judge import JudgeModule
+from strata.orchestrator.synthesis import SynthesisModule
+from strata.storage.models import TaskStatus
 
 class SkeletonOrchestrator:
     """
-    @summary Coordinates the full Shotgun Tokens task execution flow.
+    @summary Coordinates the full Strata task execution flow.
     @inputs storage_manager, model_adapter, sandbox_provider
     @outputs side-effect driven (updates DB tasks, creates candidates)
     @side_effects creates worktrees, writes to DB, triggers LLM calls

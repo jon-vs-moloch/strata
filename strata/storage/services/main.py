@@ -8,11 +8,11 @@
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from shotgun_tokens.storage.models import Base
-from shotgun_tokens.storage.repositories.tasks import TaskRepository
-from shotgun_tokens.storage.repositories.messages import MessageRepository
-from shotgun_tokens.storage.repositories.parameters import ParameterRepository
-from shotgun_tokens.storage.repositories.attempts import AttemptRepository
+from strata.storage.models import Base
+from strata.storage.repositories.tasks import TaskRepository
+from strata.storage.repositories.messages import MessageRepository
+from strata.storage.repositories.parameters import ParameterRepository
+from strata.storage.repositories.attempts import AttemptRepository
 
 class StorageManager:
     """
@@ -23,7 +23,7 @@ class StorageManager:
     @depends storage.repositories.tasks, storage.models
     @invariants does not expose raw sessions to the orchestrator layer directly.
     """
-    def __init__(self, db_url: str = "sqlite:///shotgun.db"):
+    def __init__(self, db_url: str = "sqlite:///strata.db"):
         """
         @summary Initialize the StorageManager and repositories.
         @inputs connection string (default local sqlite)
@@ -106,7 +106,7 @@ class StorageManager:
         @summary Practical Cascade Rule: If a task is ABANDONED or CANCELLED, cancel all its dependents recursively.
         @owns gridlock resolution, dependency safety
         """
-        from shotgun_tokens.storage.models import TaskModel, TaskState, task_dependencies
+        from strata.storage.models import TaskModel, TaskState, task_dependencies
         
         # 1. Find all tasks currently in a terminal failure state
         failed_tasks = self.session.query(TaskModel).filter(

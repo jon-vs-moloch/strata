@@ -8,7 +8,7 @@
 """
 
 from typing import List, Dict, Any
-from shotgun_tokens.schemas.core import TaskDecomposition
+from strata.schemas.core import TaskDecomposition
 
 class SynthesisModule:
     """

@@ -1,6 +1,6 @@
 """
 @module storage.models
-@purpose Define SQLAlchemy ORM models for the Shotgun Tokens orchestrator.
+@purpose Define SQLAlchemy ORM models for the Strata orchestrator.
 @owns database schemas, relationship mappings
 @does_not_own database engine creation, querying logic, or migrations
 @key_exports TaskModel, CandidateModel, EvaluationModel, PromptModel, MessageModel, TaskStatus

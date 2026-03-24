@@ -25,9 +25,13 @@ class AttemptResolutionSchema(BaseModel):
         ..., 
         description="Explain exactly why the attempt failed and evaluate the best path forward before choosing a resolution."
     )
-    resolution: Literal["reattempt", "decompose", "internal_replan", "abandon_to_parent"] = Field(
+    resolution: Literal["reattempt", "decompose", "internal_replan", "abandon_to_parent", "improve_tooling"] = Field(
         ...,
         description="The structural decision for how to handle this failure."
+    )
+    tool_modification_target: Optional[str] = Field(
+        None,
+        description="If resolution is 'improve_tooling', specify the exact name of the tool to be fixed, or the name of a new tool that needs to be created."
     )
     new_subtasks: List[SubtaskDraft] = Field(
         default_factory=list,

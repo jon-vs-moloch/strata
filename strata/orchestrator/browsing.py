@@ -39,7 +39,7 @@ class BrowsingModule:
         
         # In a real run, this would be a ripgrep or an index-lookup
         # Query metadata/symbols.yaml to find relevant classes.
-        return [{"file": "shotgun_tokens/storage/models.py", "snippet": "TaskModel definition"}]
+        return [{"file": "strata/storage/models.py", "snippet": "TaskModel definition"}]
 
     async def fetch_url(self, url: str) -> str:
         """

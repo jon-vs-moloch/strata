@@ -10,8 +10,8 @@ import asyncio
 import logging
 from typing import Optional
 
-from shotgun_tokens.storage.models import TaskModel, TaskStatus, TaskType
-from shotgun_tokens.orchestrator.research import ResearchModule
+from strata.storage.models import TaskModel, TaskStatus, TaskType
+from strata.orchestrator.research import ResearchModule
 
 logger = logging.getLogger(__name__)
 

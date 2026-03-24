@@ -8,7 +8,7 @@
 """
 
 from typing import List, Dict, Any
-from shotgun_tokens.schemas.core import TaskFraming
+from strata.schemas.core import TaskFraming
 
 class JudgeModule:
     """
@@ -45,7 +45,7 @@ class JudgeModule:
         ]
 
         # Record telemetry feedback for the models used
-        from shotgun_tokens.storage.models import ModelTelemetry, TaskModel, CandidateModel
+        from strata.storage.models import ModelTelemetry, TaskModel, CandidateModel
         task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
         for res in results:
             cand = self.storage.session.query(CandidateModel).filter_by(candidate_id=res["candidate_id"]).first()

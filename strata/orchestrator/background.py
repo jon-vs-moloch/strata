@@ -10,11 +10,11 @@ import asyncio
 import logging
 from typing import Optional
 
-from shotgun_tokens.storage.models import TaskModel, TaskState, TaskType, AttemptModel, AttemptOutcome, AttemptResolution
-from shotgun_tokens.orchestrator.research import ResearchModule
-from shotgun_tokens.orchestrator.decomposition import DecompositionModule
-from shotgun_tokens.orchestrator.implementation import ImplementationModule
-from shotgun_tokens.schemas.core import AttemptResolutionSchema
+from strata.storage.models import TaskModel, TaskState, TaskType, AttemptModel, AttemptOutcome, AttemptResolution
+from strata.orchestrator.research import ResearchModule
+from strata.orchestrator.decomposition import DecompositionModule
+from strata.orchestrator.implementation import ImplementationModule
+from strata.schemas.core import AttemptResolutionSchema
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class BackgroundWorker:
         # Startup Sweep: Recover orphaned tasks interrupted by server hot-restarts
         storage = self._storage_factory()
         try:
-            from shotgun_tokens.storage.models import TaskModel, TaskState
+            from strata.storage.models import TaskModel, TaskState
             orphaned = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.WORKING).all()
             for task in orphaned:
                 logger.warning(f"Re-queueing orphaned runtime task: {task.task_id}")
@@ -160,7 +160,7 @@ class BackgroundWorker:
         from datetime import datetime
         storage = self._storage_factory()
         try:
-            from shotgun_tokens.storage.models import ModelTelemetry
+            from strata.storage.models import ModelTelemetry
             from sqlalchemy import func
             results = (
                 storage.session.query(
@@ -230,7 +230,7 @@ class BackgroundWorker:
                     project_spec = f.read()
 
             # 2. Prompt for Alignment
-            from shotgun_tokens.storage.models import TaskModel, TaskState, TaskType
+            from strata.storage.models import TaskModel, TaskState, TaskType
             sys_prompt = f"""You are the Alignment Module for the Strata Swarm.
 The system is currently IDLE. You must identify gaps between the user's vision and the current codebase state.
 
@@ -395,7 +395,7 @@ Respond with structured reasoning first, then the resolution choice.
         """
         @summary Apply the SLM's structural resolution to the task graph.
         """
-        from shotgun_tokens.storage.models import TaskState, TaskType
+        from strata.storage.models import TaskState, TaskType
         res = resolution_data.resolution
         logger.info(f"Applying SLM Resolution: {res.upper()} for task {task.task_id} ({resolution_data.reasoning})")
         
@@ -436,6 +436,32 @@ Respond with structured reasoning first, then the resolution choice.
             task.state = TaskState.ABANDONED
             # Solve the Gridlock: Trigger the Dependency Cascade
             storage.apply_dependency_cascade()
+
+        elif res == "improve_tooling":
+            target = resolution_data.tool_modification_target or "unknown_tool"
+            logger.info(f"Resolution: IMPROVE_TOOLING for target {target}")
+            
+            # 1. Block current task
+            task.state = TaskState.BLOCKED
+            
+            # 2. Spawn a MAXIMUM priority Implementation task
+            repair_task = storage.tasks.create(
+                title=f"Tool Repair: {target}",
+                description=f"The Orchestrator failed an objective because a tool is inadequate or missing. Target: {target}. Reasoning: {resolution_data.reasoning}. Read the tool, fix the logic, and promote it.",
+                session_id=task.session_id,
+                state=TaskState.PENDING,
+                type=TaskType.IMPL,
+                depth=task.depth + 1,
+                priority=100.0 # Maximum priority
+            )
+            storage.commit()
+            
+            # 3. Add dependency link
+            storage.tasks.add_dependency(task.task_id, repair_task.task_id)
+            storage.commit()
+            
+            # 4. Enqueue the repair task
+            await self.enqueue(repair_task.task_id)
 
     async def _run_research(self, task: "TaskModel", storage):
         """

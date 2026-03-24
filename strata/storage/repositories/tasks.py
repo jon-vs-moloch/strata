@@ -9,7 +9,7 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from shotgun_tokens.storage.models import TaskModel, TaskState
+from strata.storage.models import TaskModel, TaskState
 
 class TaskRepository:
     """
@@ -58,3 +58,14 @@ class TaskRepository:
         task = self.get_by_id(task_id)
         if task:
             task.state = state
+
+    def add_dependency(self, task_id: str, depends_on_id: str):
+        """
+        @summary Add a dependency between two tasks.
+        @inputs task_id (the dependent task), depends_on_id (the task being depended on)
+        """
+        task = self.get_by_id(task_id)
+        dep = self.get_by_id(depends_on_id)
+        if task and dep:
+            if dep not in task.dependencies:
+                task.dependencies.append(dep)

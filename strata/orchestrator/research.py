@@ -8,7 +8,7 @@
 """
 
 from typing import Dict, Any, Optional
-from shotgun_tokens.schemas.core import ResearchReport
+from strata.schemas.core import ResearchReport
 
 class ResearchModule:
     """

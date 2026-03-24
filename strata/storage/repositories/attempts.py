@@ -8,7 +8,7 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
-from shotgun_tokens.storage.models import AttemptModel, AttemptOutcome, AttemptResolution
+from strata.storage.models import AttemptModel, AttemptOutcome, AttemptResolution
 
 class AttemptRepository:
     """

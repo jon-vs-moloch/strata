@@ -11,12 +11,15 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any, Optional
-from shotgun_tokens.storage.services.main import StorageManager
-from shotgun_tokens.storage.models import TaskModel, TaskType, TaskState
-from shotgun_tokens.models.adapter import ModelAdapter
-from shotgun_tokens.orchestrator.background import BackgroundWorker
-from shotgun_tokens.api.hotreload import HotReloader
+from typing import List, Dict, Any, Optional, Union
+from strata.storage.services.main import StorageManager
+from strata.storage.models import TaskModel, TaskType, TaskState
+from strata.models.adapter import ModelAdapter
+from strata.orchestrator.background import BackgroundWorker
+from strata.api.hotreload import HotReloader
+from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchReport
+import importlib.util
+import glob
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ _worker = BackgroundWorker(
 # ── True Tool Calling ──────────────────────────────────────────────────────────
 # We no longer use string heuristics. Instead, we provide the LLM with explicitly 
 # defined tools to route tasks or fetch facts.
-TOOLS = [
+CORE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -85,6 +88,19 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "check_swarm_status",
+            "description": "Check the status of currently running tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Optional specific task ID to check."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "amend_project_spec",
             "description": "Permanently update the technical specification or architectural goals for this project. Use this when the user makes a significant pivot or sets new high-level constraints.",
             "parameters": {
@@ -97,6 +113,35 @@ TOOLS = [
         }
     }
 ]
+
+def load_dynamic_tools() -> List[Dict[str, Any]]:
+    """
+    @summary Hot-loads tool schemas from the tools/ directory.
+    @returns list of OpenAI-style tool definitions
+    """
+    dynamic_tools = []
+    tools_dir = os.path.join(_BASE_DIR, "strata", "tools")
+    
+    # Core tools are always present
+    dynamic_tools.extend(CORE_TOOLS)
+    
+    # Load custom tools from the tools/ directory
+    for tool_file in glob.glob(os.path.join(tools_dir, "*.py")):
+        if tool_file.endswith("__init__.py"): continue
+        
+        module_name = f"dynamic_tools.{os.path.basename(tool_file)[:-3]}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, tool_file)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, "TOOL_SCHEMA"):
+                    dynamic_tools.append(getattr(module, "TOOL_SCHEMA"))
+                    logger.info(f"Loaded dynamic tool: {os.path.basename(tool_file)}")
+        except Exception as e:
+            logger.error(f"Failed to dynamic load tool from {tool_file}: {e}")
+            
+    return dynamic_tools
 
 async def _perform_web_search(query: str) -> str:
     """Synchronous fallback web search using duckduckgo HTML for simple facts."""
@@ -127,10 +172,10 @@ async def _perform_web_search(query: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _worker.start()
-    logger.info("Shotgun Tokens API started")
+    logger.info("Strata API started")
     yield
     await _worker.stop()
-    logger.info("Shotgun Tokens API stopped")
+    logger.info("Strata API stopped")
 
 app = FastAPI(title="Strata API", lifespan=lifespan)
 
@@ -247,7 +292,9 @@ DO NOT output headers like '# Deep Web Research' without calling a tool. If you 
     final_reply = ""
     
     while iteration < max_iters:
-        model_response = await _model.chat(messages, tools=TOOLS)
+        # Use dynamic tool registry
+        active_tools = load_dynamic_tools()
+        model_response = await _model.chat(messages, tools=active_tools)
         
         tool_calls = model_response.get("tool_calls")
         content_val = model_response.get("content")
@@ -464,7 +511,7 @@ async def list_experimental_files():
 async def promote_file(payload: Dict[str, Any]):
     """
     @summary Validate and promote an experimental module to live.
-    @inputs { "module": "shotgun_tokens.api.main" }
+    @inputs { "module": "strata.api.main" }
     @side_effects replaces live file, triggers SIGHUP, rolls back on failure
     """
     module = payload.get("module")
@@ -492,7 +539,7 @@ async def rollback_file(payload: Dict[str, Any]):
 
 @app.post("/admin/reset")
 async def reset_database(storage: StorageManager = Depends(get_storage)):
-    from shotgun_tokens.storage.models import Base
+    from strata.storage.models import Base
     storage.session.close()
     Base.metadata.drop_all(storage.engine)
     Base.metadata.create_all(storage.engine)
@@ -526,4 +573,4 @@ async def stop_worker():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("shotgun_tokens.api.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("strata.api.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -1,5 +1,5 @@
 
-> shotgun_ui@0.0.0 dev
+> strata_ui@0.0.0 dev
 > vite --port 5175
 
 

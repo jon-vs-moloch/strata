@@ -9,7 +9,7 @@
 
 import yaml
 from typing import Dict, Any, Optional
-from shotgun_tokens.schemas.core import TaskDecomposition, ResearchReport
+from strata.schemas.core import TaskDecomposition, ResearchReport
 
 class DecompositionModule:
     """
@@ -75,7 +75,7 @@ class DecompositionModule:
         if not data or "error" in data:
             print(f"Decomposition failed to parse YAML: {data}")
             # Fallback mock so we don't crash, but log it
-            from shotgun_tokens.schemas.core import TaskFraming, LeafTaskPrototype
+            from strata.schemas.core import TaskFraming, LeafTaskPrototype
             return TaskDecomposition(
                 framing=TaskFraming(repository_context="Repo", problem_statement=task_desc, constraints=[], success_criteria=[]),
                 subtasks={"error_fallback": LeafTaskPrototype(title="Error Recover", description="Initial decomposition failed. Research manually.", target_files=[], dependencies=[])},
