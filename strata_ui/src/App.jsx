@@ -34,10 +34,16 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
   const [maxSyncIters, setMaxSyncIters] = useState(3);
   const [savingSettings, setSavingSettings] = useState(false);
 
+  // Model Registry Settings
+  const [registryConfig, setRegistryConfig] = useState({ strong: [], weak: [] });
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [savingRegistry, setSavingRegistry] = useState(false);
+
   // Load state on mount
   useEffect(() => {
     loadModels();
     loadSettings();
+    loadRegistry();
   }, []);
 
   const loadSettings = async () => {
@@ -47,6 +53,42 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
         setMaxSyncIters(res.data.settings.max_sync_tool_iterations || 3);
       }
     } catch (e) { console.error('Failed to load settings', e); }
+  };
+
+  const loadRegistry = async () => {
+    setRegistryLoading(true);
+    try {
+      const res = await axios.get(`${apiUrl}/admin/registry`);
+      setRegistryConfig(res.data.config);
+    } catch (e) {
+      console.error('Failed to load registry', e);
+    } finally {
+      setRegistryLoading(false);
+    }
+  };
+
+  const handleUpdateRegistry = async (pool, field, value, index = 0) => {
+    const next = { ...registryConfig };
+    if (!next[pool]) next[pool] = [{}];
+    if (!next[pool][index]) next[pool][index] = {};
+    next[pool][index][field] = value;
+    
+    // Ensure default transport if missing
+    if (pool === 'strong') next[pool][index].transport = 'cloud';
+    if (pool === 'weak') next[pool][index].transport = 'local';
+    // Ensure default provider if missing
+    if (!next[pool][index].provider) next[pool][index].provider = pool === 'strong' ? 'openrouter' : 'lmstudio';
+    
+    setRegistryConfig({ ...next });
+    
+    setSavingRegistry(true);
+    try {
+      await axios.post(`${apiUrl}/admin/registry`, next);
+    } catch (e) {
+      console.error('Failed to save registry', e);
+    } finally {
+      setSavingRegistry(false);
+    }
   };
 
   const handleSaveSettings = async (val) => {
@@ -124,8 +166,15 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
   const sectionLabel = { fontSize: '11px', fontWeight: 700, color: '#9499ad', letterSpacing: '0.08em', marginBottom: '8px' };
   const infoValue = {
     background: '#1c1c22', border: '1px solid rgba(255,255,255,0.05)',
-    borderRadius: '8px', padding: '10px 14px', color: '#888',
+    borderRadius: '8px', padding: '10px 14px', color: '#ccc',
     fontSize: '13px', fontFamily: "'JetBrains Mono', monospace",
+    width: '100%', outline: 'none'
+  };
+
+  const inputGroupStyle = {
+    background: 'rgba(255,255,255,0.02)', padding: '12px', 
+    borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)',
+    display: 'flex', flexDirection: 'column', gap: '8px'
   };
 
   return (
@@ -147,8 +196,8 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
         onClick={e => e.stopPropagation()}
         style={{
           background: '#141418', border: '1px solid rgba(255,255,255,0.1)',
-          borderRadius: '20px', padding: '32px', width: '520px',
-          display: 'flex', flexDirection: 'column', gap: '20px',
+          borderRadius: '20px', padding: '32px', width: '560px',
+          display: 'flex', flexDirection: 'column', gap: '24px',
           maxHeight: '90vh', overflowY: 'auto'
         }}
       >
@@ -172,7 +221,7 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
         <div>
           <div style={sectionLabel}>CONNECTION</div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <div style={{ ...infoValue, flex: 1 }}>{apiUrl}</div>
+            <div style={{ ...infoValue, flex: 1, color: '#888' }}>{apiUrl}</div>
             <button
               onClick={handleTest}
               disabled={testing}
@@ -187,21 +236,51 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               {testing ? 'Testing…' : 'Test'}
             </button>
           </div>
-          {testResult && (
-            <div style={{ marginTop: '8px', fontSize: '12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: testResult.ok ? '#00f294' : '#ff4d4d' }}>
-                {testResult.ok
-                  ? <><Activity size={12} /> Strata API — connected ({testResult.latency}ms)</>
-                  : <><AlertCircle size={12} /> {testResult.error}</>
-                }
-              </div>
-              {testResult.ok && testResult.llm && (
-                <div style={{ color: '#555', fontSize: '11px' }}>
-                  LLM provider → <span style={{ color: '#888', fontFamily: "'JetBrains Mono', monospace" }}>{testResult.llm}</span>
-                </div>
-              )}
+        </div>
+
+        {/* ── Model Registry ───────────────────────────────────────────────── */}
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <div style={sectionLabel}>MODEL REGISTRY</div>
+            {savingRegistry && <span style={{ fontSize: '10px', color: '#8257e5', fontWeight: 700 }}>SAVING…</span>}
+          </div>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {/* Strong Pool */}
+            <div style={inputGroupStyle}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL (CLOUD)</div>
+              <input 
+                style={infoValue} placeholder="Model (e.g. anthropic/claude-3.5-sonnet)"
+                value={registryConfig.strong?.[0]?.model || ''}
+                onChange={e => handleUpdateRegistry('strong', 'model', e.target.value)}
+              />
+              <input 
+                style={infoValue} placeholder="Endpoint URL (e.g. https://openrouter.ai/api/v1/chat/completions)"
+                value={registryConfig.strong?.[0]?.endpoint_url || ''}
+                onChange={e => handleUpdateRegistry('strong', 'endpoint_url', e.target.value)}
+              />
+              <input 
+                style={infoValue} placeholder="API Key Env (e.g. OPENROUTER_API_KEY)"
+                value={registryConfig.strong?.[0]?.api_key_env || ''}
+                onChange={e => handleUpdateRegistry('strong', 'api_key_env', e.target.value)}
+              />
             </div>
-          )}
+
+            {/* Weak Pool */}
+            <div style={inputGroupStyle}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#00d9ff', marginBottom: '4px', letterSpacing: '0.05em' }}>WEAK POOL (LOCAL)</div>
+              <input 
+                style={infoValue} placeholder="Model (e.g. qwen3.5-9b-distilled)"
+                value={registryConfig.weak?.[0]?.model || ''}
+                onChange={e => handleUpdateRegistry('weak', 'model', e.target.value)}
+              />
+              <input 
+                style={infoValue} placeholder="Endpoint URL (e.g. http://127.0.0.1:1234/v1/chat/completions)"
+                value={registryConfig.weak?.[0]?.endpoint_url || ''}
+                onChange={e => handleUpdateRegistry('weak', 'endpoint_url', e.target.value)}
+              />
+            </div>
+          </div>
         </div>
 
         {/* ── Orchestrator Settings ────────────────────────────────────────── */}
@@ -215,68 +294,12 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               onChange={e => setMaxSyncIters(e.target.value)}
               onBlur={e => handleSaveSettings(e.target.value)}
               min="1" max="10"
-              style={{ ...infoValue, width: '60px', textAlign: 'center', opacity: savingSettings ? 0.5 : 1 }}
+              style={{ ...infoValue, width: '60px', textAlign: 'center', opacity: savingSettings ? 0.5 : 1, padding: '10px 0' }}
             />
           </div>
           <div style={{ fontSize: '11px', color: '#555', marginTop: '6px' }}>
             Limits how many times the model can independently recurse tools on a single message.
           </div>
-        </div>
-
-        {/* ── Model Selector ───────────────────────────────────────────────── */}
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-            <div style={sectionLabel}>MODEL</div>
-            <button
-              onClick={loadModels}
-              disabled={modelsLoading}
-              style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', padding: '2px', display: 'flex' }}
-              title="Refresh model list"
-            >
-              <RefreshCw size={13} style={{ animation: modelsLoading ? 'spin 1s linear infinite' : 'none' }} />
-            </button>
-          </div>
-
-          {modelsError && (
-            <div style={{ fontSize: '12px', color: '#ff4d4d', display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 12px', background: 'rgba(255,77,77,0.05)', borderRadius: '8px', border: '1px solid rgba(255,77,77,0.15)', marginBottom: '8px' }}>
-              <AlertCircle size={13} /> {modelsError}
-            </div>
-          )}
-
-          {modelsLoading && models.length === 0 && (
-            <div style={{ fontSize: '12px', color: '#555', padding: '12px', textAlign: 'center' }}>Loading models…</div>
-          )}
-
-          {models.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '180px', overflowY: 'auto' }}>
-              {models.map(m => (
-                <button
-                  key={m}
-                  onClick={() => handleSelectModel(m)}
-                  disabled={selectingModel === m}
-                  style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    background: m === currentModel ? 'rgba(130,87,229,0.12)' : 'rgba(255,255,255,0.02)',
-                    border: m === currentModel ? '1px solid rgba(130,87,229,0.4)' : '1px solid rgba(255,255,255,0.05)',
-                    borderRadius: '8px', padding: '10px 14px', cursor: 'pointer',
-                    color: m === currentModel ? '#8257e5' : '#aaa',
-                    fontSize: '12px', fontFamily: "'JetBrains Mono', monospace",
-                    textAlign: 'left', transition: 'all 0.15s'
-                  }}
-                >
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m}</span>
-                  {m === currentModel && <span style={{ fontSize: '10px', fontWeight: 800, color: '#8257e5', flexShrink: 0, marginLeft: '8px' }}>ACTIVE</span>}
-                  {selectingModel === m && <span style={{ fontSize: '10px', color: '#888', flexShrink: 0, marginLeft: '8px' }}>…</span>}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {models.length === 0 && !modelsLoading && !modelsError && (
-            <div style={{ fontSize: '12px', color: '#555', padding: '12px', textAlign: 'center', background: 'rgba(255,255,255,0.02)', borderRadius: '8px' }}>
-              No models available — is the LLM provider running?
-            </div>
-          )}
         </div>
 
         {/* ── Danger Zone ──────────────────────────────────────────────────── */}
@@ -308,11 +331,6 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               {resetting ? 'Resetting…' : resetDone ? '✓ Done' : resetConfirm ? 'Confirm Reset' : 'Reset DB'}
             </button>
           </div>
-          {resetConfirm && !resetting && (
-            <p style={{ fontSize: '11px', color: '#ff4d4d', textAlign: 'center' }}>
-              Click "Confirm Reset" to proceed. This cannot be undone.
-            </p>
-          )}
         </div>
       </motion.div>
     </motion.div>
@@ -392,6 +410,8 @@ function App() {
   const isSendingRef = useRef(false);
   const fetchGenRef = useRef(0);       // generation counter for stale-poll rejection
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
+  const [rebooting, setRebooting] = useState(false);
+  const [backendLogs, setBackendLogs] = useState([]);
   const API = 'http://localhost:8000';
 
   const [archivedTasks, setArchivedTasks] = useState(() => {
@@ -418,6 +438,20 @@ function App() {
     const interval = setInterval(fetchWorkerStatus, 5000);
     return () => clearInterval(interval);
   }, [fetchWorkerStatus]);
+
+  const handleReboot = async () => {
+    setRebooting(true);
+    try {
+      await axios.post(`${API}/admin/reboot`);
+      setTimeout(() => {
+        setRebooting(false);
+        fetchData(true);
+      }, 3000);
+    } catch (e) {
+      console.error('Reboot failed', e);
+      setRebooting(false);
+    }
+  };
 
   const handlePause = async () => {
     try {
@@ -568,11 +602,12 @@ function App() {
     });
     
     const roots = [];
-    // Second pass: link children
+    // Second pass: link children with cycle detection
+    const visited = new Set();
     filteredTasks.forEach(t => {
-      if (t.parent_id && map[t.parent_id]) {
+      if (t.parent_id && map[t.parent_id] && t.parent_id !== t.id) {
         map[t.parent_id].children.push(map[t.id]);
-      } else if (!t.parent_id) {
+      } else if (!t.parent_id || t.parent_id === t.id) {
         roots.push(map[t.id]);
       }
     });
@@ -717,7 +752,22 @@ function App() {
               </span>
             )}
             {apiStatus === 'error' && (
-              <span style={{ fontSize: '11px', color: '#ff4d4d', fontWeight: 600 }}>API DOWN</span>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <span style={{ fontSize: '11px', color: '#ff4d4d', fontWeight: 600 }}>API DOWN</span>
+                <button 
+                  onClick={() => fetchData(true)}
+                  style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', color: '#8257e5', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 800, cursor: 'pointer' }}
+                >
+                  RECONNECT
+                </button>
+                <button 
+                  onClick={handleReboot}
+                  disabled={rebooting}
+                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', color: '#ccc', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 800, cursor: 'pointer' }}
+                >
+                  {rebooting ? '...' : 'REBOOT'}
+                </button>
+              </div>
             )}
           </div>
         </header>

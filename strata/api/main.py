@@ -185,6 +185,9 @@ async def _perform_web_search(query: str) -> str:
 # ── App lifecycle ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from strata.storage.models import Base
+    from strata.storage.services.main import _engine
+    Base.metadata.create_all(_engine)
     await _worker.start()
     logger.info("Strata API started")
     yield
@@ -202,11 +205,7 @@ app.add_middleware(
 
 
 def get_storage():
-    storage = StorageManager()
-    try:
-        yield storage
-    finally:
-        storage.close()
+    return _storage
 
 
 # ── Standard endpoints ──────────────────────────────────────────────────────────
@@ -559,6 +558,70 @@ async def get_settings():
 async def update_settings(payload: Dict[str, Any]):
     GLOBAL_SETTINGS.update(payload)
     return {"status": "ok"}
+
+@app.get("/admin/registry")
+async def get_registry():
+    from strata.models.registry import registry
+    return {"status": "ok", "config": registry.to_dict()}
+
+@app.post("/admin/registry")
+async def update_registry(payload: Dict[str, Any]):
+    from strata.models.registry import registry
+    registry._load_config(payload)
+    return {"status": "ok"}
+
+@app.get("/admin/health")
+async def health_check():
+    """
+    @summary Deep health check of the orchestrator substrate.
+    """
+    from sqlalchemy import text
+    try:
+        # Check DB
+        db = _storage.session
+        db.execute(text("SELECT 1"))
+        
+        # Check Worker
+        worker_alive = _worker._running_task is not None and not _worker._running_task.done()
+        
+        return {
+            "status": "ok",
+            "database": "connected",
+            "worker": "running" if worker_alive else "dead",
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "error": str(e)
+        }
+
+@app.get("/admin/logs")
+async def get_logs(limit: int = 50):
+    """
+    @summary Fetch the tail of the backend log for UI debugging.
+    """
+    log_path = "/tmp/strata_backend.log"
+    if not os.path.exists(log_path):
+        return {"logs": ["Log file not found."]}
+    
+    with open(log_path, "r") as f:
+        lines = f.readlines()
+        return {"logs": [line.strip() for line in lines[-limit:]]}
+
+@app.post("/admin/reboot")
+async def reboot_api():
+    """
+    @summary Restart the backend process by replacing itself.
+    """
+    import sys
+    print("REBOOTING API PROCESS...")
+    # Give the response a moment to send
+    async def restart_soon():
+        await asyncio.sleep(0.5)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    
+    asyncio.create_task(restart_soon())
+    return {"status": "rebooting"}
 
 @app.get("/admin/files")
 async def list_experimental_files():

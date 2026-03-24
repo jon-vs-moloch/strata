@@ -15,7 +15,7 @@ from strata.orchestrator.worker.telemetry import synthesize_model_performance
 from strata.orchestrator.worker.attempt_runner import run_attempt
 from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
-from strata.orchestrator.worker.routing_policy import select_model_tier, is_canary_eligible
+from strata.orchestrator.worker.routing_policy import select_model_tier
 
 logger = logging.getLogger(__name__)
 

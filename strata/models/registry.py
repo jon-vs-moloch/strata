@@ -16,13 +16,22 @@ class ModelRegistry:
     """
     def __init__(self, config: Dict[str, List[Dict]] = None):
         self.pools: Dict[str, ModelPool] = {}
+        self._config = config or {}
         if config:
             self._load_config(config)
 
     def _load_config(self, config: Dict[str, List[Dict]]):
+        if not config: return
+        self._config = config
         for pool_name, endpoints_data in config.items():
             endpoints = [ModelEndpoint(**e) for e in endpoints_data]
             self.pools[pool_name] = ModelPool(name=pool_name, endpoints=endpoints)
+
+    def to_dict(self) -> Dict[str, List[Dict]]:
+        """
+        @summary Returns the current registry configuration as a serializable dictionary.
+        """
+        return self._config
 
     def get_provider_for_context(self, context: ExecutionContext) -> BaseModelProvider:
         """
@@ -82,10 +91,10 @@ DEFAULT_CONFIG = {
     ],
     "weak": [
         {
-            "provider": "ollama",
-            "model": "qwen2.5-coder:7b",
+            "provider": "lmstudio",
+            "model": "mlx-qwen3.5-9b-claude-4.6-opus-reasoning-distilled-v2",
             "transport": "local",
-            "endpoint_url": "http://127.0.0.1:11434/v1/chat/completions"
+            "endpoint_url": "http://127.0.0.1:1234/v1/chat/completions"
         }
     ]
 }
