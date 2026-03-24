@@ -14,6 +14,7 @@ from shotgun_tokens.storage.models import TaskModel, TaskState, TaskType, Attemp
 from shotgun_tokens.orchestrator.research import ResearchModule
 from shotgun_tokens.orchestrator.decomposition import DecompositionModule
 from shotgun_tokens.orchestrator.implementation import ImplementationModule
+from shotgun_tokens.schemas.core import AttemptResolutionSchema
 
 logger = logging.getLogger(__name__)
 
@@ -321,14 +322,11 @@ Reply with ONLY a single sentence describing the task.
             except Exception as e:
                 storage.rollback() # Rollback any partial progress in repositories if possible
                 
-                logger.exception(f"Attempt {attempt.attempt_id} for task {task_id} failed: {e}")
-                storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.FAILED, reason=str(e))
+                # Determine resolution using SLM Structured Outputs
+                resolution_data = await self._determine_resolution(task, e, storage)
+                storage.attempts.set_resolution(attempt.attempt_id, AttemptResolution(resolution_data.resolution))
                 
-                # Determine resolution
-                resolution = await self._determine_resolution(task, e, storage)
-                storage.attempts.set_resolution(attempt.attempt_id, resolution)
-                
-                await self._apply_resolution(task, resolution, e, storage)
+                await self._apply_resolution(task, resolution_data, e, storage)
                 storage.commit()
 
             # Always perform plan review after an attempt finishes (success or failure)
@@ -344,63 +342,100 @@ Reply with ONLY a single sentence describing the task.
         finally:
             storage.session.close()
 
-    async def _determine_resolution(self, task: TaskModel, error: Exception, storage) -> AttemptResolution:
+    async def _determine_resolution(self, task: "TaskModel", error: Exception, storage) -> AttemptResolutionSchema:
         """
-        @summary Classify the failure and choose a resolution strategy.
+        @summary Classify the failure and choose a resolution strategy using Structured SLM Output.
         """
-        # Simple heuristic for now:
-        # If it's a deep task, maybe abandon to parent.
-        # If it's a root task, decompose or reattempt.
-        if task.parent_task_id is None:
-            # Root tasks cannot abandon to parent
-            if task.depth < 2:
-                return AttemptResolution.DECOMPOSE
-            else:
-                return AttemptResolution.REATTEMPT
+        import json
         
-        # Child tasks can abandon to parent
-        if "timeout" in str(error).lower():
-            return AttemptResolution.DECOMPOSE
-        
-        return AttemptResolution.ABANDON_TO_PARENT
+        prompt = f"""You are a failure analysis agent for the Strata Swarm.
+A background task has failed. Evaluate the error and determine the structural fix.
 
-    async def _apply_resolution(self, task: TaskModel, resolution: AttemptResolution, error: Exception, storage):
+TASK: {task.title}
+DESCRIPTION: {task.description}
+ERROR: {str(error)}
+
+RESOLUTIONS:
+- reattempt: Use for transient/random errors.
+- decompose: The goal is too large; break it into simpler subtasks.
+- internal_replan: The current approach/method is flawed; replan at this level.
+- abandon_to_parent: This leaf task is impossible OR requires architectural decisions beyond this scope.
+
+Respond with structured reasoning first, then the resolution choice.
+"""
+        response = await self._model.chat(
+            messages=[{"role": "system", "content": prompt}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "attempt_resolution",
+                    "strict": True,
+                    "schema": AttemptResolutionSchema.model_json_schema()
+                }
+            }
+        )
+        
+        try:
+            raw_content = response.get("content", "{}")
+            # Handle potential markdown fence
+            if "```json" in raw_content:
+                raw_content = raw_content.split("```json")[1].split("```")[0]
+            
+            data = json.loads(raw_content)
+            return AttemptResolutionSchema(**data)
+        except Exception as e:
+            logger.error(f"Failed to parse structured SLM resolution: {e}. Falling back to REATTEMPT.")
+            return AttemptResolutionSchema(
+                reasoning=f"Resolution analysis failed: {e}",
+                resolution="reattempt",
+                new_subtasks=[]
+            )
+
+    async def _apply_resolution(self, task: "TaskModel", resolution_data: AttemptResolutionSchema, error: Exception, storage):
         """
-        @summary Apply the chosen resolution to the task graph.
+        @summary Apply the SLM's structural resolution to the task graph.
         """
-        if resolution == AttemptResolution.REATTEMPT:
-            logger.info(f"Resolution: REATTEMPT task {task.task_id}")
+        from shotgun_tokens.storage.models import TaskState, TaskType
+        res = resolution_data.resolution
+        logger.info(f"Applying SLM Resolution: {res.upper()} for task {task.task_id} ({resolution_data.reasoning})")
+        
+        if res == "reattempt":
             task.state = TaskState.PENDING
             await self.enqueue(task.task_id)
             
-        elif resolution == AttemptResolution.DECOMPOSE:
-            logger.info(f"Resolution: DECOMPOSE task {task.task_id}")
-            # We keep it as WORKING and create a specific decomposition task?
-            # Or just update it to DECOMP type? 
-            # The spec says: "Effect: create child tasks, keep current task working"
-            # Here we'll spawn a "Failover Decomposition" task.
-            failover_task = storage.tasks.create(
-                title=f"Decomposition Recovery: {task.title}",
-                description=f"The previous attempt failed with: {error}. Decompose this problem into smaller sub-tasks.",
-                session_id=task.session_id,
-                parent_task_id=task.task_id,
-                state=TaskState.PENDING,
-                type=TaskType.DECOMP,
-                depth=task.depth + 1
-            )
-            storage.commit()
-            await self.enqueue(failover_task.task_id)
-            
-        elif resolution == AttemptResolution.ABANDON_TO_PARENT:
-            logger.info(f"Resolution: ABANDON_TO_PARENT task {task.task_id}")
+        elif res == "decompose" or res == "internal_replan":
+            if resolution_data.new_subtasks:
+                for sub_proto in resolution_data.new_subtasks:
+                    sub = storage.tasks.create(
+                        parent_task_id=task.task_id,
+                        title=f"Recovery: {sub_proto.title}",
+                        description=sub_proto.description,
+                        session_id=task.session_id,
+                        state=TaskState.PENDING,
+                        depth=task.depth + 1
+                    )
+                    sub.type = TaskType.IMPL
+                    storage.commit()
+                    await self.enqueue(sub.task_id)
+                task.state = TaskState.WORKING
+            else:
+                # Fallback to generic decomposition task
+                failover = storage.tasks.create(
+                    title=f"Recovery Plan for {task.title}",
+                    description=f"Automated recovery from failover analysis: {resolution_data.reasoning}. Original error: {error}",
+                    parent_task_id=task.task_id,
+                    type=TaskType.DECOMP,
+                    state=TaskState.PENDING,
+                    depth=task.depth + 1
+                )
+                storage.commit()
+                await self.enqueue(failover.task_id)
+                task.state = TaskState.WORKING
+                
+        elif res == "abandon_to_parent":
             task.state = TaskState.ABANDONED
-            # Notify parent is handled implicitly by the state change if the parent is monitoring.
-            # In our current loop, the parent will see a child is abandoned and could react.
-            
-        elif resolution == AttemptResolution.INTERNAL_REPLAN:
-            logger.info(f"Resolution: INTERNAL_REPLAN task {task.task_id}")
-            task.state = TaskState.PENDING # Or some 'replanning' state?
-            # Logic to change approach...
+            # Solve the Gridlock: Trigger the Dependency Cascade
+            storage.apply_dependency_cascade()
 
     async def _run_research(self, task: "TaskModel", storage):
         """

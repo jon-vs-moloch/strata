@@ -100,3 +100,46 @@ class StorageManager:
         self.commit()
         
         return summary_text + f"\n[Note: This is a cached summary. If you require the exact raw data, call the 'fetch_raw_artifact' tool with ID: {resource_id}]"
+
+    def apply_dependency_cascade(self):
+        """
+        @summary Practical Cascade Rule: If a task is ABANDONED or CANCELLED, cancel all its dependents recursively.
+        @owns gridlock resolution, dependency safety
+        """
+        from shotgun_tokens.storage.models import TaskModel, TaskState, task_dependencies
+        
+        # 1. Find all tasks currently in a terminal failure state
+        failed_tasks = self.session.query(TaskModel).filter(
+            TaskModel.state.in_([TaskState.ABANDONED, TaskState.CANCELLED])
+        ).all()
+        
+        # Use a queue to handle recursive invalidation
+        queue = [t.task_id for t in failed_tasks]
+        processed = set()
+        
+        cascades = 0
+        while queue:
+            current_id = queue.pop(0)
+            if current_id in processed:
+                continue
+            processed.add(current_id)
+            
+            # Find tasks that hold this current_id in their 'depends_on_id' (dependencies)
+            dependents = (
+                self.session.query(TaskModel)
+                .join(task_dependencies, TaskModel.task_id == task_dependencies.c.task_id)
+                .filter(task_dependencies.c.depends_on_id == current_id)
+                .all()
+            )
+            
+            for dep in dependents:
+                if dep.state not in [TaskState.CANCELLED, TaskState.ABANDONED]:
+                    print(f"GRIDLOCK RESOLUTION: Cancelling {dep.task_id} (dependent on failed {current_id})")
+                    dep.state = TaskState.CANCELLED
+                    cascades += 1
+                    queue.append(dep.task_id)
+        
+        if cascades > 0:
+            self.commit()
+            return cascades
+        return 0

@@ -1,6 +1,6 @@
 """
 @module api.main
-@purpose Expose internal storage and orchestrator state to the UI via REST.
+@purpose Expose internal storage and Strata orchestrator state to the UI via REST.
 @owns API routing, JSON serialization, StorageManager lifecycle, background worker
 @does_not_own business logic orchestration, database schema definitions
 @key_exports app
@@ -72,7 +72,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Perform an IMMEDIATE synchronous web search. Use ONLY for quick, immediate answers like facts, daily weather, or single-concept documentation lookups. Do NOT use this for deep or comprehensive research.",
+            "description": "Start an asynchronous background web search. Use this for quick, targeted fact-finding. The results will be synthesized and posted to the chat once complete.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -81,7 +81,6 @@ TOOLS = [
                 "required": ["query"]
             }
         }
-    },
     },
     {
         "type": "function",
@@ -323,9 +322,21 @@ DO NOT output headers like '# Deep Web Research' without calling a tool. If you 
                     tool_content = f"Successfully enqueued swarm implementation task {task.task_id}."
 
                 elif func_name == "search_web":
-                    query = args.get("query", content)
-                    search_results = await _perform_web_search(query)
-                    tool_content = f"Search Results for '{query}':\n{search_results}"
+                    query = args.get("query")
+                    # ASYNC FIX: Offload web search to background
+                    logger.info(f"Offloading web search to Strata worker: {query}")
+                    task = storage.tasks.create(
+                        title=f"Web Search: {query}",
+                        description=f"Perform a targeted web search for: {query}. Synthesize the results and provide a concise answer.",
+                        session_id=session_id,
+                        state=TaskState.PENDING,
+                        constraints={"target_scope": "web"}
+                    )
+                    task.type = TaskType.RESEARCH
+                    storage.commit()
+                    await _worker.enqueue(task.task_id)
+                    
+                    tool_content = f"I am searching the web for '{query}'. I will synthesize the findings and post them here shortly."
                     tool_outputs_generated = True
 
                 elif func_name == "check_swarm_status":

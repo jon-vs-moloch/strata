@@ -29,11 +29,11 @@ class ModelAdapter:
         self.endpoint = endpoint
         self.active_model = model
 
-    async def chat(self, messages: List[Dict[str, str]], format: str = "json", tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    async def chat(self, messages: List[Dict[str, str]], format: str = "json", tools: Optional[List[Dict]] = None, response_format: Optional[Dict] = None) -> Dict[str, Any]:
 
         """
         @summary Send a chat message list to the model and return a structured response.
-        @inputs messages: context list, format: desired output ('json' or 'yaml'), tools: optional OpenAI tools array
+        @inputs messages: context list, format: desired output ('json' or 'yaml'), tools: optional OpenAI tools array, response_format: Optional JSON schema
         @outputs dictionary representing the model's structured decision
         @side_effects makes network calls to the model provider
         """
@@ -45,10 +45,12 @@ class ModelAdapter:
                     "model": self.active_model, 
                     "messages": messages, 
                     "stream": False,
-                    "temperature": 0.7
+                    "temperature": 0.1 if response_format else 0.7
                 }
                 if tools:
                     payload["tools"] = tools
+                if response_format:
+                    payload["response_format"] = response_format
 
                 # Use a long read-timeout for reasoning models (they can think for many seconds)
                 # but keep the connect-timeout short so a dead server fails fast.

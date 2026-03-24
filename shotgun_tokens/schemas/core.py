@@ -1,14 +1,38 @@
 """
 @module schemas.core
-@purpose Define Pydantic schemas for structured LLM communication.
-@owns TaskFraming, TaskDecomposition, LeafTaskPrototypes, CandidateSchema
+@purpose Define Pydantic schemas for structured Strata LLM communication.
+@owns TaskFraming, TaskDecomposition, LeafTaskPrototypes, CandidateSchema, AttemptResolution
 @does_not_own Database models (TaskModel), DB storage logic
-@key_exports TaskFraming, TaskDecomposition, LeafTaskPrototype, ResearchReport
+@key_exports TaskFraming, TaskDecomposition, LeafTaskPrototype, ResearchReport, AttemptResolutionSchema
 """
 
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Literal
 from enum import Enum
+
+class SubtaskDraft(BaseModel):
+    title: str = Field(
+        ..., 
+        description="A short, clear title for the new subtask."
+    )
+    description: str = Field(
+        ..., 
+        description="Detailed instructions on what this subtask must accomplish."
+    )
+
+class AttemptResolutionSchema(BaseModel):
+    reasoning: str = Field(
+        ..., 
+        description="Explain exactly why the attempt failed and evaluate the best path forward before choosing a resolution."
+    )
+    resolution: Literal["reattempt", "decompose", "internal_replan", "abandon_to_parent"] = Field(
+        ...,
+        description="The structural decision for how to handle this failure."
+    )
+    new_subtasks: List[SubtaskDraft] = Field(
+        default_factory=list,
+        description="If resolution is 'decompose' or 'internal_replan', provide the new child tasks here. If 'reattempt' or 'abandon_to_parent', leave this array empty."
+    )
 
 class ResearchReport(BaseModel):
     """
