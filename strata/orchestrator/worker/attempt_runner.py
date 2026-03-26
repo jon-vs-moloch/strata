@@ -64,7 +64,8 @@ async def _run_research(task, storage, model_adapter):
     research = ResearchModule(model_adapter, storage)
     report = await research.conduct_research(
         task_description=task.description,
-        repo_path=task.repo_path
+        repo_path=task.repo_path,
+        context_hints=dict(task.constraints or {}),
     )
     # Formatter would go here, simplified for brevity
     storage.messages.create(

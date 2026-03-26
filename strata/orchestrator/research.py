@@ -7,8 +7,70 @@
 @side_effects none
 """
 
+from pathlib import Path
 from typing import Dict, Any, Optional
 from strata.schemas.core import ResearchReport
+
+
+DEFAULT_REPO_ANCHORS = [
+    "README.md",
+    ".knowledge/specs/global_spec.md",
+    ".knowledge/specs/project_spec.md",
+    "docs/spec/project-philosophy.md",
+    "docs/spec/codemap.md",
+    "strata/api",
+    "strata/eval",
+    "strata/orchestrator",
+    "strata/knowledge",
+    "strata/storage",
+]
+
+
+def _build_research_system_prompt(
+    target_scope: str,
+    task_description: str,
+    repo_snapshot: str = "",
+    spec_paths: Optional[list[str]] = None,
+) -> str:
+    spec_lines = "\n".join(f"- {path}" for path in (spec_paths or [])) or "- None provided"
+    repo_hint_block = f"\nObserved repository snapshot:\n{repo_snapshot}\n" if repo_snapshot else ""
+    codebase_nudge = ""
+    lower_desc = (task_description or "").lower()
+    if target_scope.lower() == "codebase" or any(
+        keyword in lower_desc
+        for keyword in ["codebase", "repo", "repository", "alignment", "spec", "implementation"]
+    ):
+        anchors = "\n".join(f"- {path}" for path in DEFAULT_REPO_ANCHORS)
+        codebase_nudge = f"""
+[CODEBASE-FIRST BEHAVIOR]
+- You DO have access to the local repository through `list_directory` and `read_file`.
+- For codebase, alignment, or spec-gap tasks, start by inspecting the local repo before concluding anything is missing.
+- Use `list_directory` on "." or a likely subtree, then `read_file` on concrete anchors such as:
+{anchors}
+- Do not say you need "access to the codebase" when the task already provides repo paths or a snapshot. Inspect the files instead.
+- If the snapshot or anchor files seem incomplete, say what you inspected and what is still missing.
+"""
+
+    return f"""You are an Expert Research Agent building a persistent knowledge library.
+Your primary goal is to decompose the user's research task and iteratively gather data.
+
+[CRITICAL - TOOL USE]
+To gather information or save data, you MUST use the structured tool-calling format.
+If you simply say "I will call a tool" in plain text without a structured tool call, the system will reject your response.
+Your current tools: list_directory, read_file, search_web, write_library_file.
+
+[LIBRARY STRUCTURE]
+- As you find complete atomic findings, you MUST use `write_library_file` to save them locally into the `.knowledge/` memory store.
+- Enforce a clean library structure: small, atomic files. ALWAYS include YAML metadata (title, subjects, tags) at the top.
+- Use [[Wikilinks]] to cross-reference other documents you create.
+
+[LOCAL CONTEXT]
+- Repository paths are relative to the repo root.
+- Canonical spec paths for this task:
+{spec_lines}{repo_hint_block}{codebase_nudge}
+
+When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
+Focus area: {target_scope.upper()} scope."""
 
 class ResearchModule:
     """
@@ -28,7 +90,13 @@ class ResearchModule:
         self.model = model_adapter
         self.storage = storage_manager
 
-    async def conduct_research(self, task_description: str, repo_path: Optional[str] = None, target_scope: str = "codebase") -> ResearchReport:
+    async def conduct_research(
+        self,
+        task_description: str,
+        repo_path: Optional[str] = None,
+        target_scope: str = "codebase",
+        context_hints: Optional[Dict[str, Any]] = None,
+    ) -> ResearchReport:
         """
         @summary Autonomous agent loop for research. Decomposes the task, queries the web/codebase iteratively, and synthesizes.
         """
@@ -39,8 +107,28 @@ class ResearchModule:
         
         print(f"Starting autonomous research loop for: {task_description[:50]}...")
         root = repo_path or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        context_hints = context_hints or {}
+        repo_snapshot = str(context_hints.get("repo_snapshot") or "").strip()
+        spec_paths = context_hints.get("spec_paths") or []
         
         RESEARCH_TOOLS = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_directory",
+                    "description": "List files and folders in a local repository directory. Use this first when you need to inspect what exists.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path to the directory. Use '.' for repo root."
+                            }
+                        },
+                        "required": ["path"]
+                    }
+                }
+            },
             {
                 "type": "function",
                 "function": {
@@ -102,21 +190,12 @@ class ResearchModule:
         messages = [
             {
                 "role": "system",
-                "content": f"""You are an Expert Research Agent building a persistent knowledge library.
-Your primary goal is to decompose the user's research task and iteratively gather data.
-
-[CRITICAL - TOOL USE]
-To gather information or save data, you MUST use the structured tool-calling format. 
-If you simply say "I will call a tool" in plain text without a structured tool call, the system will reject your response.
-Your current tools: search_web, read_file, write_library_file. 
-
-[LIBRARY STRUCTURE]
-- As you find complete atomic findings, you MUST use `write_library_file` to save them locally into the `.knowledge/` memory store.
-- Enforce a clean library structure: small, atomic files. ALWAYS include YAML metadata (title, subjects, tags) at the top.
-- Use [[Wikilinks]] to cross-reference other documents you create.
-
-When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
-Focus area: {target_scope.upper()} scope."""
+                "content": _build_research_system_prompt(
+                    target_scope=target_scope,
+                    task_description=task_description,
+                    repo_snapshot=repo_snapshot,
+                    spec_paths=spec_paths,
+                ),
             },
             {
                 "role": "user",
@@ -154,6 +233,32 @@ Focus area: {target_scope.upper()} scope."""
                     final_report_data = args
                     break
                     
+                elif func_name == "list_directory":
+                    rel_path = args.get("path", ".") or "."
+                    print(f"  -> Research Agent listing directory: {rel_path}")
+                    try:
+                        directory = (Path(root) / rel_path).resolve()
+                        repo_root = Path(root).resolve()
+                        directory.relative_to(repo_root)
+                        if not directory.exists():
+                            tool_result = f"Directory does not exist: {rel_path}"
+                        elif not directory.is_dir():
+                            tool_result = f"Path is not a directory: {rel_path}"
+                        else:
+                            children = sorted(
+                                child.name + ("/" if child.is_dir() else "")
+                                for child in directory.iterdir()
+                                if not child.name.startswith(".")
+                            )
+                            preview = children[:80]
+                            suffix = "\n... truncated ..." if len(children) > 80 else ""
+                            tool_result = "\n".join(preview) + suffix if preview else "(empty directory)"
+                    except Exception as e:
+                        tool_result = f"Directory listing failed: {e}"
+
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+
                 elif func_name == "search_web":
                     query = args.get("query", "python")
                     print(f"  -> Research Agent searching web for: {query}")
@@ -215,7 +320,15 @@ Focus area: {target_scope.upper()} scope."""
             else:
                 # LLM failed to call a tool, force it
                 messages.append({"role": "assistant", "content": response.get("content", "")})
-                messages.append({"role": "user", "content": "You MUST call a tool. If you are done, call finalize_research."})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You MUST call a tool. For codebase or alignment tasks, inspect the local repository with "
+                            "`list_directory` or `read_file` before saying anything is missing. If you are done, call finalize_research."
+                        ),
+                    }
+                )
                 
         from datetime import datetime
         kb_dir = os.path.join(root, ".knowledge")
