@@ -42,6 +42,19 @@ class ExperimentRunner:
     def _persist_experiment_report(self, result: ExperimentResult, **kwargs: Any) -> None:
         persist_experiment_report(self.storage, result, **kwargs)
 
+    def _calculate_deltas(self, baseline: Dict[str, float], candidate: Dict[str, float]) -> Dict[str, float]:
+        return calculate_deltas(baseline, candidate)
+
+    def _decide_promotion(self, deltas: Dict[str, float]) -> str:
+        return decide_promotion(deltas)
+
+    def _decide_benchmark_promotion(
+        self,
+        deltas: Dict[str, float],
+        promotion_readiness: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        return decide_benchmark_promotion(deltas, promotion_readiness)
+
     def get_persisted_experiment_report(self, candidate_change_id: str) -> Optional[Dict[str, Any]]:
         return get_persisted_experiment_report(self.storage, candidate_change_id)
 

@@ -18,6 +18,7 @@ from fastapi import HTTPException
 
 from strata.eval.harness_eval import EVAL_HARNESS_CONFIG_DESCRIPTION, EVAL_HARNESS_CONFIG_KEY
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
+from strata.specs.bootstrap import list_spec_proposals
 
 
 MAX_PROMOTION_HISTORY = 200
@@ -125,6 +126,8 @@ Return only JSON with this schema:
     "smoke_test": "strata/tools/tests/test_{tool_name}_smoke.py"
   }},
   "smoke_test": "full python smoke test source",
+  "spec_citations": ["quote or summarize the exact spec constraint this tool serves"],
+  "evaluation_plan": "how success will be measured after promotion",
   "rationale": "why this tool helps bootstrap progress",
   "expected_gain": "what operator-visible gain this tool should unlock"
 }}
@@ -147,6 +150,8 @@ Requirements:
         "source": str(proposal.get("source") or ""),
         "manifest": proposal.get("manifest") or {},
         "smoke_test": str(proposal.get("smoke_test") or ""),
+        "spec_citations": [str(item).strip() for item in (proposal.get("spec_citations") or []) if str(item).strip()],
+        "evaluation_plan": str(proposal.get("evaluation_plan") or "").strip(),
         "rationale": str(proposal.get("rationale") or ""),
         "expected_gain": str(proposal.get("expected_gain") or ""),
         "raw_proposal": proposal,
@@ -206,11 +211,20 @@ def apply_experiment_promotion(storage, candidate_change_id: str, *, force: bool
     }
 
 
-def build_dashboard_snapshot(storage, *, limit: int, build_telemetry_snapshot, get_provider_telemetry_snapshot, get_retention_runtime) -> Dict[str, Any]:
+def build_dashboard_snapshot(
+    storage,
+    *,
+    limit: int,
+    build_telemetry_snapshot,
+    get_provider_telemetry_snapshot,
+    get_retention_runtime,
+    get_context_load_telemetry,
+) -> Dict[str, Any]:
     telemetry = build_telemetry_snapshot(storage, limit=limit)
     provider_telemetry = get_provider_telemetry_snapshot() or (
         storage.parameters.peek_parameter("provider_transport_telemetry_snapshot", default_value={}) or {}
     )
+    context_telemetry = get_context_load_telemetry(storage)
     promoted_state = storage.parameters.peek_parameter(
         "promoted_eval_candidates",
         default_value={"current": None, "history": []},
@@ -262,6 +276,15 @@ def build_dashboard_snapshot(storage, *, limit: int, build_telemetry_snapshot, g
             break
     if ignition is None:
         ignition = {"detected": False}
+    top_context_artifacts = sorted(
+        list((context_telemetry.get("stats", {}).get("artifacts") or {}).values()),
+        key=lambda item: (
+            int(item.get("load_count", 0) or 0),
+            int(item.get("total_estimated_tokens", 0) or 0),
+        ),
+        reverse=True,
+    )[:5]
+    recent_spec_proposals = list_spec_proposals(storage, limit=5)
     return {
         "generated_at": telemetry.get("generated_at"),
         "overview": telemetry.get("overview", {}),
@@ -276,6 +299,17 @@ def build_dashboard_snapshot(storage, *, limit: int, build_telemetry_snapshot, g
         "failure_pressure": {
             "recent_failures": len(recent_failures),
             "recent_research_failures": len(research_failures),
+        },
+        "context_pressure": {
+            "warning_count": len(context_telemetry.get("warnings", [])),
+            "recent_load_count": len(context_telemetry.get("recent", [])),
+            "top_artifacts": top_context_artifacts,
+            "file_scan": context_telemetry.get("file_scan", {}),
+        },
+        "spec_governance": {
+            "recent_proposals": recent_spec_proposals,
+            "pending_count": sum(1 for row in recent_spec_proposals if str(row.get("status") or "") == "pending_review"),
+            "clarification_count": sum(1 for row in recent_spec_proposals if str(row.get("status") or "") == "needs_clarification"),
         },
         "reports": reports,
         "provider_telemetry": provider_telemetry,

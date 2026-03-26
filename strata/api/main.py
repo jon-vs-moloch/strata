@@ -34,7 +34,7 @@ from strata.api.runtime_admin import register_runtime_admin_routes
 from strata.memory.semantic import SemanticMemory
 from strata.orchestrator.worker.telemetry import build_telemetry_snapshot
 from strata.models.providers import get_provider_telemetry_snapshot
-from strata.observability.context import scan_codebase_context_pressure
+from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 from strata.api.experiment_runtime import (
     apply_experiment_promotion,
     build_dashboard_snapshot,
@@ -106,6 +106,7 @@ def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[
         build_telemetry_snapshot=build_telemetry_snapshot,
         get_provider_telemetry_snapshot=get_provider_telemetry_snapshot,
         get_retention_runtime=get_retention_runtime,
+        get_context_load_telemetry=get_context_load_telemetry,
     )
 
 
@@ -308,6 +309,7 @@ globals().update(register_eval_admin_routes(
         build_telemetry_snapshot=build_telemetry_snapshot,
         get_provider_telemetry_snapshot=get_provider_telemetry_snapshot,
         get_retention_runtime=get_retention_runtime,
+        get_context_load_telemetry=get_context_load_telemetry,
     ),
     apply_experiment_promotion=lambda storage, candidate_change_id, force=False: apply_experiment_promotion(
         storage,

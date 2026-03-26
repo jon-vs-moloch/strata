@@ -297,6 +297,35 @@ def register_experiment_routes(
         pipeline = ToolsPromotionPipeline(storage)
         evaluated = []
         for proposal in proposals:
+            spec_citations = [str(item).strip() for item in (proposal.get("spec_citations") or []) if str(item).strip()]
+            evaluation_plan = str(proposal.get("evaluation_plan") or "").strip()
+            if not spec_citations or not evaluation_plan:
+                validation = {
+                    "tool_name": proposal["tool_name"],
+                    "promoted": False,
+                    "checks_passed": [],
+                    "checks_failed": [
+                        "Spec citation and evaluation plan are required for code/tool promotion proposals."
+                    ],
+                    "details": "Proposal did not include explicit spec alignment evidence and a post-promotion evaluation plan.",
+                }
+                result = ExperimentRunner(storage, model_adapter).record_tool_promotion_result(
+                    candidate_change_id=proposal["candidate_change_id"],
+                    validation_result=validation,
+                    proposal_metadata={
+                        "proposer_tier": proposal["proposer_tier"],
+                        "tool_name": proposal["tool_name"],
+                        "rationale": proposal["rationale"],
+                        "expected_gain": proposal["expected_gain"],
+                        "source": "tool_cycle",
+                        "spec_citations": spec_citations,
+                        "evaluation_plan": evaluation_plan,
+                    },
+                    source_task_id=payload.get("source_task_id"),
+                    associated_task_ids=payload.get("associated_task_ids"),
+                )
+                evaluated.append({"proposal": proposal, "validation": validation, "result": result.model_dump()})
+                continue
             os.makedirs("strata/tools", exist_ok=True)
             os.makedirs("strata/tools/manifests", exist_ok=True)
             os.makedirs("strata/tools/tests", exist_ok=True)
@@ -327,6 +356,8 @@ def register_experiment_routes(
                     "rationale": proposal["rationale"],
                     "expected_gain": proposal["expected_gain"],
                     "source": "tool_cycle",
+                    "spec_citations": spec_citations,
+                    "evaluation_plan": evaluation_plan,
                 },
                 source_task_id=payload.get("source_task_id"),
                 associated_task_ids=payload.get("associated_task_ids"),

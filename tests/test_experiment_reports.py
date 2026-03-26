@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from strata.api import main as api_main
+from strata.api import experiment_runtime as experiment_runtime
 from strata.experimental.experiment_runner import (
     ExperimentRunner,
     normalize_experiment_report,
@@ -153,6 +154,28 @@ def test_build_dashboard_snapshot_counts_promotions_and_detects_ignition(monkeyp
         "get_provider_telemetry_snapshot",
         lambda: {"weak-provider": {"request_count": 1}},
     )
+    monkeypatch.setattr(
+        experiment_runtime,
+        "list_spec_proposals",
+        lambda _storage, limit=5: [
+            {
+                "proposal_id": "spec_1",
+                "scope": "project",
+                "status": "pending_review",
+                "summary": "measure outcomes",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        api_main,
+        "get_context_load_telemetry",
+        lambda _storage: {
+            "warnings": [{"warning": "context_load_large_artifact"}],
+            "recent": [{"artifact_type": "spec"}],
+            "stats": {"artifacts": {"spec:project_spec": {"artifact_type": "spec", "identifier": "project_spec", "load_count": 3, "total_estimated_tokens": 200, "max_estimated_tokens": 72}}},
+            "file_scan": {"largest_files": [{"path": "strata/specs/bootstrap.py"}]},
+        },
+    )
 
     snapshot = api_main._build_dashboard_snapshot(storage, limit=10)
 
@@ -161,6 +184,8 @@ def test_build_dashboard_snapshot_counts_promotions_and_detects_ignition(monkeyp
     assert snapshot["ignition"]["detected"] is True
     assert snapshot["ignition"]["candidate_change_id"] == "weak_candidate"
     assert snapshot["reports"][0]["candidate_change_id"] == "weak_candidate"
+    assert snapshot["context_pressure"]["warning_count"] == 1
+    assert snapshot["spec_governance"]["pending_count"] == 1
 
 
 @pytest.mark.parametrize(

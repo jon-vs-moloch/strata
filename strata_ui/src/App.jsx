@@ -1191,6 +1191,10 @@ function App() {
                     <TelemetryCell value={dashboard.failure_pressure?.recent_failures ?? '—'} label="FAIL PRESSURE" />
                     <TelemetryCell value={dashboard.failure_pressure?.recent_research_failures ?? '—'} label="RESEARCH FAIL" />
                   </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
+                    <TelemetryCell value={dashboard.context_pressure?.warning_count ?? '—'} label="CTX WARN" />
+                    <TelemetryCell value={dashboard.spec_governance?.pending_count ?? '—'} label="SPEC PENDING" />
+                  </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
                       <span style={{ color: '#7f8091', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Current promoted</span>
@@ -1209,6 +1213,36 @@ function App() {
                       </div>
                     ))}
                   </div>
+                  {dashboard.context_pressure?.top_artifacts?.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+                      <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>CONTEXT PRESSURE</div>
+                      {dashboard.context_pressure.top_artifacts.slice(0, 3).map((artifact) => (
+                        <div key={`${artifact.artifact_type}-${artifact.identifier}`} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
+                          <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {artifact.artifact_type} · {artifact.identifier}
+                          </span>
+                          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                            {artifact.load_count}x · {artifact.max_estimated_tokens}t
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {dashboard.spec_governance?.recent_proposals?.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+                      <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>SPEC LINEAGE</div>
+                      {dashboard.spec_governance.recent_proposals.slice(0, 3).map((proposal) => (
+                        <div key={proposal.proposal_id} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
+                          <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {proposal.scope} · {proposal.summary || proposal.proposal_id}
+                          </span>
+                          <span style={{ color: proposal.status === 'approved' ? '#00f294' : proposal.status === 'needs_clarification' ? '#ffb84d' : '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                            {proposal.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
