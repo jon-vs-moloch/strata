@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -48,6 +49,21 @@ def _compact_questions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return active + terminal[:MAX_TERMINAL_QUESTIONS]
 
 
+def _derive_brief_question(question: str) -> str:
+    text = str(question or "").strip()
+    if not text:
+        return ""
+    for line in text.splitlines():
+        candidate = re.sub(r"^\s*[-*0-9.)]+\s*", "", line).strip()
+        if not candidate:
+            continue
+        if len(candidate) <= 180:
+            return candidate
+        sentence = re.split(r"(?<=[?.!])\s+", candidate)[0].strip()
+        return sentence[:177].rstrip() + "..." if len(sentence) > 180 else sentence
+    return text[:177].rstrip() + "..." if len(text) > 180 else text
+
+
 def enqueue_user_question(
     storage,
     *,
@@ -63,6 +79,7 @@ def enqueue_user_question(
         "question_id": question_id,
         "session_id": session_id or "default",
         "question": str(question).strip(),
+        "brief_question": _derive_brief_question(question),
         "source_type": source_type,
         "source_id": source_id,
         "context": context or {},

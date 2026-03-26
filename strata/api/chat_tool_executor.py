@@ -27,6 +27,7 @@ class ChatToolExecutor:
             args = json.loads(call.get("function", {}).get("arguments", "{}"))
         except Exception:
             args = {}
+        reason = str(args.get("reason") or "").strip()
 
         tool_outputs_generated = False
         async_task_id = None
@@ -264,4 +265,6 @@ class ChatToolExecutor:
             "tool_message": {"role": "tool", "tool_call_id": tool_call_id, "name": func_name, "content": tool_content},
             "tool_outputs_generated": tool_outputs_generated,
             "async_task_id": async_task_id,
+            "tool_reason": reason,
+            "tool_name": func_name,
         }

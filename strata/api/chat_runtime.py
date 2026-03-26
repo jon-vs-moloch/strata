@@ -194,6 +194,7 @@ class ChatRuntime:
                 "content": f"""You are Strata, a unified AI engineering system. You manage a swarm of background agents, but present yourself as a single, first-person entity.
 If internal processes hit a BLOCKED state, explain the issue to the USER directly.
 If the user expresses a durable desired future state, persistent preference, or architectural constraint, prefer `propose_spec_update` over casual implementation drift. Durable intent should be reviewed against the spec, not silently improvised.
+When you call a tool, include a short `reason` argument explaining what you are doing and why. If you give the user any intermediate update, make it conversational and useful, not a raw system trace.
 {memory_context}
 
 Available Tools:
@@ -202,15 +203,18 @@ Available Tools:
             }
         ]
         if pending_question and pending_question.get("status") == "pending":
+            brief_question = pending_question.get("brief_question") or pending_question.get("question")
             messages.append(
                 {
                     "role": "system",
                     "content": (
                         "Internal pending user question:\n"
                         f"- source_type: {pending_question.get('source_type')}\n"
-                        f"- question: {pending_question.get('question')}\n\n"
-                        "Before doing anything else, ask the user this question naturally and briefly. "
-                        "Do not mention internal queues or implementation details."
+                        f"- question: {pending_question.get('question')}\n"
+                        f"- concise_delivery: {brief_question}\n\n"
+                        "Before doing anything else, ask exactly one concise question in no more than two short sentences. "
+                        "Do not use numbered lists, bullet lists, long background explanations, or internal implementation details. "
+                        "Do not answer the question yourself. Do not call tools before asking it."
                     ),
                 }
             )
@@ -245,13 +249,15 @@ Available Tools:
             )
         for message in history_records[-5:]:
             messages.append({"role": message.role, "content": message.content})
-        return messages, active_tools, knowledge_pages
+        return messages, active_tools, knowledge_pages, pending_question
 
     async def run_chat_tool_loop(self, storage, *, session_id: str, content: str):
         pending_question = self.deps["get_active_question"](storage, session_id)
-        messages, active_tools, knowledge_pages = self.build_chat_messages(
+        messages, active_tools, knowledge_pages, pending_question = self.build_chat_messages(
             storage, session_id=session_id, content=content, pending_question=pending_question
         )
+        if pending_question and pending_question.get("status") == "pending":
+            active_tools = []
         max_iters = self.deps["global_settings"].get("max_sync_tool_iterations", 3)
         iteration = 0
 
@@ -273,25 +279,34 @@ Available Tools:
                 if chain_of_thought and chain_of_thought.strip():
                     storage.messages.create(role="assistant", content=chain_of_thought.strip(), session_id=session_id)
                     storage.commit()
-                else:
-                    names = [call.get("function", {}).get("name") for call in tool_calls]
-                    chain_of_thought = f"Invoking system tools: {', '.join(names)}"
-                    storage.messages.create(role="assistant", content=chain_of_thought, session_id=session_id)
-                    storage.commit()
 
                 messages.append({"role": "assistant", "content": chain_of_thought or None, "tool_calls": tool_calls})
+                invocation_updates: List[str] = []
                 for call in tool_calls:
                     result = await self.tool_executor.execute_tool_call(
                         storage, call=call, session_id=session_id, content=content, knowledge_pages=knowledge_pages
                     )
                     messages.append(result["tool_message"])
+                    reason = str(result.get("tool_reason") or "").strip()
+                    if reason:
+                        invocation_updates.append(reason)
+                    elif not chain_of_thought.strip():
+                        invocation_updates.append(f"I'm using `{result.get('tool_name')}` to move this forward.")
                     tool_outputs_generated = tool_outputs_generated or result["tool_outputs_generated"]
                     if result["async_task_id"]:
                         async_task_ids.append(result["async_task_id"])
+                if invocation_updates:
+                    summary = " ".join(
+                        sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
+                        for sentence in invocation_updates[:3]
+                    )
+                    storage.messages.create(role="assistant", content=summary, session_id=session_id)
+                    storage.commit()
                 if tool_outputs_generated:
                     iteration += 1
                     continue
-                return {"status": "ok", "reply": chain_of_thought.strip(), "task_ids": async_task_ids}
+                reply = chain_of_thought.strip() or (" ".join(invocation_updates[:3]).strip() if invocation_updates else "I’ve kicked off the relevant system work.")
+                return {"status": "ok", "reply": reply, "task_ids": async_task_ids}
 
             final_reply = model_response.get("content", "I encountered an error processing that.")
             storage.messages.create(role="assistant", content=final_reply, session_id=session_id)

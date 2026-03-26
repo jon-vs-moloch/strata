@@ -7,7 +7,7 @@ import {
   Plus, RefreshCw, Zap,
   MessageSquare, Send, History, Cpu,
   Terminal, AlertCircle, X, Settings,
-  Activity, Trash2, Database,
+  Activity, Trash2, Database, LayoutDashboard,
   Pause, Play, Square
 } from 'lucide-react';
 import TaskCard from './components/TaskCard';
@@ -615,7 +615,7 @@ function App() {
   const [isSending, setIsSending]     = useState(false);
   const [sessionId, setSessionId]     = useState('default');
   const [sessionList, setSessionList] = useState([]);
-  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'history' | 'settings'
+  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'history' | 'dashboard'
   const [showSettings, setShowSettings] = useState(false);
   const [apiStatus, setApiStatus]     = useState('connecting'); // 'ok' | 'error' | 'connecting'
   const messagesEndRef = useRef(null);
@@ -834,7 +834,10 @@ function App() {
   const completedCount  = tasks.filter(t => t.status === 'complete').length;
   const runningCount    = tasks.filter(t => t.status === 'working').length;
   const totalCount      = tasks.length;
+  const blockedCount    = tasks.filter(t => t.status === 'blocked').length;
   const passRate        = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : '—';
+  const specPendingCount = dashboard?.spec_governance?.pending_count ?? 0;
+  const specClarificationCount = dashboard?.spec_governance?.clarification_count ?? 0;
 
   // Build and sort Task Tree
   const taskTree = React.useMemo(() => {
@@ -876,9 +879,14 @@ function App() {
 
   // ── Icon Nav items ───────────────────────────────────────────────────────────
   const navItems = [
-    { id: 'chat',    Icon: MessageSquare, label: 'Chat'     },
-    { id: 'history', Icon: History,       label: 'History'  },
+    { id: 'chat',      Icon: MessageSquare,  label: 'Chat'      },
+    { id: 'history',   Icon: History,        label: 'History'   },
+    { id: 'dashboard', Icon: LayoutDashboard,label: 'Dashboard' },
   ];
+
+  const visibleTaskTree = activeNav === 'dashboard'
+    ? taskTree
+    : taskTree.filter(task => !['complete', 'abandoned', 'cancelled'].includes(task.status));
 
   return (
     <div className="app-container" style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
@@ -983,11 +991,13 @@ function App() {
         </div>
       </div>
 
-      {/* ── COLUMN 3: CHAT ─────────────────────────────────────────────────── */}
+      {/* ── COLUMN 3: CHAT / DASHBOARD ────────────────────────────────────── */}
       <section style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0a0a0c', borderRight: '1px solid rgba(255,255,255,0.05)', minWidth: 0 }}>
         <header style={{ padding: '20px 28px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
           <div>
-            <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>Orchestrator Chat</h1>
+            <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
+              {activeNav === 'dashboard' ? 'Operator Dashboard' : 'Orchestrator Chat'}
+            </h1>
             <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>{sessionLabel}</p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1044,7 +1054,28 @@ function App() {
           </div>
         </header>
 
-        {/* Messages */}
+        {activeNav !== 'dashboard' && (specPendingCount > 0 || specClarificationCount > 0) && (
+          <div style={{ padding: '14px 28px 0', flexShrink: 0 }}>
+            <div style={{ background: 'rgba(255,184,77,0.07)', border: '1px solid rgba(255,184,77,0.16)', borderRadius: '12px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div style={{ fontSize: '11px', color: '#ffb84d', fontWeight: 800, letterSpacing: '0.08em' }}>SPEC REVIEW NEEDS ATTENTION</div>
+              <div style={{ fontSize: '12px', color: '#f0d5aa', lineHeight: 1.5 }}>
+                {specClarificationCount > 0
+                  ? `${specClarificationCount} spec proposal${specClarificationCount > 1 ? 's need' : ' needs'} clarification. Reply in chat and Strata will route your answer back into the review loop.`
+                  : `${specPendingCount} spec proposal${specPendingCount > 1 ? 's are' : ' is'} pending review.`}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeNav === 'dashboard' ? (
+          <DashboardView
+            telemetry={telemetry}
+            dashboard={dashboard}
+            providerTelemetry={providerTelemetry}
+            loadedContext={loadedContext}
+            tiers={tiers}
+          />
+        ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <AnimatePresence initial={false}>
             {messages.map((msg, i) => (
@@ -1116,8 +1147,10 @@ function App() {
           </AnimatePresence>
           <div ref={messagesEndRef} />
         </div>
+        )}
 
         {/* Input bar */}
+        {activeNav !== 'dashboard' && (
         <div style={{ padding: '20px 28px', borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
           <div style={{ background: '#141418', borderRadius: '12px', padding: '8px 8px 8px 16px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s' }}>
             <input
@@ -1144,6 +1177,7 @@ function App() {
             </button>
           </div>
         </div>
+        )}
       </section>
 
       {/* ── COLUMN 4: TASK SWARM ────────────────────────────────────────────── */}
@@ -1176,13 +1210,19 @@ function App() {
               </div>
             ))}
           </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '8px' }}>
+            <TelemetryCell value={runningCount || '—'} label="WORKING" />
+            <TelemetryCell value={blockedCount || '—'} label="BLOCKED" />
+            <TelemetryCell value={specClarificationCount || '—'} label="SPEC ASK" />
+            <TelemetryCell value={visibleTaskTree.length || '—'} label="VISIBLE" />
+          </div>
           <AnimatePresence>
-            {taskTree.map(task => (
+            {visibleTaskTree.map(task => (
               <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />
             ))}
           </AnimatePresence>
 
-          {taskTree.length === 0 && (
+          {visibleTaskTree.length === 0 && (
             <div style={{ textAlign: 'center', color: '#2d2d38', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
               <Terminal size={28} color="#222228" />
               <div style={{ fontSize: '13px', color: '#333' }}>No tasks yet</div>
@@ -1201,107 +1241,24 @@ function App() {
             <TelemetryCell value={runningCount || '—'} label="ACTIVE" />
             <TelemetryCell value={totalCount || '—'} label="TOTAL" />
           </div>
-          {telemetry && (
-            <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-                <TelemetryCell value={telemetry.overview.weak_eval_runs || '—'} label="WEAK EVAL" />
-                <TelemetryCell value={telemetry.overview.unique_experiments || '—'} label="EXPERIMENTS" />
-                <TelemetryCell value={`${tiers.Weak}/${tiers.Strong}`} label="WEAK/STRONG" />
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                {telemetry.rollups.slice(0, 3).map((rollup) => (
-                  <div key={rollup.metric_name} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
-                    <span style={{ color: '#7f8091', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{rollup.metric_name}</span>
-                    <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-                      {rollup.avg_value} avg · {rollup.count}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {Object.keys(providerTelemetry).length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
-                  <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>TRANSPORT</div>
-                  {Object.entries(providerTelemetry).slice(0, 2).map(([key, stats]) => (
-                    <div key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
-                      <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{key}</span>
-                      <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-                        {stats.rate_limit_hits} rl · {stats.avg_wait_ms}ms wait
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {dashboard && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '6px' }}>
-                  <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>BOOTSTRAP</div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-                    <TelemetryCell
-                      value={dashboard.ignition?.detected ? 'LIVE' : 'NO'}
-                      label="IGNITION"
-                    />
-                    <TelemetryCell value={dashboard.promotion_counts?.weak ?? '—'} label="WEAK WINS" />
-                    <TelemetryCell value={dashboard.promotion_counts?.strong ?? '—'} label="STRONG WINS" />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
-                    <TelemetryCell value={dashboard.failure_pressure?.recent_failures ?? '—'} label="FAIL PRESSURE" />
-                    <TelemetryCell value={dashboard.failure_pressure?.recent_research_failures ?? '—'} label="RESEARCH FAIL" />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
-                    <TelemetryCell value={dashboard.context_pressure?.warning_count ?? '—'} label="CTX WARN" />
-                    <TelemetryCell value={dashboard.spec_governance?.pending_count ?? '—'} label="SPEC PENDING" />
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
-                      <span style={{ color: '#7f8091', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Current promoted</span>
-                      <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {dashboard.current_promoted_candidate || '—'}
-                      </span>
-                    </div>
-                    {dashboard.reports?.slice(0, 3).map((report) => (
-                      <div key={report.candidate_change_id} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
-                        <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {report.proposal_metadata?.proposer_tier || 'unknown'} · {report.candidate_change_id}
-                        </span>
-                        <span style={{ color: report.recommendation === 'promote' ? '#00f294' : '#ffb84d', fontFamily: "'JetBrains Mono', monospace" }}>
-                          {report.recommendation}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  {dashboard.context_pressure?.top_artifacts?.length > 0 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
-                      <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>CONTEXT PRESSURE</div>
-                      {dashboard.context_pressure.top_artifacts.slice(0, 3).map((artifact) => (
-                        <div key={`${artifact.artifact_type}-${artifact.identifier}`} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
-                          <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {artifact.artifact_type} · {artifact.identifier}
-                          </span>
-                          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-                            {artifact.load_count}x · {artifact.max_estimated_tokens}t
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {dashboard.spec_governance?.recent_proposals?.length > 0 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
-                      <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>SPEC LINEAGE</div>
-                      {dashboard.spec_governance.recent_proposals.slice(0, 3).map((proposal) => (
-                        <div key={proposal.proposal_id} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
-                          <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {proposal.scope} · {proposal.summary || proposal.proposal_id}
-                          </span>
-                          <span style={{ color: proposal.status === 'approved' ? '#00f294' : proposal.status === 'needs_clarification' ? '#ffb84d' : '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-                            {proposal.status}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+          <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+              <span style={{ color: '#7f8091' }}>weak eval / experiments</span>
+              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                {telemetry?.overview?.weak_eval_runs || '—'} / {telemetry?.overview?.unique_experiments || '—'}
+              </span>
             </div>
-          )}
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+              <span style={{ color: '#7f8091' }}>tiers</span>
+              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{`${tiers.Weak}/${tiers.Strong}`}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+              <span style={{ color: '#7f8091' }}>transport wait</span>
+              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                {Object.values(providerTelemetry || {})[0]?.avg_wait_ms ?? '—'}ms
+              </span>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1344,6 +1301,95 @@ const TelemetryCell = ({ value, label }) => (
   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
     <div style={{ fontSize: '16px', fontWeight: 800, color: '#edeeef', fontFamily: "'JetBrains Mono', monospace" }}>{value}</div>
     <div style={{ fontSize: '9px', color: '#444', fontWeight: 700, letterSpacing: '0.1em' }}>{label}</div>
+  </div>
+);
+
+const DashboardPanel = ({ title, children }) => (
+  <div style={{ background: '#141418', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '14px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+    <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>{title}</div>
+    {children}
+  </div>
+);
+
+const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers }) => (
+  <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+    <DashboardPanel title="SYSTEM STATUS">
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+        <TelemetryCell value={telemetry?.overview?.weak_eval_runs || '—'} label="WEAK EVAL" />
+        <TelemetryCell value={telemetry?.overview?.unique_experiments || '—'} label="EXPERIMENTS" />
+        <TelemetryCell value={dashboard?.ignition?.detected ? 'LIVE' : 'NO'} label="IGNITION" />
+        <TelemetryCell value={`${tiers.Weak}/${tiers.Strong}`} label="WEAK/STRONG" />
+      </div>
+    </DashboardPanel>
+
+    <DashboardPanel title="FAILURE & GOVERNANCE">
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+        <TelemetryCell value={dashboard?.failure_pressure?.recent_failures ?? '—'} label="FAIL PRESSURE" />
+        <TelemetryCell value={dashboard?.failure_pressure?.recent_research_failures ?? '—'} label="RESEARCH FAIL" />
+        <TelemetryCell value={dashboard?.context_pressure?.warning_count ?? '—'} label="CTX WARN" />
+        <TelemetryCell value={dashboard?.spec_governance?.pending_count ?? '—'} label="SPEC PENDING" />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
+        <div style={{ fontSize: '12px', color: '#a9aaba' }}>Current promoted</div>
+        <div style={{ fontSize: '12px', color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {dashboard?.current_promoted_candidate || '—'}
+        </div>
+      </div>
+    </DashboardPanel>
+
+    <DashboardPanel title="RECENT PROMOTIONS">
+      {(dashboard?.reports?.slice(0, 5) || []).map((report) => (
+        <div key={report.candidate_change_id} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {(report.proposal_metadata?.proposer_tier || 'unknown')} · {report.candidate_change_id}
+          </span>
+          <span style={{ color: report.recommendation === 'promote' ? '#00f294' : '#ffb84d', fontFamily: "'JetBrains Mono', monospace" }}>
+            {report.recommendation}
+          </span>
+        </div>
+      ))}
+      {!(dashboard?.reports?.length) && <div style={{ fontSize: '12px', color: '#666' }}>No recent promotion reports.</div>}
+    </DashboardPanel>
+
+    <DashboardPanel title="TRANSPORT">
+      {Object.entries(providerTelemetry || {}).slice(0, 4).map(([key, stats]) => (
+        <div key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{key}</span>
+          <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+            {stats.avg_latency_ms}ms · {stats.avg_wait_ms}ms wait
+          </span>
+        </div>
+      ))}
+    </DashboardPanel>
+
+    <DashboardPanel title="CONTEXT">
+      <div style={{ fontSize: '12px', color: '#a9aaba' }}>
+        Loaded files: {loadedContext?.files?.length || 0} · budget {loadedContext?.budget_tokens || 0} tokens
+      </div>
+      {(dashboard?.context_pressure?.top_artifacts?.slice(0, 6) || []).map((artifact) => (
+        <div key={`${artifact.artifact_type}-${artifact.identifier}`} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {artifact.artifact_type} · {artifact.identifier}
+          </span>
+          <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+            {artifact.load_count}x · {artifact.max_estimated_tokens}t
+          </span>
+        </div>
+      ))}
+    </DashboardPanel>
+
+    <DashboardPanel title="SPEC LINEAGE">
+      {(dashboard?.spec_governance?.recent_proposals?.slice(0, 6) || []).map((proposal) => (
+        <div key={proposal.proposal_id} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {proposal.scope} · {proposal.summary || proposal.proposal_id}
+          </span>
+          <span style={{ color: proposal.status === 'approved' ? '#00f294' : proposal.status === 'needs_clarification' ? '#ffb84d' : '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+            {proposal.status}
+          </span>
+        </div>
+      ))}
+    </DashboardPanel>
   </div>
 );
 

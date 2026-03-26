@@ -64,3 +64,20 @@ def test_terminal_question_history_is_bounded(monkeypatch):
 
     rows = storage.parameters.values["user_questions:index"]
     assert len(rows) == 3
+
+
+def test_brief_question_is_derived_for_long_prompts():
+    storage = DummyStorage()
+    queued = enqueue_user_question(
+        storage,
+        session_id="demo",
+        question=(
+            "1. What durable principle or constraint should be added?\n"
+            "2. What should replace or modify existing guidance?\n"
+            "3. What triggered this update?"
+        ),
+        source_type="spec_clarification",
+        source_id="spec-1",
+    )
+
+    assert queued["brief_question"] == "What durable principle or constraint should be added?"

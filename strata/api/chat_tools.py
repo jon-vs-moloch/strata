@@ -18,6 +18,27 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
+
+def _with_reason_parameter(tool_schema: Dict[str, Any]) -> Dict[str, Any]:
+    enriched = {
+        "type": tool_schema.get("type"),
+        "function": dict(tool_schema.get("function") or {}),
+    }
+    function = enriched["function"]
+    parameters = dict(function.get("parameters") or {})
+    properties = dict(parameters.get("properties") or {})
+    properties["reason"] = {
+        "type": "string",
+        "description": "One short sentence describing why you are calling this tool right now. This is surfaced to the operator.",
+    }
+    parameters["properties"] = properties
+    function["parameters"] = parameters
+    function["description"] = (
+        str(function.get("description") or "")
+        + " Always include a short `reason` when calling this tool so the operator can see what you are doing."
+    ).strip()
+    return enriched
+
 TASK_GENERATION_TOOLS = [
     {
         "type": "function",
@@ -244,8 +265,8 @@ def load_dynamic_tools(*, base_dir: str, global_settings: Dict[str, Any]) -> Lis
     tools_dir = os.path.join(base_dir, "strata", "tools")
 
     if global_settings.get("automatic_task_generation", False):
-        dynamic_tools.extend(TASK_GENERATION_TOOLS)
-    dynamic_tools.extend(NON_GENERATIVE_TOOLS)
+        dynamic_tools.extend(_with_reason_parameter(tool) for tool in TASK_GENERATION_TOOLS)
+    dynamic_tools.extend(_with_reason_parameter(tool) for tool in NON_GENERATIVE_TOOLS)
 
     for tool_file in glob.glob(os.path.join(tools_dir, "*.py")):
         if tool_file.endswith("__init__.py"):
@@ -257,7 +278,7 @@ def load_dynamic_tools(*, base_dir: str, global_settings: Dict[str, Any]) -> Lis
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 if hasattr(module, "TOOL_SCHEMA"):
-                    dynamic_tools.append(getattr(module, "TOOL_SCHEMA"))
+                    dynamic_tools.append(_with_reason_parameter(getattr(module, "TOOL_SCHEMA")))
                     logger.info("Loaded dynamic tool: %s", os.path.basename(tool_file))
         except Exception as exc:
             logger.error("Failed to dynamic load tool from %s: %s", tool_file, exc)
