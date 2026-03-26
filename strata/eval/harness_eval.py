@@ -33,8 +33,14 @@ In quiet testing mode, do not create tasks, do not rely on background work, and 
 If asked what the system should do while idle in quiet testing mode, prefer "remain idle, wait for explicit input, avoid background activity."
 Prefer giving the best direct answer from the repository philosophy and current harness intent."""
 
-DEFAULT_CONTEXT_FILES = [
+LEGACY_DEFAULT_CONTEXT_FILES = [
     "README.md",
+    "docs/spec/project-philosophy.md",
+]
+
+DEFAULT_CONTEXT_FILES = [
+    ".knowledge/specs/project_spec.md",
+    "docs/spec/eval-brief.md",
     "docs/spec/project-philosophy.md",
 ]
 
@@ -87,9 +93,12 @@ def get_active_eval_harness_config() -> Dict[str, Any]:
             default_value=default_eval_harness_config(),
         )
         if isinstance(config, dict):
+            context_files = list(config.get("context_files") or DEFAULT_CONTEXT_FILES)
+            if context_files == LEGACY_DEFAULT_CONTEXT_FILES:
+                context_files = list(DEFAULT_CONTEXT_FILES)
             return {
                 "system_prompt": str(config.get("system_prompt") or DEFAULT_EVAL_SYSTEM_PROMPT),
-                "context_files": list(config.get("context_files") or DEFAULT_CONTEXT_FILES),
+                "context_files": context_files,
             }
     finally:
         storage.close()

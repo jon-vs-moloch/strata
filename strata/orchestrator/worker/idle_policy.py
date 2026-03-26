@@ -5,10 +5,41 @@
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.specs.bootstrap import load_specs, spec_is_bootstrap_placeholder
 
 logger = logging.getLogger(__name__)
+
+
+def _build_repo_snapshot() -> str:
+    root = Path(__file__).resolve().parents[3]
+    interesting = [
+        "README.md",
+        "docs/spec/project-philosophy.md",
+        "docs/spec/codemap.md",
+        "strata/api",
+        "strata/eval",
+        "strata/orchestrator",
+        "strata/knowledge",
+        "strata/storage",
+        "strata/specs",
+        "strata_ui/src",
+    ]
+    parts = []
+    for rel in interesting:
+        path = root / rel
+        if not path.exists():
+            continue
+        if path.is_file():
+            parts.append(f"FILE {rel}")
+            continue
+        children = sorted(child.name for child in path.iterdir() if not child.name.startswith("."))
+        preview = ", ".join(children[:12])
+        if len(children) > 12:
+            preview += ", ..."
+        parts.append(f"DIR {rel}: {preview}")
+    return "\n".join(parts)
 
 async def run_idle_tasks(storage_factory, model_adapter, queue):
     """
@@ -46,7 +77,13 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             if (
                 not constraints.get("alignment_source")
                 and "cannot identify" in description
-                and "no codebase" in description
+                and (
+                    "no codebase" in description
+                    or "no vision" in description
+                    or "vision document" in description
+                    or "no goals" in description
+                    or "desired end state are unknown" in description
+                )
             ):
                 candidate.state = TaskState.CANCELLED
                 constraints["superseded_by_alignment_fix"] = datetime.utcnow().isoformat()
@@ -65,6 +102,7 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             "docs/spec/project-philosophy.md",
             "docs/spec/codemap.md",
         ]
+        repo_snapshot = _build_repo_snapshot()
         project_spec_is_thin = spec_is_bootstrap_placeholder(project_spec)
         global_spec_is_thin = spec_is_bootstrap_placeholder(global_spec)
 
@@ -90,6 +128,9 @@ Supporting references you may assume exist:
 - docs/spec/project-philosophy.md
 - docs/spec/codemap.md
 
+Observed repository snapshot:
+{repo_snapshot}
+
 Current global spec:
 {global_spec}
 
@@ -98,6 +139,7 @@ Current project spec:
 
 Rules:
 - Do not claim the vision or current state is unknown; the spec paths above are the source of truth.
+- Use the repository snapshot above as concrete codebase state.
 - If the spec is still thin, propose a spec-hardening or alignment-review task rather than giving up.
 - Prefer a task that is specific, bounded, and checkable.
 - Reply with ONLY a single sentence describing the task.
@@ -116,6 +158,7 @@ Rules:
             constraints={
                 "target_scope": "codebase",
                 "spec_paths": spec_paths,
+                "repo_snapshot": repo_snapshot,
                 "alignment_source": "idle_policy",
                 "spec_bootstrap_fallback": project_spec_is_thin and global_spec_is_thin,
             }
