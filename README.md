@@ -51,7 +51,13 @@ That separation is a core part of the design, not just a configuration detail.
 
 ## Requirements
 
-The Python backend currently does not have a checked-in `requirements.txt` or `pyproject.toml`, so environment setup is manual. From the codebase, the backend expects at least these libraries to be available:
+The backend now includes a minimal [requirements.txt](/Users/jon/Projects/strata/requirements.txt) for reproducible setup:
+
+```bash
+./venv/bin/pip install -r requirements.txt
+```
+
+The current manifest covers the main runtime and test dependencies used by the repository:
 
 - `fastapi`
 - `uvicorn`
@@ -59,6 +65,7 @@ The Python backend currently does not have a checked-in `requirements.txt` or `p
 - `pydantic`
 - `httpx`
 - `chromadb`
+- `pytest`
 
 The UI dependencies are managed in `strata_ui/package.json`.
 
@@ -172,13 +179,5 @@ For a first bounded code-change lane, `/admin/experiments/tool_cycle` lets a pro
 
 These are the main current constraints:
 
-- The Python backend still has no checked-in dependency manifest.
 - Provider presets and free-tier availability are operational assumptions and may change over time.
 - The UI build currently emits a large-chunk warning, though the build succeeds.
-
-## Recommended Next Step
-
-The highest-leverage cleanup after this documentation pass would be to either:
-
-- add a real Python dependency manifest, or
-- document the intended backend environment in more detail if the setup is intentionally ad hoc for now.

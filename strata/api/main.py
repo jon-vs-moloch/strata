@@ -37,7 +37,12 @@ from strata.eval.harness_eval import (
     default_eval_harness_config,
     get_active_eval_harness_config,
 )
-from strata.experimental.experiment_runner import ExperimentRunner
+from strata.experimental.experiment_runner import (
+    ExperimentRunner,
+    iter_experiment_reports,
+    normalize_experiment_report,
+    report_has_weak_gain,
+)
 from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 import importlib.util
 import glob
@@ -376,11 +381,11 @@ def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[
         .limit(limit)
         .all()
     )
+    normalized_reports = iter_experiment_reports(report_rows)
     reports = []
     weak_promotions = 0
     strong_promotions = 0
-    for row in report_rows:
-        current = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+    for current in normalized_reports:
         metadata = current.get("proposal_metadata") or {}
         if current.get("recommendation") == "promote":
             if metadata.get("proposer_tier") == "weak":
@@ -406,15 +411,9 @@ def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[
         if metric.get("task_type") == "RESEARCH"
     ]
     ignition = None
-    for row in report_rows:
-        current = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+    for current in normalized_reports:
         metadata = current.get("proposal_metadata") or {}
-        deltas = current.get("deltas") or {}
-        weak_gain = (
-            float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
-            or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
-            or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
-        )
+        weak_gain = report_has_weak_gain(current)
         if metadata.get("proposer_tier") == "weak" and current.get("recommendation") == "promote" and weak_gain:
             ignition = {
                 "detected": True,
@@ -583,6 +582,16 @@ async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(g
     if isinstance(past_memories, dict) and past_memories.get("documents") and past_memories["documents"][0]:
         memory_context = "\n\nRELEVANT PAST CONTEXT:\n" + "\n".join(past_memories["documents"][0])
 
+    active_tools = load_dynamic_tools()
+    tool_summaries = []
+    for tool in active_tools:
+        function = tool.get("function", {})
+        name = function.get("name")
+        description = function.get("description")
+        if name and description:
+            tool_summaries.append(f"- {name}: {description}")
+    tool_summary_text = "\n".join(tool_summaries) if tool_summaries else "- No active tools are currently exposed."
+
     messages = [
         {
             "role": "system", 
@@ -591,11 +600,7 @@ If internal processes hit a BLOCKED state, explain the issue to the USER directl
 {memory_context}
 
 Available Tools:
-- search_web: Get facts/docs.
-- create_task: Spawn background work.
-- list_tasks: Check status.
-- get_task: View details.
-- list_active_tools: See what implementation agents can do.
+{tool_summary_text}
 """
         }
     ]
@@ -612,7 +617,6 @@ Available Tools:
     
     while iteration < max_iters:
         # Use dynamic tool registry
-        active_tools = load_dynamic_tools()
         model_response = await _model.chat(messages, tools=active_tools)
         
         tool_calls = model_response.get("tool_calls")
@@ -1098,8 +1102,7 @@ async def get_experiment_history(limit: int = 25, storage: StorageManager = Depe
         .all()
     )
     history = []
-    for row in rows:
-        current = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+    for current in iter_experiment_reports(rows):
         readiness = current.get("promotion_readiness") or {}
         history.append(
             {
@@ -1293,16 +1296,10 @@ async def get_secondary_ignition_status(storage: StorageManager = Depends(get_st
         .all()
     )
     matching_report = None
-    for row in report_rows:
-        report = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+    for report in iter_experiment_reports(report_rows):
         proposal_metadata = report.get("proposal_metadata") or {}
         recommendation = report.get("recommendation")
-        deltas = report.get("deltas") or {}
-        weak_gain = (
-            float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
-            or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
-            or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
-        )
+        weak_gain = report_has_weak_gain(report)
         if proposal_metadata.get("proposer_tier") == "weak" and recommendation == "promote" and weak_gain:
             matching_report = report
             break
@@ -1342,12 +1339,7 @@ async def get_secondary_ignition_status(storage: StorageManager = Depends(get_st
 
     proposal_metadata = report.get("proposal_metadata") or {}
     recommendation = report.get("recommendation")
-    deltas = report.get("deltas") or {}
-    weak_gain = (
-        float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
-        or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
-        or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
-    )
+    weak_gain = report_has_weak_gain(report)
     return {
         "status": "ok",
         "detected": False,
@@ -1355,11 +1347,7 @@ async def get_secondary_ignition_status(storage: StorageManager = Depends(get_st
         "recommendation": recommendation,
         "proposal_metadata": proposal_metadata,
         "weak_gain_detected": weak_gain,
-        "reason": (
-            "Weak-originated candidate was promoted after improving weak-tier eval metrics."
-            if detected
-            else "Secondary ignition has not been detected yet for the current promoted candidate."
-        ),
+        "reason": "Secondary ignition has not been detected yet for the current promoted candidate.",
     }
 
 @app.get("/admin/logs")

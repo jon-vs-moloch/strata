@@ -4,8 +4,6 @@
 @key_exports ExperimentRunner, ExperimentResult
 """
 
-import os
-import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Literal
@@ -13,7 +11,7 @@ from pydantic import BaseModel, Field
 from strata.schemas.execution import WeakExecutionContext
 from strata.orchestrator.evaluation import EvaluationPipeline
 from strata.orchestrator.worker.telemetry import record_metric
-from strata.storage.models import TaskModel, MetricModel
+from strata.storage.models import TaskModel, MetricModel, ParameterModel
 from strata.eval.benchmark import run_benchmark, persist_benchmark_report
 from strata.eval.structured_eval import run_structured_eval, persist_structured_eval_report
 
@@ -29,6 +27,42 @@ DEFAULT_PROMOTION_POLICY = {
     "min_structured_wins": 1,
     "min_code_wins": 1,
 }
+
+
+def normalize_experiment_report(value: Any) -> Dict[str, Any]:
+    """
+    Accept either the current wrapped parameter shape or a raw report payload.
+    Returns an empty dict for malformed values.
+    """
+    if not isinstance(value, dict):
+        return {}
+
+    current = value.get("current")
+    if isinstance(current, dict):
+        return current
+
+    if "candidate_change_id" in value or "evaluation_kind" in value or "recommendation" in value:
+        return value
+
+    return {}
+
+
+def iter_experiment_reports(rows: List[Any]) -> List[Dict[str, Any]]:
+    reports: List[Dict[str, Any]] = []
+    for row in rows:
+        report = normalize_experiment_report(getattr(row, "value", None))
+        if report:
+            reports.append(report)
+    return reports
+
+
+def report_has_weak_gain(report: Dict[str, Any]) -> bool:
+    deltas = report.get("deltas") or {}
+    return (
+        float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
+        or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
+        or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
+    )
 
 class ExperimentResult(BaseModel):
     success: bool
@@ -153,10 +187,15 @@ class ExperimentRunner:
         self.storage.commit()
 
     def get_persisted_experiment_report(self, candidate_change_id: str) -> Optional[Dict[str, Any]]:
-        return self.storage.parameters.peek_parameter(
-            key=self._report_parameter_key(candidate_change_id),
-            default_value=None,
+        row = (
+            self.storage.session.query(ParameterModel)
+            .filter_by(key=self._report_parameter_key(candidate_change_id))
+            .first()
         )
+        if not row:
+            return None
+        report = normalize_experiment_report(row.value)
+        return report or None
 
     async def run_benchmark_gate(
         self,
