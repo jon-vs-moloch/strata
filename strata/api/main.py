@@ -34,6 +34,7 @@ from strata.api.runtime_admin import register_runtime_admin_routes
 from strata.memory.semantic import SemanticMemory
 from strata.orchestrator.worker.telemetry import build_telemetry_snapshot
 from strata.models.providers import get_provider_telemetry_snapshot
+from strata.observability.context import scan_codebase_context_pressure
 from strata.api.experiment_runtime import (
     apply_experiment_promotion,
     build_dashboard_snapshot,
@@ -149,6 +150,7 @@ async def lifespan(app: FastAPI):
         ) or {}
         GLOBAL_SETTINGS.update(_normalized_settings(persisted_settings))
         run_retention_maintenance(storage)
+        scan_codebase_context_pressure(storage, base_dir=_BASE_DIR)
         storage.commit()
     finally:
         storage.close()
@@ -391,6 +393,7 @@ globals().update(register_runtime_admin_routes(
     worker=_worker,
     event_queue=_event_queue,
     hotreloader=_hotreloader,
+    base_dir=_BASE_DIR,
 ))
 
 

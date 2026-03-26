@@ -17,6 +17,7 @@ from typing import Any, Dict
 
 from fastapi import Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 
 
 def register_runtime_admin_routes(
@@ -31,6 +32,7 @@ def register_runtime_admin_routes(
     worker,
     event_queue,
     hotreloader,
+    base_dir: str,
 ) -> Dict[str, Any]:
     exported: Dict[str, Any] = {}
 
@@ -127,6 +129,14 @@ def register_runtime_admin_routes(
             return {"status": "degraded", "error": str(exc)}
         finally:
             storage.close()
+
+    @app.get("/admin/context/telemetry")
+    async def get_context_telemetry(storage=Depends(get_storage)):
+        return {"status": "ok", "context": get_context_load_telemetry(storage)}
+
+    @app.post("/admin/context/scan")
+    async def rescan_context_pressure(storage=Depends(get_storage)):
+        return {"status": "ok", "scan": scan_codebase_context_pressure(storage, base_dir=base_dir)}
 
     @app.get("/admin/logs")
     async def get_logs(limit: int = 50):
@@ -230,6 +240,8 @@ def register_runtime_admin_routes(
             "get_registry_presets": get_registry_presets,
             "update_registry": update_registry,
             "health_check": health_check,
+            "get_context_telemetry": get_context_telemetry,
+            "rescan_context_pressure": rescan_context_pressure,
             "get_logs": get_logs,
             "reboot_api": reboot_api,
             "list_experimental_files": list_experimental_files,

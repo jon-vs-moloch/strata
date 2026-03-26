@@ -16,6 +16,8 @@ The goal is not to list every file. The goal is to help humans and small-context
   Model adapter, provider transport, and registry configuration.
 - `strata/eval/`
   Benchmarks, structured evals, matrix runs, and queued eval jobs.
+- `strata/observability/`
+  Context-load attribution and context-pressure scans.
 - `strata/knowledge/`
   Synthesized knowledge-page store and permissions-aware retrieval.
 - `strata/specs/`
@@ -54,7 +56,7 @@ Start with [main.py](/Users/jon/Projects/strata/strata/api/main.py) only when yo
 - [retention_admin.py](/Users/jon/Projects/strata/strata/api/retention_admin.py)
   DB/storage retention inspection and maintenance.
 - [runtime_admin.py](/Users/jon/Projects/strata/strata/api/runtime_admin.py)
-  Model selection, settings, health, logs, reboot, promotion/rollback, worker controls, SSE.
+  Model selection, settings, health, logs, reboot, promotion/rollback, worker controls, SSE, context telemetry.
 - [hotreload.py](/Users/jon/Projects/strata/strata/api/hotreload.py)
   Experimental module promotion and rollback mechanics.
 
@@ -102,11 +104,18 @@ Important worker submodules:
 ## Knowledge Map
 
 - [pages.py](/Users/jon/Projects/strata/strata/knowledge/pages.py)
-  Knowledge pages, provenance, permissions, and audience-aware retrieval.
+  Knowledge page storage, mirrored page output, and retrieval entry points.
+- [page_payloads.py](/Users/jon/Projects/strata/strata/knowledge/page_payloads.py)
+  Pure page normalization, TOC/summary shaping, provenance compaction, and section splitting.
 - [page_access.py](/Users/jon/Projects/strata/strata/knowledge/page_access.py)
   Audience-aware knowledge access policy and redaction logic.
 - [compact_knowledge.py](/Users/jon/Projects/strata/scripts/compact_knowledge.py)
   Archive/compaction pass for raw `.knowledge/` research notes.
+
+## Observability Map
+
+- [context.py](/Users/jon/Projects/strata/strata/observability/context.py)
+  Context-load attribution, large-artifact warnings, and startup file token-pressure scans.
 
 ## Storage Map
 
@@ -153,6 +162,8 @@ For common tasks, start here:
   [job_runner.py](/Users/jon/Projects/strata/strata/eval/job_runner.py)
 - “How does knowledge retrieval enforce permissions?”
   [pages.py](/Users/jon/Projects/strata/strata/knowledge/pages.py)
+- “What is inflating context and which files are too big?”
+  [context.py](/Users/jon/Projects/strata/strata/observability/context.py)
 - “How does long-term retention work?”
   [retention.py](/Users/jon/Projects/strata/strata/storage/retention.py)
 
@@ -163,8 +174,6 @@ These are still worth future decomposition:
 - [chat_task_admin.py](/Users/jon/Projects/strata/strata/api/chat_task_admin.py)
   Much smaller now, but could still split session routes from task routes if needed.
 - [retention.py](/Users/jon/Projects/strata/strata/storage/retention.py)
-  Good candidate for message/metric/attempt/report retention submodules.
+  Still worth splitting the message-archive helpers from the coordinator if we want an even smaller control file.
 - [experiment_runner.py](/Users/jon/Projects/strata/strata/experimental/experiment_runner.py)
   Could still split promotion decisions from metric aggregation if we want even tighter seams.
-- [pages.py](/Users/jon/Projects/strata/strata/knowledge/pages.py)
-  Could still split provenance compaction from storage if we want even tighter seams.

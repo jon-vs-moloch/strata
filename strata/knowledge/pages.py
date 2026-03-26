@@ -8,204 +8,30 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from strata.observability.context import record_context_load
 from strata.knowledge.page_access import build_access_state, sanitize_for_audience
+from strata.knowledge.page_payloads import (
+    DEFAULT_DOMAIN,
+    MAX_INLINE_PROVENANCE,
+    normalize_domain,
+    normalize_page_payload,
+    slugify_page_title,
+    split_sections,
+)
 from strata.storage.models import TaskState, TaskType
 
 
 KNOWLEDGE_PAGE_INDEX_KEY = "knowledge_pages:index"
 KNOWLEDGE_PAGE_KEY_PREFIX = "knowledge_page:"
 KNOWLEDGE_PAGE_MIRROR_DIR = Path("docs/spec/kb")
-DEFAULT_DOMAIN = "project"
-MAX_INLINE_PROVENANCE = 20
-DEFAULT_VISIBILITY_BY_DOMAIN = {
-    "system": "agent_internal",
-    "agent": "agent_internal",
-    "user": "restricted",
-    "contacts": "restricted",
-    "project": "project_scoped",
-    "world": "shareable",
-}
-
-def _normalize_domain(raw: Optional[str]) -> str:
-    cleaned = str(raw or DEFAULT_DOMAIN).strip().lower()
-    if cleaned in DEFAULT_VISIBILITY_BY_DOMAIN:
-        return cleaned
-    return DEFAULT_DOMAIN
-
-
-def _default_disclosure_rules(domain: str, visibility_policy: str) -> Dict[str, Any]:
-    return {
-        "can_quote": visibility_policy in {"user_visible", "shareable", "project_scoped"},
-        "can_summarize": True,
-        "usable_for_personalization": domain in {"agent", "user"},
-        "allowed_audiences": [visibility_policy],
-        "tool_access": "restricted" if domain in {"user", "contacts"} else "allowed",
-    }
-
-
-def _normalize_disclosure_rules(raw: Any, *, domain: str, visibility_policy: str) -> Dict[str, Any]:
-    base = _default_disclosure_rules(domain, visibility_policy)
-    if not isinstance(raw, dict):
-        return base
-    normalized = dict(base)
-    normalized.update(raw)
-    normalized["allowed_audiences"] = [str(item) for item in normalized.get("allowed_audiences") or [visibility_policy]]
-    normalized["can_quote"] = bool(normalized.get("can_quote", base["can_quote"]))
-    normalized["can_summarize"] = bool(normalized.get("can_summarize", True))
-    normalized["usable_for_personalization"] = bool(
-        normalized.get("usable_for_personalization", base["usable_for_personalization"])
-    )
-    normalized["tool_access"] = str(normalized.get("tool_access") or base["tool_access"])
-    return normalized
-
-
-def slugify_page_title(raw: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", (raw or "").lower()).strip("-")
-    return slug[:80] or "untitled"
-
-
-def _extract_toc(body: str) -> List[Dict[str, Any]]:
-    toc: List[Dict[str, Any]] = []
-    for line in body.splitlines():
-        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if not match:
-            continue
-        level = len(match.group(1))
-        title = match.group(2).strip()
-        toc.append(
-            {
-                "title": title,
-                "level": level,
-                "anchor": slugify_page_title(title),
-            }
-        )
-    return toc
-
-
-def _build_summary(body: str, fallback_title: str) -> str:
-    for block in re.split(r"\n\s*\n", body.strip()):
-        cleaned = " ".join(block.strip().split())
-        if not cleaned or cleaned.startswith("#"):
-            continue
-        return cleaned[:280]
-    return fallback_title[:280]
-
-
-def _normalize_tags(tags: Optional[List[str]]) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    for tag in tags or []:
-        cleaned = str(tag).strip().lower()
-        if not cleaned or cleaned in seen:
-            continue
-        normalized.append(cleaned)
-        seen.add(cleaned)
-    return normalized
-
-
-def _normalize_aliases(aliases: Optional[List[str]]) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    for alias in aliases or []:
-        cleaned = str(alias).strip()
-        if not cleaned:
-            continue
-        key = cleaned.lower()
-        if key in seen:
-            continue
-        normalized.append(cleaned)
-        seen.add(key)
-    return normalized
-
-
-def _normalize_links(slugs: Optional[List[str]]) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    for slug in slugs or []:
-        cleaned = slugify_page_title(str(slug))
-        if cleaned in seen:
-            continue
-        normalized.append(cleaned)
-        seen.add(cleaned)
-    return normalized
 
 
 def _page_key(slug: str) -> str:
     return f"{KNOWLEDGE_PAGE_KEY_PREFIX}{slugify_page_title(slug)}"
-
-
-def _compact_provenance(provenance: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    if len(provenance) <= MAX_INLINE_PROVENANCE:
-        return provenance, {}
-    kept = provenance[-MAX_INLINE_PROVENANCE:]
-    archived = provenance[:-MAX_INLINE_PROVENANCE]
-    return kept, {
-        "archived_count": len(archived),
-        "latest_archived_at": archived[-1].get("recorded_at") or archived[-1].get("modified_at") or "",
-        "summary": f"{len(archived)} older provenance entries compacted out of the hot thread.",
-    }
-
-
-def normalize_page_payload(payload: Any, *, slug: Optional[str] = None) -> Dict[str, Any]:
-    if not isinstance(payload, dict) or not payload:
-        return {}
-    normalized_slug = slugify_page_title(slug or str(payload.get("slug") or payload.get("title") or "untitled"))
-    title = str(payload.get("title") or normalized_slug.replace("-", " ").title())
-    body = str(payload.get("body") or "")
-    summary = str(payload.get("summary") or _build_summary(body, title))
-    toc = payload.get("toc") if isinstance(payload.get("toc"), list) else _extract_toc(body)
-    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), list) else []
-    provenance, archived_provenance_summary = _compact_provenance(provenance)
-    domain = _normalize_domain(payload.get("domain"))
-    visibility_policy = str(payload.get("visibility_policy") or DEFAULT_VISIBILITY_BY_DOMAIN[domain])
-    return {
-        "slug": normalized_slug,
-        "title": title,
-        "summary": summary,
-        "body": body,
-        "toc": toc,
-        "tags": _normalize_tags(payload.get("tags")),
-        "aliases": _normalize_aliases(payload.get("aliases")),
-        "related_pages": _normalize_links(payload.get("related_pages")),
-        "provenance": provenance,
-        "archived_provenance_summary": payload.get("archived_provenance_summary") or archived_provenance_summary,
-        "source_count": len(provenance),
-        "confidence": float(payload.get("confidence", 0.5) or 0.5),
-        "created_by": str(payload.get("created_by") or "system"),
-        "updated_reason": str(payload.get("updated_reason") or "upsert"),
-        "domain": domain,
-        "visibility_policy": visibility_policy,
-        "disclosure_rules": _normalize_disclosure_rules(
-            payload.get("disclosure_rules"),
-            domain=domain,
-            visibility_policy=visibility_policy,
-        ),
-        "scope_id": str(payload.get("scope_id") or ""),
-        "project_id": str(payload.get("project_id") or ""),
-        "owner_id": str(payload.get("owner_id") or ""),
-        "retention_policy": str(payload.get("retention_policy") or "persistent"),
-        "last_updated": str(payload.get("last_updated") or datetime.now(timezone.utc).isoformat()),
-        "word_count": len(body.split()),
-    }
-
-
-def _split_sections(body: str) -> Dict[str, str]:
-    sections: Dict[str, List[str]] = {}
-    current_heading = "introduction"
-    sections[current_heading] = []
-    for line in body.splitlines():
-        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if match:
-            current_heading = slugify_page_title(match.group(2))
-            sections.setdefault(current_heading, [])
-        sections.setdefault(current_heading, []).append(line)
-    return {key: "\n".join(lines).strip() for key, lines in sections.items() if any(line.strip() for line in lines)}
-
 
 class KnowledgePageStore:
     """
@@ -235,21 +61,43 @@ class KnowledgePageStore:
     def get_page_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
         payload = self.storage.parameters.peek_parameter(_page_key(slug), default_value={}) or {}
         page = normalize_page_payload(payload, slug=slug)
-        return build_access_state(page=page, audience=audience, include_body=True)
+        view = build_access_state(page=page, audience=audience, include_body=True)
+        if view.get("status") in {"ok", "redacted"}:
+            loaded_page = view.get("page") or {}
+            record_context_load(
+                artifact_type="knowledge_page",
+                identifier=str(loaded_page.get("slug") or slug),
+                content=str(loaded_page.get("body") or loaded_page.get("summary") or ""),
+                source="knowledge.pages.get_page_view",
+                metadata={"audience": audience, "status": view.get("status")},
+                storage=self.storage,
+            )
+        return view
 
     def get_page_metadata_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
         payload = self.storage.parameters.peek_parameter(_page_key(slug), default_value={}) or {}
         page = normalize_page_payload(payload, slug=slug)
-        return build_access_state(page=page, audience=audience, include_body=False)
+        view = build_access_state(page=page, audience=audience, include_body=False)
+        if view.get("status") in {"ok", "redacted"}:
+            loaded_page = view.get("page") or {}
+            record_context_load(
+                artifact_type="knowledge_page_metadata",
+                identifier=str(loaded_page.get("slug") or slug),
+                content=str(loaded_page.get("summary") or loaded_page.get("title") or ""),
+                source="knowledge.pages.get_page_metadata_view",
+                metadata={"audience": audience, "status": view.get("status")},
+                storage=self.storage,
+            )
+        return view
 
     def get_page_section_view(self, slug: str, heading: str, *, audience: str = "operator") -> Dict[str, Any]:
         view = self.get_page_view(slug, audience=audience)
         if view.get("status") not in {"ok", "redacted"}:
             return view
         page = view.get("page") or {}
-        sections = _split_sections(page.get("body", ""))
+        sections = split_sections(page.get("body", ""))
         section_key = slugify_page_title(heading)
-        return {
+        section_view = {
             "status": view.get("status"),
             "reason": view.get("reason", ""),
             "audience": view.get("audience"),
@@ -264,6 +112,16 @@ class KnowledgePageStore:
                 "content_redacted": bool(page.get("content_redacted")),
             },
         }
+        section = section_view.get("section") or {}
+        record_context_load(
+            artifact_type="knowledge_page_section",
+            identifier=f"{slug}#{section_key}",
+            content=str(section.get("content") or ""),
+            source="knowledge.pages.get_page_section_view",
+            metadata={"audience": audience, "status": view.get("status")},
+            storage=self.storage,
+        )
+        return section_view
 
     def list_pages(
         self,
@@ -335,7 +193,7 @@ class KnowledgePageStore:
     ) -> Dict[str, Any]:
         normalized_slug = slugify_page_title(slug or title)
         existing = self.get_page(normalized_slug)
-        normalized_domain = _normalize_domain(domain or existing.get("domain"))
+        normalized_domain = domain or existing.get("domain") or DEFAULT_DOMAIN
         payload = normalize_page_payload(
             {
                 "slug": normalized_slug,
@@ -435,7 +293,7 @@ class KnowledgePageStore:
         normalized_slug = slugify_page_title(slug)
         page = self.get_page(normalized_slug)
         title = page.get("title") or normalized_slug.replace("-", " ").title()
-        resolved_domain = _normalize_domain(domain or page.get("domain"))
+        resolved_domain = normalize_domain(domain or page.get("domain"))
         description = (
             f"Update the knowledge page '{title}' ({normalized_slug}).\n"
             f"Reason: {reason}\n"

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from strata.models.adapter import ModelAdapter
+from strata.observability.context import record_context_load
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 from strata.storage.services.main import StorageManager
 
@@ -112,6 +113,13 @@ def _load_eval_context(context_files: List[str]) -> str:
         if not path.exists():
             continue
         raw = path.read_text(encoding="utf-8", errors="ignore")
+        record_context_load(
+            artifact_type="eval_context_file",
+            identifier=str(path),
+            content=raw,
+            source="eval.harness_eval._load_eval_context",
+            metadata={"path": str(path)},
+        )
         snippet = raw[:2000].strip()
         if snippet:
             parts.append(f"[{path}]\n{snippet}")

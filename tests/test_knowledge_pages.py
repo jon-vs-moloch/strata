@@ -31,6 +31,9 @@ class DummyStorage:
         self.parameters = DummyParameterRepo()
         self.tasks = DummyTaskRepo()
 
+    def commit(self):
+        return None
+
 
 def test_upsert_and_metadata_list(tmp_path, monkeypatch):
     monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)

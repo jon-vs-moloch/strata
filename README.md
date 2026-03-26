@@ -9,6 +9,8 @@ Strata is an agent orchestration prototype with three main pieces:
 The project philosophy and bootstrap strategy are documented in [project-philosophy.md](/Users/jon/Projects/strata/docs/spec/project-philosophy.md). That document is the best explanation of what Strata is trying to accomplish and why the repository is structured the way it is.
 The repository structure itself is mapped in [codemap.md](/Users/jon/Projects/strata/docs/spec/codemap.md), which is the fastest way to find the right module without loading the entire codebase.
 
+Strata now also tracks context pressure explicitly: every time the harness loads specs, session history, semantic memory, eval context files, or synthesized knowledge into model context, it records estimated token cost. On startup it also scans source/docs files for oversized artifacts using token estimates rather than line counts, so context-heavy files can be warned on before they quietly become a small-model tax.
+
 ## Why This Exists
 
 Strata is built around a simple thesis:
@@ -156,6 +158,8 @@ Key endpoints implemented in [strata/api/main.py](/Users/jon/Projects/strata/str
 There are additional admin endpoints for reboot, promotion, rollback, worker control, and database reset.
 
 The backend now applies conservative DB retention on startup and exposes its last compaction summary through `/admin/storage/retention`. The current defaults keep recent raw state lossless, compact old metrics into aggregate rollups, archive older chat history per session, trim old terminal attempt tails, and shrink stale experiment reports instead of letting raw traces grow forever.
+
+Context-load telemetry is available at `/admin/context/telemetry`, and `/admin/context/scan` reruns the startup file-token pressure scan on demand.
 
 ## Evaluation Loop
 

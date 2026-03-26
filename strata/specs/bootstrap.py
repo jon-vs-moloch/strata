@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from strata.observability.context import record_context_load
 
 ROOT = Path(__file__).resolve().parents[2]
 SPECS_DIR = ROOT / ".knowledge" / "specs"
@@ -64,9 +65,25 @@ def ensure_spec_files() -> Dict[str, str]:
 
 def load_specs() -> Dict[str, str]:
     ensure_spec_files()
+    global_spec = GLOBAL_SPEC_PATH.read_text(encoding="utf-8")
+    project_spec = PROJECT_SPEC_PATH.read_text(encoding="utf-8")
+    record_context_load(
+        artifact_type="spec",
+        identifier="global_spec",
+        content=global_spec,
+        source="specs.bootstrap.load_specs",
+        metadata={"path": str(GLOBAL_SPEC_PATH)},
+    )
+    record_context_load(
+        artifact_type="spec",
+        identifier="project_spec",
+        content=project_spec,
+        source="specs.bootstrap.load_specs",
+        metadata={"path": str(PROJECT_SPEC_PATH)},
+    )
     return {
-        "global_spec": GLOBAL_SPEC_PATH.read_text(encoding="utf-8"),
-        "project_spec": PROJECT_SPEC_PATH.read_text(encoding="utf-8"),
+        "global_spec": global_spec,
+        "project_spec": project_spec,
     }
 
 
