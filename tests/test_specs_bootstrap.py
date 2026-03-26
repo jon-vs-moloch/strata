@@ -33,6 +33,27 @@ class DummyParameterRepo:
 class DummyStorage:
     def __init__(self):
         self.parameters = DummyParameterRepo()
+        self.messages = DummyMessageRepo()
+
+
+class DummyMessage:
+    def __init__(self, message_id, role, content, created_at):
+        self.message_id = message_id
+        self.role = role
+        self.content = content
+        self.created_at = created_at
+
+
+class DummyMessageRepo:
+    def __init__(self):
+        from datetime import datetime, timezone
+        self.items = [
+            DummyMessage("m1", "user", "I want durable measurable outcomes.", datetime.now(timezone.utc)),
+            DummyMessage("m2", "assistant", "That sounds like spec material.", datetime.now(timezone.utc)),
+        ]
+
+    def get_all(self, session_id=None):
+        return list(self.items)
 
 
 def test_spec_proposal_lifecycle(tmp_path, monkeypatch):
@@ -50,6 +71,7 @@ def test_spec_proposal_lifecycle(tmp_path, monkeypatch):
         proposed_change="Add a section that says eval outcomes should become product-facing metrics.",
         rationale="The user wants measurable outcomes exposed clearly.",
         user_signal="we should measure this",
+        session_id="demo",
         source="test",
     )
     assert proposal["status"] == "pending_review"
@@ -66,7 +88,9 @@ def test_spec_proposal_lifecycle(tmp_path, monkeypatch):
     )
     assert resolved["status"] == "approved"
     assert resolved["applied_at"] is not None
+    assert proposal["attribution"]["message_citations"][0]["message_id"] == "m1"
     assert proposal["proposal_id"] in bootstrap.PROJECT_SPEC_PATH.read_text(encoding="utf-8")
+    assert "User Message Citations" in bootstrap.PROJECT_SPEC_PATH.read_text(encoding="utf-8")
 
 
 def test_spec_proposal_resubmission_clears_clarification(tmp_path, monkeypatch):

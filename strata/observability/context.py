@@ -40,7 +40,7 @@ DEFAULT_FILE_SCAN_EXTENSIONS = {
 }
 DEFAULT_FILE_SCAN_EXCLUDED_DIRS = {
     ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "node_modules", "venv", ".venv", "memory", "runtime", "attic",
+    "node_modules", "venv", ".venv", "venv_new", "memory", "runtime", "attic", "dist",
 }
 
 
@@ -111,6 +111,8 @@ def _iter_scannable_files(base_dir: Path) -> Iterable[Path]:
         parts = set(path.parts)
         if parts & DEFAULT_FILE_SCAN_EXCLUDED_DIRS:
             continue
+        if any(part.startswith("venv") for part in path.parts):
+            continue
         if path.suffix.lower() not in DEFAULT_FILE_SCAN_EXTENSIONS:
             continue
         yield path
@@ -156,7 +158,8 @@ def scan_codebase_context_pressure(storage, *, base_dir: str) -> Dict[str, Any]:
         payload,
         description="Estimated-token scan of code/docs files to flag context-heavy artifacts.",
     )
-    storage.commit()
+    if hasattr(storage, "commit"):
+        storage.commit()
     if warnings:
         logger.warning("Context pressure scan found %s oversized files above estimated token threshold %s", len(warnings), threshold)
     return payload
@@ -238,7 +241,8 @@ def _record_context_load_with_storage(
         warnings,
         description="Recent warnings for large context-load artifacts.",
     )
-    storage.commit()
+    if hasattr(storage, "commit"):
+        storage.commit()
     return event
 
 

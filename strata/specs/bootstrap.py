@@ -63,7 +63,7 @@ def ensure_spec_files() -> Dict[str, str]:
     }
 
 
-def load_specs() -> Dict[str, str]:
+def load_specs(*, storage=None) -> Dict[str, str]:
     ensure_spec_files()
     global_spec = GLOBAL_SPEC_PATH.read_text(encoding="utf-8")
     project_spec = PROJECT_SPEC_PATH.read_text(encoding="utf-8")
@@ -73,6 +73,7 @@ def load_specs() -> Dict[str, str]:
         content=global_spec,
         source="specs.bootstrap.load_specs",
         metadata={"path": str(GLOBAL_SPEC_PATH)},
+        storage=storage,
     )
     record_context_load(
         artifact_type="spec",
@@ -80,6 +81,7 @@ def load_specs() -> Dict[str, str]:
         content=project_spec,
         source="specs.bootstrap.load_specs",
         metadata={"path": str(PROJECT_SPEC_PATH)},
+        storage=storage,
     )
     return {
         "global_spec": global_spec,
@@ -126,6 +128,11 @@ def _archive_old_resolved_proposals(storage) -> None:
         payload["current_spec_snapshot"] = ""
         payload["user_signal"] = str(payload.get("user_signal") or "")[:400]
         payload["resolution_notes"] = str(payload.get("resolution_notes") or "")[:400]
+        attribution = dict(payload.get("attribution") or {})
+        if attribution:
+            attribution["conversational_context"] = str(attribution.get("conversational_context") or "")[:600]
+            attribution["message_citations"] = list(attribution.get("message_citations") or [])[-8:]
+            payload["attribution"] = attribution
         storage.parameters.set_parameter(
             _proposal_key(proposal_id),
             payload,
@@ -135,6 +142,49 @@ def _archive_old_resolved_proposals(storage) -> None:
 
 def _spec_path_for_scope(scope: str) -> Path:
     return GLOBAL_SPEC_PATH if str(scope).strip().lower() == "global" else PROJECT_SPEC_PATH
+
+
+def build_spec_attribution(
+    storage,
+    *,
+    session_id: Optional[str],
+    user_signal: str,
+    max_messages: int = 6,
+) -> Dict[str, Any]:
+    citations: List[Dict[str, Any]] = []
+    conversational_context = ""
+    if not session_id or not hasattr(storage, "messages"):
+        return {
+            "driver_session_id": session_id,
+            "driver_user_signal": str(user_signal).strip(),
+            "message_citations": citations,
+            "conversational_context": conversational_context,
+        }
+
+    try:
+        history = storage.messages.get_all(session_id=session_id)
+    except Exception:
+        history = []
+    trimmed = history[-max(1, max_messages):]
+    conversational_context = "\n".join(
+        f"{getattr(msg, 'role', 'unknown')}: {str(getattr(msg, 'content', '') or '').strip()}"
+        for msg in trimmed
+    ).strip()
+    for msg in trimmed:
+        citations.append(
+            {
+                "message_id": getattr(msg, "message_id", None),
+                "role": getattr(msg, "role", None),
+                "created_at": getattr(msg, "created_at", None).isoformat() if getattr(msg, "created_at", None) else None,
+                "excerpt": str(getattr(msg, "content", "") or "").strip()[:280],
+            }
+        )
+    return {
+        "driver_session_id": session_id,
+        "driver_user_signal": str(user_signal).strip(),
+        "message_citations": citations,
+        "conversational_context": conversational_context,
+    }
 
 
 def create_spec_proposal(
@@ -147,11 +197,12 @@ def create_spec_proposal(
     session_id: Optional[str] = None,
     source: str = "chat_agent",
     review_task_id: Optional[str] = None,
+    attribution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     ensure_spec_files()
     normalized_scope = "global" if str(scope).strip().lower() == "global" else "project"
     proposal_id = f"spec_{uuid4().hex[:12]}"
-    current_specs = load_specs()
+    current_specs = load_specs(storage=storage)
     now = datetime.now(timezone.utc).isoformat()
     proposal = {
         "proposal_id": proposal_id,
@@ -163,6 +214,11 @@ def create_spec_proposal(
         "session_id": session_id,
         "source": source,
         "review_task_id": review_task_id,
+        "attribution": attribution or build_spec_attribution(
+            storage,
+            session_id=session_id,
+            user_signal=user_signal,
+        ),
         "current_spec_snapshot": current_specs["global_spec" if normalized_scope == "global" else "project_spec"],
         "created_at": now,
         "updated_at": now,
@@ -258,6 +314,15 @@ def resolve_spec_proposal(
             f"- Rationale: {proposal.get('rationale') or 'n/a'}\n\n"
             f"{proposal.get('proposed_change', '').strip()}\n"
         )
+        citations = list((proposal.get("attribution") or {}).get("message_citations") or [])
+        if citations:
+            appended += "\n### User Message Citations\n"
+            for citation in citations[-6:]:
+                appended += (
+                    f"- {citation.get('role') or 'unknown'} "
+                    f"[{citation.get('message_id') or 'n/a'}]: "
+                    f"{citation.get('excerpt') or ''}\n"
+                )
         path.write_text(current.rstrip() + appended, encoding="utf-8")
         proposal["applied_at"] = now
 

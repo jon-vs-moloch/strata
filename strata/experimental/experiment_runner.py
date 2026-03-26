@@ -5,34 +5,31 @@
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Literal
 from strata.schemas.execution import WeakExecutionContext
-from strata.orchestrator.evaluation import EvaluationPipeline
 from strata.orchestrator.worker.telemetry import record_metric
-from strata.storage.models import TaskModel, MetricModel, ParameterModel
+from strata.storage.models import TaskModel, MetricModel
 from strata.eval.benchmark import run_benchmark, persist_benchmark_report
 from strata.eval.structured_eval import run_structured_eval, persist_structured_eval_report
+from strata.experimental.promotion_policy import (
+    build_promotion_readiness,
+    calculate_deltas,
+    decide_benchmark_promotion,
+    decide_promotion,
+)
+from strata.experimental.report_store import (
+    get_persisted_experiment_report,
+    persist_experiment_report,
+    report_parameter_key,
+)
 from strata.experimental.report_utils import (
     ExperimentResult,
-    build_report_task_associations,
     iter_experiment_reports,
     normalize_experiment_report,
     report_has_weak_gain,
 )
 
 logger = logging.getLogger(__name__)
-
-EXPERIMENT_REPORT_PREFIX = "experiment_report"
-EXPERIMENT_REPORT_DESCRIPTION = (
-    "Persisted benchmark/full-eval promotion summaries so the harness can reason "
-    "about exact sampled runs instead of only blended historical metrics."
-)
-DEFAULT_PROMOTION_POLICY = {
-    "min_benchmark_wins": 2,
-    "min_structured_wins": 1,
-    "min_code_wins": 1,
-}
 
 class ExperimentRunner:
     """
@@ -42,147 +39,11 @@ class ExperimentRunner:
         self.storage = storage_manager
         self.model = model_adapter
 
-    def _report_parameter_key(self, candidate_change_id: str) -> str:
-        return f"{EXPERIMENT_REPORT_PREFIX}:{candidate_change_id}"
-
-    def _promotion_policy(self) -> Dict[str, int]:
-        policy = self.storage.parameters.peek_parameter(
-            "bootstrap_promotion_policy",
-            default_value=DEFAULT_PROMOTION_POLICY,
-        ) or DEFAULT_PROMOTION_POLICY
-        merged = dict(DEFAULT_PROMOTION_POLICY)
-        if isinstance(policy, dict):
-            merged.update({k: int(v) for k, v in policy.items() if str(v).isdigit() or isinstance(v, int)})
-        return merged
-
-    def _benchmark_improved(self, report: Dict[str, Any]) -> bool:
-        harness_wins = int(report.get("harness_wins", 0) or 0)
-        baseline_wins = int(report.get("baseline_wins", 0) or 0)
-        harness_score = float(report.get("average_harness_score", 0.0) or 0.0)
-        baseline_score = float(report.get("average_baseline_score", 0.0) or 0.0)
-        return harness_wins > baseline_wins or harness_score > baseline_score
-
-    def _structured_improved(self, report: Dict[str, Any]) -> bool:
-        harness_accuracy = float(report.get("harness_accuracy", 0.0) or 0.0)
-        baseline_accuracy = float(report.get("baseline_accuracy", 0.0) or 0.0)
-        return harness_accuracy > baseline_accuracy
-
-    def _build_promotion_readiness(
-        self,
-        *,
-        evaluation_kind: str,
-        benchmark_reports: Optional[List[Dict[str, Any]]] = None,
-        structured_reports: Optional[List[Dict[str, Any]]] = None,
-        code_validation: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        policy = self._promotion_policy()
-        benchmark_reports = benchmark_reports or []
-        structured_reports = structured_reports or []
-        benchmark_wins = sum(1 for report in benchmark_reports if self._benchmark_improved(report))
-        structured_wins = sum(1 for report in structured_reports if self._structured_improved(report))
-        code_wins = 1 if code_validation and code_validation.get("promoted") else 0
-
-        ready = False
-        if evaluation_kind == "benchmark":
-            ready = benchmark_wins >= policy["min_benchmark_wins"]
-        elif evaluation_kind == "full_eval":
-            ready = (
-                benchmark_wins >= policy["min_benchmark_wins"]
-                and structured_wins >= policy["min_structured_wins"]
-            )
-        elif evaluation_kind == "tool_promotion":
-            ready = code_wins >= policy["min_code_wins"]
-
-        return {
-            "policy": policy,
-            "benchmark_win_runs": benchmark_wins,
-            "benchmark_total_runs": len(benchmark_reports),
-            "structured_win_runs": structured_wins,
-            "structured_total_runs": len(structured_reports),
-            "code_win_runs": code_wins,
-            "ready_for_promotion": ready,
-        }
-
-    def _persist_experiment_report(
-        self,
-        result: ExperimentResult,
-        *,
-        baseline_change_id: str,
-        evaluation_kind: str,
-        run_count: int,
-        benchmark_reports: Optional[List[Dict[str, Any]]] = None,
-        structured_reports: Optional[List[Dict[str, Any]]] = None,
-        suite_name: Optional[str] = None,
-        eval_harness_config_override: Optional[Dict[str, Any]] = None,
-        proposal_metadata: Optional[Dict[str, Any]] = None,
-        promotion_readiness: Optional[Dict[str, Any]] = None,
-        code_validation: Optional[Dict[str, Any]] = None,
-        source_task_id: Optional[str] = None,
-        spawned_task_ids: Optional[List[str]] = None,
-        associated_task_ids: Optional[List[str]] = None,
-    ) -> None:
-        task_associations = build_report_task_associations(
-            source_task_id=source_task_id,
-            spawned_task_ids=spawned_task_ids,
-            associated_task_ids=associated_task_ids,
-        )
-        report_payload = {
-            "candidate_change_id": result.candidate_change_id,
-            "baseline_change_id": baseline_change_id,
-            "evaluation_kind": evaluation_kind,
-            "run_count": run_count,
-            "suite_name": suite_name,
-            "recommendation": result.recommendation,
-            "notes": result.notes,
-            "success": result.success,
-            "valid": result.valid,
-            "baseline_metrics": result.baseline_metrics,
-            "candidate_metrics": result.candidate_metrics,
-            "deltas": result.deltas,
-            "benchmark_reports": benchmark_reports or [],
-            "structured_reports": structured_reports or [],
-            "eval_harness_config_override": eval_harness_config_override,
-            "proposal_metadata": proposal_metadata or {},
-            "promotion_readiness": promotion_readiness or {},
-            "code_validation": code_validation or {},
-            "task_associations": task_associations,
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self.storage.parameters.set_parameter(
-            key=self._report_parameter_key(result.candidate_change_id),
-            value=report_payload,
-            description=EXPERIMENT_REPORT_DESCRIPTION,
-        )
-        self._attach_report_to_tasks(result.candidate_change_id, task_associations)
-        self.storage.commit()
-
-    def _attach_report_to_tasks(self, candidate_change_id: str, task_associations: Dict[str, Any]) -> None:
-        report_ref = {
-            "candidate_change_id": candidate_change_id,
-            "linked_at": datetime.now(timezone.utc).isoformat(),
-            "source_task_id": task_associations.get("source_task_id"),
-        }
-        for task_id in task_associations.get("associated_task_ids") or []:
-            task = self.storage.tasks.get_by_id(task_id)
-            if not task:
-                continue
-            constraints = dict(task.constraints or {})
-            report_refs = list(constraints.get("associated_reports") or [])
-            if not any(str(item.get("candidate_change_id")) == candidate_change_id for item in report_refs if isinstance(item, dict)):
-                report_refs.append(dict(report_ref))
-            constraints["associated_reports"] = report_refs[-25:]
-            task.constraints = constraints
+    def _persist_experiment_report(self, result: ExperimentResult, **kwargs: Any) -> None:
+        persist_experiment_report(self.storage, result, **kwargs)
 
     def get_persisted_experiment_report(self, candidate_change_id: str) -> Optional[Dict[str, Any]]:
-        row = (
-            self.storage.session.query(ParameterModel)
-            .filter_by(key=self._report_parameter_key(candidate_change_id))
-            .first()
-        )
-        if not row:
-            return None
-        report = normalize_experiment_report(row.value)
-        return report or None
+        return get_persisted_experiment_report(self.storage, candidate_change_id)
 
     async def run_benchmark_gate(
         self,
@@ -220,11 +81,12 @@ class ExperimentRunner:
         candidate_metrics = self._gather_metrics(candidate_change_id)
         baseline_metrics = self._gather_metrics(baseline_change_id)
         deltas = self._calculate_deltas(baseline_metrics, candidate_metrics)
-        promotion_readiness = self._build_promotion_readiness(
+        promotion_readiness = build_promotion_readiness(
+            self.storage,
             evaluation_kind="benchmark",
             benchmark_reports=benchmark_reports,
         )
-        recommendation = self._decide_benchmark_promotion(deltas, promotion_readiness)
+        recommendation = decide_benchmark_promotion(deltas, promotion_readiness)
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -235,7 +97,8 @@ class ExperimentRunner:
             recommendation=recommendation,
             notes=f"Benchmark gate completed across {safe_runs} run(s).",
         )
-        self._persist_experiment_report(
+        persist_experiment_report(
+            self.storage,
             result,
             baseline_change_id=baseline_change_id,
             evaluation_kind="benchmark",
@@ -301,12 +164,13 @@ class ExperimentRunner:
         candidate_metrics = self._gather_metrics(candidate_change_id)
         baseline_metrics = self._gather_metrics(baseline_change_id)
         deltas = self._calculate_deltas(baseline_metrics, candidate_metrics)
-        promotion_readiness = self._build_promotion_readiness(
+        promotion_readiness = build_promotion_readiness(
+            self.storage,
             evaluation_kind="full_eval",
             benchmark_reports=benchmark_reports,
             structured_reports=structured_reports,
         )
-        recommendation = self._decide_benchmark_promotion(deltas, promotion_readiness)
+        recommendation = decide_benchmark_promotion(deltas, promotion_readiness)
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -317,7 +181,8 @@ class ExperimentRunner:
             recommendation=recommendation,
             notes=f"Full eval gate completed across {safe_runs} run(s) using suite '{suite_name}'.",
         )
-        self._persist_experiment_report(
+        persist_experiment_report(
+            self.storage,
             result,
             baseline_change_id=baseline_change_id,
             evaluation_kind="full_eval",
@@ -348,7 +213,8 @@ class ExperimentRunner:
         candidate_metrics = {"tool_promotion_success": 1.0 if validation_result.get("promoted") else 0.0}
         baseline_metrics = self._gather_metrics(baseline_change_id)
         deltas = self._calculate_deltas(baseline_metrics, candidate_metrics)
-        promotion_readiness = self._build_promotion_readiness(
+        promotion_readiness = build_promotion_readiness(
+            self.storage,
             evaluation_kind="tool_promotion",
             code_validation=validation_result,
         )
@@ -364,7 +230,8 @@ class ExperimentRunner:
             recommendation=recommendation,
             notes=validation_result.get("details", "Tool promotion cycle completed."),
         )
-        self._persist_experiment_report(
+        persist_experiment_report(
+            self.storage,
             result,
             baseline_change_id=baseline_change_id,
             evaluation_kind="tool_promotion",
@@ -440,10 +307,10 @@ class ExperimentRunner:
         baseline_metrics = self._gather_metrics("baseline") 
         
         # 5. Delta Analysis
-        deltas = self._calculate_deltas(baseline_metrics, candidate_metrics)
+        deltas = calculate_deltas(baseline_metrics, candidate_metrics)
         
         # 6. Recommendation Logic
-        recommendation = self._decide_promotion(deltas)
+        recommendation = decide_promotion(deltas)
         
         return ExperimentResult(
             success=True,
@@ -471,47 +338,3 @@ class ExperimentRunner:
             .all()
         )
         return {r.metric_name: r.avg_value for r in results}
-
-    def _calculate_deltas(self, baseline: dict, candidate: dict) -> Dict[str, float]:
-        deltas = {}
-        all_keys = set(baseline.keys()) | set(candidate.keys())
-        for k in all_keys:
-            b_val = baseline.get(k, 0.0)
-            c_val = candidate.get(k, 0.0)
-            deltas[k] = c_val - b_val
-        return deltas
-
-    def _decide_promotion(self, deltas: Dict[str, float]) -> str:
-        # Rule: Promote if valid_candidate_rate improved and no major regressions
-        vcr_delta = deltas.get("valid_candidate_rate", 0.0)
-        failure_delta = deltas.get("task_failure", 0.0)
-        
-        if vcr_delta > 0.05 and failure_delta <= 0:
-            return "promote"
-        elif vcr_delta < -0.05:
-            return "reject"
-        else:
-            return "insufficient_signal"
-
-    def _decide_benchmark_promotion(
-        self,
-        deltas: Dict[str, float],
-        promotion_readiness: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        if promotion_readiness and not promotion_readiness.get("ready_for_promotion", False):
-            return "insufficient_signal"
-        score_delta = deltas.get("benchmark_score_delta", 0.0)
-        harness_win_delta = deltas.get("benchmark_harness_win_rate", 0.0)
-        structured_accuracy_delta = deltas.get("structured_eval_harness_accuracy", 0.0)
-        structured_latency_delta = deltas.get("structured_eval_harness_latency_s", 0.0)
-        if structured_accuracy_delta > 0.0:
-            return "promote"
-        if structured_accuracy_delta < 0.0:
-            return "reject"
-        if score_delta > 0.5 or harness_win_delta > 0.15:
-            return "promote"
-        if score_delta < -0.5:
-            return "reject"
-        if structured_latency_delta < -5.0:
-            return "promote"
-        return "insufficient_signal"
