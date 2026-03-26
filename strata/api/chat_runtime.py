@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from strata.observability.context import record_context_load
 from strata.api.chat_tool_executor import ChatToolExecutor
+from strata.context.loaded_files import build_loaded_context_block
 
 class ChatRuntime:
     def __init__(self, **deps: Any):
@@ -43,6 +44,8 @@ class ChatRuntime:
                     if task.human_intervention_required
                     else None
                 ),
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "updated_at": task.updated_at.isoformat() if task.updated_at else None,
                 "attempts": [
                     {
                         "id": attempt.attempt_id,
@@ -215,6 +218,21 @@ Available Tools:
             storage.commit()
 
         history_records = storage.messages.get_all(session_id=session_id)
+        loaded_context_block = build_loaded_context_block(
+            storage,
+            source="api.chat_runtime.build_chat_messages.loaded_context",
+        )
+        if loaded_context_block:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Persistent workspace context is currently loaded for this round.\n"
+                        "Treat these files as explicitly pinned until they are unloaded:\n\n"
+                        f"{loaded_context_block}"
+                    ),
+                }
+            )
         if history_records:
             history_text = "\n".join(str(message.content or "") for message in history_records[-5:])
             record_context_load(

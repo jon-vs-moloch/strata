@@ -8,7 +8,7 @@
 
 from typing import List, Dict, Any, Optional
 import time
-from sqlalchemy import select, desc, distinct
+from sqlalchemy import select, desc, distinct, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from strata.storage.models import MessageModel
@@ -77,6 +77,40 @@ class MessageRepository:
         stmt = select(distinct(MessageModel.session_id))
         results = self.session.scalars(stmt).all()
         return [str(r) for r in results if r is not None] # Ensure non-None and convert to string
+
+    def get_session_summaries(self) -> List[Dict[str, Any]]:
+        rows = (
+            self.session.query(
+                MessageModel.session_id,
+                func.max(MessageModel.created_at).label("last_message_at"),
+                func.min(MessageModel.created_at).label("first_message_at"),
+                func.count(MessageModel.message_id).label("message_count"),
+            )
+            .filter(MessageModel.is_archived == False)
+            .group_by(MessageModel.session_id)
+            .all()
+        )
+        summaries: List[Dict[str, Any]] = []
+        for row in rows:
+            session_id = str(row.session_id)
+            last_message = (
+                self.session.query(MessageModel)
+                .filter(MessageModel.is_archived == False, MessageModel.session_id == session_id)
+                .order_by(MessageModel.created_at.desc())
+                .first()
+            )
+            summaries.append(
+                {
+                    "session_id": session_id,
+                    "message_count": int(row.message_count or 0),
+                    "first_message_at": row.first_message_at.isoformat() if row.first_message_at else None,
+                    "last_message_at": row.last_message_at.isoformat() if row.last_message_at else None,
+                    "last_message_preview": str(getattr(last_message, "content", "") or "").strip()[:120],
+                    "last_message_role": getattr(last_message, "role", None),
+                }
+            )
+        summaries.sort(key=lambda item: item.get("last_message_at") or "", reverse=True)
+        return summaries
 
     def archive_session(self, session_id: str):
         """

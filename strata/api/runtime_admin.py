@@ -17,6 +17,7 @@ from typing import Any, Dict
 
 from fastapi import Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 
 
@@ -133,6 +134,24 @@ def register_runtime_admin_routes(
     @app.get("/admin/context/telemetry")
     async def get_context_telemetry(storage=Depends(get_storage)):
         return {"status": "ok", "context": get_context_load_telemetry(storage)}
+
+    @app.get("/admin/context/loaded")
+    async def get_loaded_context(storage=Depends(get_storage)):
+        return {"status": "ok", "loaded": list_loaded_context_files(storage)}
+
+    @app.post("/admin/context/load")
+    async def admin_load_context(payload: Dict[str, Any], storage=Depends(get_storage)):
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise HTTPException(status_code=400, detail="path required")
+        return {"status": "ok", "result": load_context_file(storage, path, source="admin.context.load", base_dir=base_dir)}
+
+    @app.post("/admin/context/unload")
+    async def admin_unload_context(payload: Dict[str, Any], storage=Depends(get_storage)):
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise HTTPException(status_code=400, detail="path required")
+        return {"status": "ok", "result": unload_context_file(storage, path, base_dir=base_dir)}
 
     @app.post("/admin/context/scan")
     async def rescan_context_pressure(storage=Depends(get_storage)):

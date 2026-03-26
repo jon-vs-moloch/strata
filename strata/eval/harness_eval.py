@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from strata.models.adapter import ModelAdapter
+from strata.context.loaded_files import get_loaded_context_registry
 from strata.observability.context import record_context_load
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 from strata.storage.services.main import StorageManager
@@ -96,6 +97,11 @@ def get_active_eval_harness_config() -> Dict[str, Any]:
             context_files = list(config.get("context_files") or DEFAULT_CONTEXT_FILES)
             if context_files == LEGACY_DEFAULT_CONTEXT_FILES:
                 context_files = list(DEFAULT_CONTEXT_FILES)
+            loaded = get_loaded_context_registry(storage).get("files") or []
+            for item in loaded:
+                path = str(item.get("path") or "").strip()
+                if path and path not in context_files:
+                    context_files.append(path)
             return {
                 "system_prompt": str(config.get("system_prompt") or DEFAULT_EVAL_SYSTEM_PROMPT),
                 "context_files": context_files,

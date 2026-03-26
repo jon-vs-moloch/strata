@@ -27,6 +27,23 @@ const PROVIDER_SETUP_LINKS = [
   { label: 'OpenRouter Keys', href: 'https://openrouter.ai/settings/keys' },
 ];
 
+const formatRelativeTime = (dateString) => {
+  if (!dateString) return 'never';
+  const deltaMs = Date.now() - new Date(dateString).getTime();
+  const minutes = Math.max(0, Math.floor(deltaMs / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+};
+
+const formatAbsoluteTime = (dateString) => {
+  if (!dateString) return '—';
+  return new Date(dateString).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
 
 // ─── Settings Modal ────────────────────────────────────────────────────────────
 const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
@@ -529,20 +546,21 @@ const HistoryPane = ({ sessionList, sessionId, setSessionId, deleteSession }) =>
         No sessions yet
       </div>
     )}
-    {sessionList.map(s => (
+    {sessionList.map(session => (
       <SessionRow
-        key={s}
-        s={s}
-        active={sessionId === s}
-        onClick={() => setSessionId(s)}
-        onDelete={() => deleteSession(s)}
+        key={session.session_id}
+        session={session}
+        active={sessionId === session.session_id}
+        onClick={() => setSessionId(session.session_id)}
+        onDelete={() => deleteSession(session.session_id)}
       />
     ))}
   </div>
 );
 
-const SessionRow = ({ s, active, onClick, onDelete }) => {
+const SessionRow = ({ session, active, onClick, onDelete }) => {
   const [hovered, setHovered] = useState(false);
+  const s = session.session_id;
   const label = s === 'default' ? 'Genesis Session' : (() => {
     const ts = parseInt(s.replace('session-', ''), 10);
     if (isNaN(ts)) return s;
@@ -565,16 +583,26 @@ const SessionRow = ({ s, active, onClick, onDelete }) => {
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', overflow: 'hidden' }}>
         <MessageSquare size={14} style={{ opacity: active ? 1 : 0.5, flexShrink: 0 }} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+        <div style={{ overflow: 'hidden' }}>
+          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+          <div style={{ fontSize: '10px', color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {session.last_message_preview || 'No messages yet'}
+          </div>
+        </div>
       </div>
-      {(hovered || active) && (
-        <button
-          onClick={e => { e.stopPropagation(); onDelete(); }}
-          style={{ background: 'none', border: 'none', color: '#ff4d4d', cursor: 'pointer', padding: '2px', display: 'flex', opacity: 0.7, flexShrink: 0 }}
-        >
-          <Trash2 size={13} />
-        </button>
-      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+        <span title={formatAbsoluteTime(session.last_message_at)} style={{ fontSize: '10px', color: '#666' }}>
+          {formatRelativeTime(session.last_message_at)}
+        </span>
+        {(hovered || active) && (
+          <button
+            onClick={e => { e.stopPropagation(); onDelete(); }}
+            style={{ background: 'none', border: 'none', color: '#ff4d4d', cursor: 'pointer', padding: '2px', display: 'flex', opacity: 0.7, flexShrink: 0 }}
+          >
+            <Trash2 size={13} />
+          </button>
+        )}
+      </div>
     </div>
   );
 };
@@ -598,6 +626,7 @@ function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [providerTelemetry, setProviderTelemetry] = useState({});
   const [dashboard, setDashboard] = useState(null);
+  const [loadedContext, setLoadedContext] = useState({ files: [], budget_tokens: 0 });
   const API = 'http://localhost:8000';
 
   const [archivedTasks, setArchivedTasks] = useState(() => {
@@ -688,13 +717,14 @@ function App() {
     const gen = ++fetchGenRef.current;
 
     try {
-      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes] = await Promise.all([
+      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes] = await Promise.all([
         axios.get(`${API}/tasks`),
         axios.get(`${API}/messages?session_id=${sessionId}`),
         axios.get(`${API}/sessions`),
         axios.get(`${API}/admin/telemetry?limit=8`),
         axios.get(`${API}/admin/providers/telemetry`),
-        axios.get(`${API}/admin/dashboard?limit=6`)
+        axios.get(`${API}/admin/dashboard?limit=6`),
+        axios.get(`${API}/admin/context/loaded`)
       ]);
 
       // If a newer fetch was launched while we were awaiting, discard this result
@@ -702,12 +732,23 @@ function App() {
 
       setTasks(tasksRes.data);
       setMessages(msgsRes.data);
-      const sessions = sessionsRes.data;
-      if (!sessions.includes(sessionId)) sessions.push(sessionId);
+      const sessions = Array.isArray(sessionsRes.data) ? sessionsRes.data.slice() : [];
+      if (!sessions.some((s) => s.session_id === sessionId)) {
+        sessions.push({
+          session_id: sessionId,
+          message_count: msgsRes.data.length,
+          first_message_at: msgsRes.data[0]?.created_at || null,
+          last_message_at: msgsRes.data[msgsRes.data.length - 1]?.created_at || null,
+          last_message_preview: msgsRes.data[msgsRes.data.length - 1]?.content || '',
+          last_message_role: msgsRes.data[msgsRes.data.length - 1]?.role || null,
+        });
+      }
+      sessions.sort((a, b) => String(b.last_message_at || '').localeCompare(String(a.last_message_at || '')));
       setSessionList(sessions);
       setTelemetry(telemetryRes.data.telemetry);
       setProviderTelemetry(providerTelemetryRes.data.providers || {});
       setDashboard(dashboardRes.data.dashboard || null);
+      setLoadedContext(loadedContextRes.data.loaded || { files: [], budget_tokens: 0 });
       setApiStatus('ok');
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
@@ -1035,6 +1076,9 @@ function App() {
                 <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.65' }}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                 </div>
+                <div title={formatAbsoluteTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
+                  {formatRelativeTime(msg.created_at)}
+                </div>
               </MotionDiv>
             ))}
 
@@ -1121,6 +1165,17 @@ function App() {
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          <div style={{ background: '#101015', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>LOADED CONTEXT</div>
+            <div style={{ fontSize: '11px', color: '#888' }}>
+              {loadedContext.files?.length || 0} pinned files · budget {loadedContext.budget_tokens || 0} tokens
+            </div>
+            {(loadedContext.files || []).slice(0, 3).map((entry) => (
+              <div key={entry.path} style={{ fontSize: '11px', color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {entry.path} · {entry.estimated_tokens} tok
+              </div>
+            ))}
+          </div>
           <AnimatePresence>
             {taskTree.map(task => (
               <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />

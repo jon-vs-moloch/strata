@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
@@ -24,6 +24,26 @@ const OUTCOME_MAP = {
 const TYPE_MAP = {
   research: { color: '#00e5cc', label: 'RESEARCH', Icon: FlaskConical },
 };
+
+const TERMINAL_STATUSES = new Set(['complete', 'abandoned', 'cancelled']);
+
+function formatAbsolute(dateString) {
+  if (!dateString) return '—';
+  const date = new Date(dateString);
+  return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatRelative(dateString) {
+  if (!dateString) return 'unknown';
+  const deltaMs = Date.now() - new Date(dateString).getTime();
+  const minutes = Math.max(0, Math.floor(deltaMs / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
 
 const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -127,7 +147,8 @@ const InterventionWidget = ({ taskId, question, onResolve }) => {
 };
 
 const TaskCard = ({ task, onArchive, isNested = false }) => {
-  const [isExpanded, setIsExpanded] = useState(!isNested); // Main task expanded by default, nested collapsed
+  const defaultExpanded = useMemo(() => !TERMINAL_STATUSES.has(task.status), [task.status]);
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const style = STATUS_MAP[task.status] ?? DEFAULT_STATUS;
   const typeInfo = task.type ? TYPE_MAP[task.type] : null;
   const accentColor = typeInfo ? typeInfo.color : style.color;
@@ -216,6 +237,10 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
           {(isExpanded || !isNested) && task.description && (
             <p style={{ fontSize: '12px', color: '#6b6b7d', marginTop: '6px', lineHeight: '1.4' }}>{task.description}</p>
           )}
+          <div style={{ display: 'flex', gap: '12px', marginTop: '8px', flexWrap: 'wrap', fontSize: '10px', color: '#626275' }}>
+            <span title={formatAbsolute(task.created_at)}>Created {formatRelative(task.created_at)}</span>
+            <span title={formatAbsolute(task.updated_at)}>Updated {formatRelative(task.updated_at)}</span>
+          </div>
         </div>
 
         {task.status === 'blocked' && (
@@ -252,7 +277,7 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
             {/* Grouped Child Tasks */}
             <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} />
             <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} />
-            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={false} onArchive={onArchive} />
+            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} />
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -284,8 +309,11 @@ const AttemptRow = ({ attempt, index }) => {
             Attempt {attempt.outcome || 'Pending'}
           </div>
           <div style={{ fontSize: '9px', color: '#444' }}>
-            {new Date(attempt.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            {formatAbsolute(attempt.started_at)}
           </div>
+        </div>
+        <div style={{ fontSize: '9px', color: '#555', marginTop: '2px' }}>
+          {attempt.ended_at ? `Ended ${formatRelative(attempt.ended_at)}` : `Started ${formatRelative(attempt.started_at)}`}
         </div>
         {attempt.reason && (
           <div style={{ fontSize: '11px', color: '#555', marginTop: '2px' }}>{attempt.reason}</div>

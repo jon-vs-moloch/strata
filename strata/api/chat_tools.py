@@ -179,6 +179,45 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_loaded_context_files",
+            "description": "List workspace files that are currently pinned into round-level context.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_context_file",
+            "description": "Pin a workspace file into persistent round-level context until it is unloaded. Use this for compact, high-value artifacts only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository-relative or absolute file path."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unload_context_file",
+            "description": "Remove a previously pinned workspace file from persistent round-level context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository-relative or absolute file path."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_spec_update",
             "description": "Queue a reviewed proposal to change a durable spec. Use this when the user expresses a lasting goal, preference, or constraint that should influence future system behavior.",
             "parameters": {

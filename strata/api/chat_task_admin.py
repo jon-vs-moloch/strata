@@ -87,7 +87,7 @@ def register_chat_task_routes(
 
     @app.get("/sessions")
     async def get_sessions(storage=Depends(get_storage)):
-        return storage.messages.get_sessions()
+        return storage.messages.get_session_summaries()
 
     @app.delete("/sessions/{session_id}")
     async def delete_session(session_id: str, storage=Depends(get_storage)):
