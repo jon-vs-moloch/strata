@@ -20,6 +20,7 @@ KNOWLEDGE_PAGE_INDEX_KEY = "knowledge_pages:index"
 KNOWLEDGE_PAGE_KEY_PREFIX = "knowledge_page:"
 KNOWLEDGE_PAGE_MIRROR_DIR = Path("docs/spec/kb")
 DEFAULT_DOMAIN = "project"
+MAX_INLINE_PROVENANCE = 20
 DEFAULT_VISIBILITY_BY_DOMAIN = {
     "system": "agent_internal",
     "agent": "agent_internal",
@@ -148,6 +149,18 @@ def _page_key(slug: str) -> str:
     return f"{KNOWLEDGE_PAGE_KEY_PREFIX}{slugify_page_title(slug)}"
 
 
+def _compact_provenance(provenance: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if len(provenance) <= MAX_INLINE_PROVENANCE:
+        return provenance, {}
+    kept = provenance[-MAX_INLINE_PROVENANCE:]
+    archived = provenance[:-MAX_INLINE_PROVENANCE]
+    return kept, {
+        "archived_count": len(archived),
+        "latest_archived_at": archived[-1].get("recorded_at") or archived[-1].get("modified_at") or "",
+        "summary": f"{len(archived)} older provenance entries compacted out of the hot thread.",
+    }
+
+
 def normalize_page_payload(payload: Any, *, slug: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(payload, dict) or not payload:
         return {}
@@ -157,6 +170,7 @@ def normalize_page_payload(payload: Any, *, slug: Optional[str] = None) -> Dict[
     summary = str(payload.get("summary") or _build_summary(body, title))
     toc = payload.get("toc") if isinstance(payload.get("toc"), list) else _extract_toc(body)
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), list) else []
+    provenance, archived_provenance_summary = _compact_provenance(provenance)
     domain = _normalize_domain(payload.get("domain"))
     visibility_policy = str(payload.get("visibility_policy") or DEFAULT_VISIBILITY_BY_DOMAIN[domain])
     return {
@@ -169,6 +183,7 @@ def normalize_page_payload(payload: Any, *, slug: Optional[str] = None) -> Dict[
         "aliases": _normalize_aliases(payload.get("aliases")),
         "related_pages": _normalize_links(payload.get("related_pages")),
         "provenance": provenance,
+        "archived_provenance_summary": payload.get("archived_provenance_summary") or archived_provenance_summary,
         "source_count": len(provenance),
         "confidence": float(payload.get("confidence", 0.5) or 0.5),
         "created_by": str(payload.get("created_by") or "system"),
@@ -504,6 +519,15 @@ class KnowledgePageStore:
                 label = str(source.get("label") or source.get("path") or source.get("source") or "source")
                 lines.append(f"- {label}")
             lines.append("")
+        if page.get("archived_provenance_summary"):
+            lines.extend(
+                [
+                    "## Archived Provenance Summary",
+                    "",
+                    f"- {page['archived_provenance_summary'].get('summary')}",
+                    "",
+                ]
+            )
         lines.append(page.get("body", ""))
         target.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 

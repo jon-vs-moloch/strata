@@ -20,6 +20,7 @@ GLOBAL_SPEC_PATH = SPECS_DIR / "global_spec.md"
 PROJECT_SPEC_PATH = SPECS_DIR / "project_spec.md"
 SPEC_PROPOSALS_INDEX_KEY = "spec_proposals:index"
 SPEC_PROPOSAL_KEY_PREFIX = "spec_proposal:"
+MAX_TERMINAL_SPEC_PROPOSALS = 100
 
 DEFAULT_GLOBAL_SPEC = """# Global Spec
 
@@ -71,6 +72,48 @@ def load_specs() -> Dict[str, str]:
 
 def _proposal_key(proposal_id: str) -> str:
     return f"{SPEC_PROPOSAL_KEY_PREFIX}{proposal_id}"
+
+
+def _compact_proposal_index(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    active = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("status") not in {"approved", "rejected"}
+    ]
+    terminal = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("status") in {"approved", "rejected"}
+    ]
+    terminal.sort(key=lambda row: row.get("updated_at", ""), reverse=True)
+    return active + terminal[:MAX_TERMINAL_SPEC_PROPOSALS]
+
+
+def _archive_old_resolved_proposals(storage) -> None:
+    rows = storage.parameters.peek_parameter(SPEC_PROPOSALS_INDEX_KEY, default_value=[]) or []
+    if not isinstance(rows, list):
+        return
+    kept_ids = {
+        row.get("proposal_id")
+        for row in _compact_proposal_index(rows)
+        if isinstance(row, dict) and row.get("proposal_id")
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        proposal_id = row.get("proposal_id")
+        if not proposal_id or proposal_id in kept_ids:
+            continue
+        payload = get_spec_proposal(storage, proposal_id)
+        if not payload:
+            continue
+        payload["archived"] = True
+        payload["current_spec_snapshot"] = ""
+        payload["user_signal"] = str(payload.get("user_signal") or "")[:400]
+        payload["resolution_notes"] = str(payload.get("resolution_notes") or "")[:400]
+        storage.parameters.set_parameter(
+            _proposal_key(proposal_id),
+            payload,
+            description=f"Archived {payload.get('scope', 'project')} spec proposal {proposal_id}.",
+        )
 
 
 def _spec_path_for_scope(scope: str) -> Path:
@@ -132,11 +175,13 @@ def create_spec_proposal(
             "summary": proposal["proposed_change"][:180],
         }
     )
+    compacted_index = _compact_proposal_index(index)
     storage.parameters.set_parameter(
         SPEC_PROPOSALS_INDEX_KEY,
-        index,
+        compacted_index,
         description="Index of durable spec proposals and their current review status.",
     )
+    _archive_old_resolved_proposals(storage)
     return proposal
 
 
@@ -216,11 +261,13 @@ def resolve_spec_proposal(
             row["updated_at"] = now
             row["resolution_notes"] = proposal["resolution_notes"]
         updated_rows.append(row)
+    compacted_rows = _compact_proposal_index(updated_rows)
     storage.parameters.set_parameter(
         SPEC_PROPOSALS_INDEX_KEY,
-        updated_rows,
+        compacted_rows,
         description="Index of durable spec proposals and their current review status.",
     )
+    _archive_old_resolved_proposals(storage)
     return proposal
 
 
@@ -265,9 +312,11 @@ def resubmit_spec_proposal_with_clarification(
             row["updated_at"] = now
             row["summary"] = proposal.get("proposed_change", "")[:180]
         updated_rows.append(row)
+    compacted_rows = _compact_proposal_index(updated_rows)
     storage.parameters.set_parameter(
         SPEC_PROPOSALS_INDEX_KEY,
-        updated_rows,
+        compacted_rows,
         description="Index of durable spec proposals and their current review status.",
     )
+    _archive_old_resolved_proposals(storage)
     return proposal

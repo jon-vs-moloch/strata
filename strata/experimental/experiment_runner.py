@@ -64,6 +64,24 @@ def report_has_weak_gain(report: Dict[str, Any]) -> bool:
         or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
     )
 
+
+def build_report_task_associations(
+    *,
+    source_task_id: Optional[str] = None,
+    spawned_task_ids: Optional[List[str]] = None,
+    associated_task_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    ordered: List[str] = []
+    for candidate in [source_task_id, *(spawned_task_ids or []), *(associated_task_ids or [])]:
+        task_id = str(candidate or "").strip()
+        if task_id and task_id not in ordered:
+            ordered.append(task_id)
+    return {
+        "source_task_id": str(source_task_id or "").strip() or None,
+        "spawned_task_ids": [task_id for task_id in (spawned_task_ids or []) if str(task_id).strip()],
+        "associated_task_ids": ordered,
+    }
+
 class ExperimentResult(BaseModel):
     success: bool
     valid: bool
@@ -157,7 +175,15 @@ class ExperimentRunner:
         proposal_metadata: Optional[Dict[str, Any]] = None,
         promotion_readiness: Optional[Dict[str, Any]] = None,
         code_validation: Optional[Dict[str, Any]] = None,
+        source_task_id: Optional[str] = None,
+        spawned_task_ids: Optional[List[str]] = None,
+        associated_task_ids: Optional[List[str]] = None,
     ) -> None:
+        task_associations = build_report_task_associations(
+            source_task_id=source_task_id,
+            spawned_task_ids=spawned_task_ids,
+            associated_task_ids=associated_task_ids,
+        )
         report_payload = {
             "candidate_change_id": result.candidate_change_id,
             "baseline_change_id": baseline_change_id,
@@ -177,6 +203,7 @@ class ExperimentRunner:
             "proposal_metadata": proposal_metadata or {},
             "promotion_readiness": promotion_readiness or {},
             "code_validation": code_validation or {},
+            "task_associations": task_associations,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         self.storage.parameters.set_parameter(
@@ -184,7 +211,25 @@ class ExperimentRunner:
             value=report_payload,
             description=EXPERIMENT_REPORT_DESCRIPTION,
         )
+        self._attach_report_to_tasks(result.candidate_change_id, task_associations)
         self.storage.commit()
+
+    def _attach_report_to_tasks(self, candidate_change_id: str, task_associations: Dict[str, Any]) -> None:
+        report_ref = {
+            "candidate_change_id": candidate_change_id,
+            "linked_at": datetime.now(timezone.utc).isoformat(),
+            "source_task_id": task_associations.get("source_task_id"),
+        }
+        for task_id in task_associations.get("associated_task_ids") or []:
+            task = self.storage.tasks.get_by_id(task_id)
+            if not task:
+                continue
+            constraints = dict(task.constraints or {})
+            report_refs = list(constraints.get("associated_reports") or [])
+            if not any(str(item.get("candidate_change_id")) == candidate_change_id for item in report_refs if isinstance(item, dict)):
+                report_refs.append(dict(report_ref))
+            constraints["associated_reports"] = report_refs[-25:]
+            task.constraints = constraints
 
     def get_persisted_experiment_report(self, candidate_change_id: str) -> Optional[Dict[str, Any]]:
         row = (
@@ -206,6 +251,9 @@ class ExperimentRunner:
         run_count: int = 1,
         eval_harness_config_override: Optional[Dict[str, Any]] = None,
         proposal_metadata: Optional[Dict[str, Any]] = None,
+        source_task_id: Optional[str] = None,
+        spawned_task_ids: Optional[List[str]] = None,
+        associated_task_ids: Optional[List[str]] = None,
     ) -> ExperimentResult:
         """
         @summary Compare a labeled candidate benchmark run against the stored baseline benchmark.
@@ -254,6 +302,9 @@ class ExperimentRunner:
             eval_harness_config_override=eval_harness_config_override,
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
+            source_task_id=source_task_id,
+            spawned_task_ids=spawned_task_ids,
+            associated_task_ids=associated_task_ids,
         )
         return result
 
@@ -267,6 +318,9 @@ class ExperimentRunner:
         run_count: int = 1,
         eval_harness_config_override: Optional[Dict[str, Any]] = None,
         proposal_metadata: Optional[Dict[str, Any]] = None,
+        source_task_id: Optional[str] = None,
+        spawned_task_ids: Optional[List[str]] = None,
+        associated_task_ids: Optional[List[str]] = None,
     ) -> ExperimentResult:
         """
         @summary Run repeated benchmark and structured-eval passes, then compare against baseline.
@@ -332,6 +386,9 @@ class ExperimentRunner:
             eval_harness_config_override=eval_harness_config_override,
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
+            source_task_id=source_task_id,
+            spawned_task_ids=spawned_task_ids,
+            associated_task_ids=associated_task_ids,
         )
         return result
 
@@ -342,6 +399,9 @@ class ExperimentRunner:
         baseline_change_id: str = "baseline",
         validation_result: Dict[str, Any],
         proposal_metadata: Optional[Dict[str, Any]] = None,
+        source_task_id: Optional[str] = None,
+        spawned_task_ids: Optional[List[str]] = None,
+        associated_task_ids: Optional[List[str]] = None,
     ) -> ExperimentResult:
         candidate_metrics = {"tool_promotion_success": 1.0 if validation_result.get("promoted") else 0.0}
         baseline_metrics = self._gather_metrics(baseline_change_id)
@@ -370,6 +430,9 @@ class ExperimentRunner:
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
             code_validation=validation_result,
+            source_task_id=source_task_id,
+            spawned_task_ids=spawned_task_ids,
+            associated_task_ids=associated_task_ids,
         )
         return result
 

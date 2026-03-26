@@ -14,6 +14,7 @@ from uuid import uuid4
 
 
 USER_QUESTIONS_KEY = "user_questions:index"
+MAX_TERMINAL_QUESTIONS = 50
 
 
 def _now() -> str:
@@ -26,11 +27,25 @@ def _load_questions(storage) -> List[Dict[str, Any]]:
 
 
 def _save_questions(storage, rows: List[Dict[str, Any]]) -> None:
+    rows = _compact_questions(rows)
     storage.parameters.set_parameter(
         USER_QUESTIONS_KEY,
         rows,
         description="Internal queue of pending user-facing questions for the chat agent.",
     )
+
+
+def _compact_questions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    active = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("status") not in {"resolved", "dismissed", "cancelled"}
+    ]
+    terminal = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("status") in {"resolved", "dismissed", "cancelled"}
+    ]
+    terminal.sort(key=lambda row: row.get("updated_at", ""), reverse=True)
+    return active + terminal[:MAX_TERMINAL_QUESTIONS]
 
 
 def enqueue_user_question(

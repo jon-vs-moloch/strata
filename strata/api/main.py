@@ -23,6 +23,7 @@ import json
 import asyncio
 from strata.storage.services.main import StorageManager
 from strata.storage.models import TaskModel, TaskType, TaskState, ParameterModel
+from strata.storage.retention import get_retention_policy, get_retention_runtime, run_retention_maintenance
 from strata.models.adapter import ModelAdapter
 from strata.orchestrator.background import BackgroundWorker
 from strata.api.hotreload import HotReloader
@@ -81,6 +82,7 @@ SETTINGS_PARAMETER_KEY = "orchestrator_global_settings"
 SETTINGS_PARAMETER_DESCRIPTION = (
     "Persisted API/orchestrator settings shared between the UI and the worker startup path."
 )
+MAX_PROMOTION_HISTORY = 200
 
 _model = ModelAdapter()
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -440,8 +442,13 @@ def _apply_experiment_promotion(storage: StorageManager, candidate_change_id: st
             "proposal_metadata": report.get("proposal_metadata") or {},
         }
     )
+    archived_count = int(promotion_state.get("archived_count", 0) or 0)
+    if len(history) > MAX_PROMOTION_HISTORY:
+        archived_count += len(history) - MAX_PROMOTION_HISTORY
+        history = history[-MAX_PROMOTION_HISTORY:]
     promotion_state["current"] = candidate_change_id
     promotion_state["history"] = history
+    promotion_state["archived_count"] = archived_count
     storage.parameters.set_parameter(
         key="promoted_eval_candidates",
         value=promotion_state,
@@ -500,6 +507,7 @@ def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[
                 "recorded_at": current.get("recorded_at"),
                 "proposal_metadata": metadata,
                 "promotion_readiness": current.get("promotion_readiness") or {},
+                "task_associations": current.get("task_associations") or {},
             }
         )
     recent_failures = [
@@ -533,6 +541,7 @@ def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[
             "weak": weak_promotions,
             "strong": strong_promotions,
             "total_history": len(promoted_state.get("history", [])),
+            "archived_history": int(promoted_state.get("archived_count", 0) or 0),
         },
         "failure_pressure": {
             "recent_failures": len(recent_failures),
@@ -540,6 +549,7 @@ def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[
         },
         "reports": reports,
         "provider_telemetry": provider_telemetry,
+        "retention": get_retention_runtime(storage),
     }
 
 async def _perform_web_search(query: str) -> str:
@@ -582,6 +592,7 @@ async def lifespan(app: FastAPI):
             description=SETTINGS_PARAMETER_DESCRIPTION,
         ) or {}
         GLOBAL_SETTINGS.update(_normalized_settings(persisted_settings))
+        run_retention_maintenance(storage)
         storage.commit()
     finally:
         storage.close()
@@ -657,8 +668,10 @@ async def list_tasks(storage: StorageManager = Depends(get_storage)):
 
 
 @app.get("/messages")
-async def get_messages(session_id: Optional[str] = None, storage: StorageManager = Depends(get_storage)):
+async def get_messages(session_id: Optional[str] = None, limit: int = 200, storage: StorageManager = Depends(get_storage)):
+    safe_limit = max(1, min(int(limit), 1000))
     history = storage.messages.get_all(session_id=session_id)
+    history = history[-safe_limit:]
     return [{
         "id": m.message_id,
         "session_id": m.session_id,
@@ -677,6 +690,22 @@ async def get_sessions(storage: StorageManager = Depends(get_storage)):
 @app.get("/admin/specs")
 async def get_specs():
     return {"status": "ok", "specs": load_specs()}
+
+
+@app.get("/admin/storage/retention")
+async def get_storage_retention(storage: StorageManager = Depends(get_storage)):
+    return {
+        "status": "ok",
+        "policy": get_retention_policy(storage),
+        "runtime": get_retention_runtime(storage),
+    }
+
+
+@app.post("/admin/storage/retention/run")
+async def run_storage_retention(payload: Optional[Dict[str, Any]] = None, storage: StorageManager = Depends(get_storage)):
+    force = bool((payload or {}).get("force", False))
+    summary = run_retention_maintenance(storage, force=force)
+    return {"status": "ok", "summary": summary}
 
 
 @app.get("/admin/spec_proposals")
@@ -1437,6 +1466,9 @@ async def run_benchmark_experiment(payload: Dict[str, Any], storage: StorageMana
     run_count = max(1, int(payload.get("run_count", 1) or 1))
     eval_harness_config_override = payload.get("eval_harness_config_override")
     proposal_metadata = payload.get("proposal_metadata")
+    source_task_id = payload.get("source_task_id")
+    spawned_task_ids = payload.get("spawned_task_ids")
+    associated_task_ids = payload.get("associated_task_ids")
     runner = ExperimentRunner(storage, _model)
     result = await runner.run_benchmark_gate(
         candidate_change_id,
@@ -1445,6 +1477,9 @@ async def run_benchmark_experiment(payload: Dict[str, Any], storage: StorageMana
         run_count=run_count,
         eval_harness_config_override=eval_harness_config_override,
         proposal_metadata=proposal_metadata,
+        source_task_id=source_task_id,
+        spawned_task_ids=spawned_task_ids,
+        associated_task_ids=associated_task_ids,
     )
     return {"status": "ok", "result": result.model_dump()}
 
@@ -1695,6 +1730,9 @@ async def run_full_eval_experiment(payload: Dict[str, Any], storage: StorageMana
     run_count = max(1, int(payload.get("run_count", 1) or 1))
     eval_harness_config_override = payload.get("eval_harness_config_override")
     proposal_metadata = payload.get("proposal_metadata")
+    source_task_id = payload.get("source_task_id")
+    spawned_task_ids = payload.get("spawned_task_ids")
+    associated_task_ids = payload.get("associated_task_ids")
     runner = ExperimentRunner(storage, _model)
     result = await runner.run_full_eval_gate(
         candidate_change_id,
@@ -1704,6 +1742,9 @@ async def run_full_eval_experiment(payload: Dict[str, Any], storage: StorageMana
         run_count=run_count,
         eval_harness_config_override=eval_harness_config_override,
         proposal_metadata=proposal_metadata,
+        source_task_id=source_task_id,
+        spawned_task_ids=spawned_task_ids,
+        associated_task_ids=associated_task_ids,
     )
     return {"status": "ok", "result": result.model_dump()}
 
@@ -1770,6 +1811,7 @@ async def get_experiment_history(limit: int = 25, storage: StorageManager = Depe
                 "promotion_readiness": readiness,
                 "has_eval_harness_override": bool(current.get("eval_harness_config_override")),
                 "has_code_validation": bool(current.get("code_validation")),
+                "task_associations": current.get("task_associations") or {},
             }
         )
     promoted_state = storage.parameters.peek_parameter(
@@ -1854,6 +1896,8 @@ async def run_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage: St
                 "expected_gain": proposal["expected_gain"],
                 "source": "bootstrap_cycle",
             },
+            source_task_id=payload.get("source_task_id"),
+            associated_task_ids=payload.get("associated_task_ids"),
         )
         result_payload = result.model_dump()
         evaluated.append({
@@ -1927,6 +1971,8 @@ async def run_tool_bootstrap_cycle(payload: Dict[str, Any] | None = None, storag
                 "expected_gain": proposal["expected_gain"],
                 "source": "tool_cycle",
             },
+            source_task_id=payload.get("source_task_id"),
+            associated_task_ids=payload.get("associated_task_ids"),
         )
         evaluated.append(
             {

@@ -180,3 +180,19 @@ def test_access_views_surface_missing_restricted_and_redacted_states(tmp_path, m
     assert redacted["status"] == "redacted"
     assert redacted["page"]["content_redacted"] is True
     assert redacted["page"]["body"] == "The user likes concise answers and prefers examples."
+
+
+def test_provenance_thread_is_compacted(tmp_path, monkeypatch):
+    monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
+    storage = DummyStorage()
+    store = knowledge_pages.KnowledgePageStore(storage)
+    provenance = [{"label": f"note-{idx}", "recorded_at": f"2026-03-26T00:00:{idx:02d}Z"} for idx in range(30)]
+    page = store.upsert_page(
+        slug="bounded-provenance",
+        title="Bounded Provenance",
+        body="# Bounded Provenance\n\nTest body.",
+        provenance=provenance,
+    )
+
+    assert len(page["provenance"]) == knowledge_pages.MAX_INLINE_PROVENANCE
+    assert page["archived_provenance_summary"]["archived_count"] == 10

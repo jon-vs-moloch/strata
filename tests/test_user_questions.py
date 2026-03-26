@@ -47,3 +47,20 @@ def test_question_queue_lifecycle():
     assert resolved["response"] == "Use the smaller model."
 
     assert get_active_question(storage, "demo") == {}
+
+
+def test_terminal_question_history_is_bounded(monkeypatch):
+    monkeypatch.setattr("strata.orchestrator.user_questions.MAX_TERMINAL_QUESTIONS", 3)
+    storage = DummyStorage()
+    for idx in range(5):
+        queued = enqueue_user_question(
+            storage,
+            session_id="demo",
+            question=f"q{idx}",
+            source_type="task_blocked",
+            source_id=f"task-{idx}",
+        )
+        resolve_question(storage, queued["question_id"], resolution="resolved", response="done")
+
+    rows = storage.parameters.values["user_questions:index"]
+    assert len(rows) == 3

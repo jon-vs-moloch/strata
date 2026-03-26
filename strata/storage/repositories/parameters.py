@@ -10,6 +10,13 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 from strata.storage.models import ParameterModel
 
+MAX_PARAMETER_HISTORY = 50
+
+
+def _bounded_history(history: list) -> list:
+    return list(history or [])[-MAX_PARAMETER_HISTORY:]
+
+
 class ParameterRepository:
     """
     @summary Manages dynamic evolutionary parameters in SQL.
@@ -76,7 +83,7 @@ class ParameterRepository:
                 "rationale": rationale
             })
             
-            param.value = {"current": new_value, "history": history}
+            param.value = {"current": new_value, "history": _bounded_history(history)}
             param.mutation_count += 1
             # Reset counters for the new evolutionary epoch
             param.usage_count = 0
@@ -99,4 +106,4 @@ class ParameterRepository:
 
         param.description = description or param.description
         history = param.value.get("history", []) if isinstance(param.value, dict) else []
-        param.value = {"current": value, "history": history}
+        param.value = {"current": value, "history": _bounded_history(history)}

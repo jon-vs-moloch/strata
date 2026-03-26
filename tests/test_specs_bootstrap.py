@@ -98,3 +98,30 @@ def test_spec_proposal_resubmission_clears_clarification(tmp_path, monkeypatch):
     assert updated["status"] == "pending_review"
     assert updated["clarification_request"] == ""
     assert "Clarification Response" in updated["user_signal"]
+
+
+def test_spec_proposal_index_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(bootstrap, "ROOT", tmp_path)
+    monkeypatch.setattr(bootstrap, "SPECS_DIR", tmp_path / ".knowledge" / "specs")
+    monkeypatch.setattr(bootstrap, "GLOBAL_SPEC_PATH", bootstrap.SPECS_DIR / "global_spec.md")
+    monkeypatch.setattr(bootstrap, "PROJECT_SPEC_PATH", bootstrap.SPECS_DIR / "project_spec.md")
+    monkeypatch.setattr(bootstrap, "MAX_TERMINAL_SPEC_PROPOSALS", 3)
+
+    storage = DummyStorage()
+    bootstrap.ensure_spec_files()
+    for idx in range(5):
+        proposal = bootstrap.create_spec_proposal(
+            storage,
+            scope="project",
+            proposed_change=f"change {idx}",
+            rationale="test",
+        )
+        bootstrap.resolve_spec_proposal(
+            storage,
+            proposal_id=proposal["proposal_id"],
+            resolution="rejected",
+            reviewer_notes="test",
+        )
+
+    listed = bootstrap.list_spec_proposals(storage, limit=10)
+    assert len(listed) == 3
