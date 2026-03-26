@@ -81,7 +81,8 @@ class ModelAdapter:
                 "content": response.content,
                 "tool_calls": response.tool_calls,
                 "model": response.model,
-                "provider": response.provider
+                "provider": response.provider,
+                "usage": response.usage or {},
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}

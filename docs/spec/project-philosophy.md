@@ -55,7 +55,22 @@ Useful outputs come from staged processing:
 
 The project treats generation as the beginning of work, not the end of it.
 
-### 3. Validation must come from outside the model
+### 3. Desired outcomes should become eval targets
+
+If we want a property from the system, we should turn it into something measurable instead of treating it as a hope or a vibe.
+
+That applies to outcomes like:
+
+- factual correctness
+- useful decomposition
+- tool-use reliability
+- disclosure restraint
+- latency or token efficiency
+- self-improvement success
+
+The project should prefer explicit evals, benchmarks, and telemetry for these properties over informal confidence that the prompt or architecture "probably" handles them.
+
+### 4. Validation must come from outside the model
 
 Models are allowed to propose. They are not trusted to declare themselves correct.
 
@@ -69,7 +84,7 @@ This is why the project emphasizes:
 
 Wherever possible, correctness should be established by the system and the data, not by model confidence.
 
-### 4. Telemetry is part of the learning loop
+### 5. Telemetry is part of the learning loop
 
 Telemetry is not just for monitoring. It is an optimization substrate.
 
@@ -79,6 +94,7 @@ The point of storing structured outcomes is to answer questions like:
 - which validators are catching real problems
 - which decompositions help weak models succeed
 - whether a system change improved the weak tier in practice
+- whether a desired property actually improved after a change
 
 The system should evolve from measured outcomes, not from intuition alone.
 

@@ -101,10 +101,11 @@ async def run_structured_eval(
         grading = str(case.get("grading", "exact_match"))
 
         baseline_response, baseline_latency = await _run_direct_baseline(adapter, prompt)
-        harness_response, harness_latency = await run_harness_response(
+        harness_response, harness_latency, _ = await run_harness_response(
             prompt,
             run_id=f"structured-{run_label}-{case_id}-{idx}",
             config_override=eval_harness_config_override,
+            profile="harness_no_capes",
         )
 
         samples.append(

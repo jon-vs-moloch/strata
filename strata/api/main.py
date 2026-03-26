@@ -11,6 +11,7 @@ agents can inspect what the harness is learning and how it is behaving.
 """
 
 import os
+import time
 import logging
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -31,11 +32,22 @@ from strata.orchestrator.worker.telemetry import build_telemetry_snapshot
 from strata.models.providers import get_provider_telemetry_snapshot
 from strata.eval.benchmark import run_benchmark, persist_benchmark_report
 from strata.eval.structured_eval import run_structured_eval, persist_structured_eval_report
+from strata.eval.matrix import run_eval_matrix
 from strata.eval.harness_eval import (
     EVAL_HARNESS_CONFIG_DESCRIPTION,
     EVAL_HARNESS_CONFIG_KEY,
     default_eval_harness_config,
     get_active_eval_harness_config,
+)
+from strata.knowledge.pages import KnowledgePageStore, slugify_page_title
+from strata.specs.bootstrap import (
+    create_spec_proposal,
+    ensure_spec_files,
+    get_spec_proposal,
+    list_spec_proposals,
+    load_specs,
+    resolve_spec_proposal,
+    resubmit_spec_proposal_with_clarification,
 )
 from strata.experimental.experiment_runner import (
     ExperimentRunner,
@@ -44,9 +56,17 @@ from strata.experimental.experiment_runner import (
     report_has_weak_gain,
 )
 from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
+from strata.orchestrator.user_questions import (
+    enqueue_user_question,
+    get_active_question,
+    get_question_for_source,
+    mark_question_asked,
+    resolve_question,
+)
 import importlib.util
 import glob
 import re
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +155,69 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_knowledge_pages",
+            "description": "List synthesized knowledge pages by metadata only. Use this before loading a full page when you need to find relevant existing knowledge.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Optional query to filter pages by title, summary, alias, or tag."},
+                    "tag": {"type": "string", "description": "Optional tag filter."},
+                    "domain": {"type": "string", "description": "Optional domain filter.", "enum": ["system", "agent", "user", "contacts", "project", "world"]},
+                    "limit": {"type": "integer", "description": "Maximum number of page metadata results to return."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_knowledge_page_metadata",
+            "description": "Fetch metadata for a synthesized knowledge page without loading the full page body.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Knowledge page slug."}
+                },
+                "required": ["slug"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_knowledge_page",
+            "description": "Read a full synthesized knowledge page or a specific section when metadata alone is insufficient.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Knowledge page slug."},
+                    "heading": {"type": "string", "description": "Optional heading to fetch a specific section only."}
+                },
+                "required": ["slug"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_knowledge",
+            "description": "Queue a targeted knowledge-maintenance task when a page is missing, stale, inaccurate, or incomplete.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Desired page slug or topic name."},
+                    "reason": {"type": "string", "description": "Why the knowledge needs updating."},
+                    "domain": {"type": "string", "description": "Knowledge domain for the target page.", "enum": ["system", "agent", "user", "contacts", "project", "world"]},
+                    "target_scope": {"type": "string", "description": "Whether to inspect the codebase or the public web.", "enum": ["codebase", "web"]},
+                    "evidence_hints": {"type": "array", "items": {"type": "string"}, "description": "Optional hints about missing, stale, or contradictory evidence."}
+                },
+                "required": ["slug", "reason"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_swarm_status",
             "description": "Check the status of currently running tasks.",
             "parameters": {
@@ -148,14 +231,31 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "amend_project_spec",
-            "description": "Permanently update the technical specification or architectural goals for this project. Use this when the user makes a significant pivot or sets new high-level constraints.",
+            "name": "read_spec",
+            "description": "Read one of the durable Strata spec files. Use this before proposing changes to the system's long-term intent.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "amendment": {"type": "string", "description": "The new specification text or update to append/replace."}
+                    "scope": {"type": "string", "description": "Which spec to read.", "enum": ["global", "project"]}
                 },
-                "required": ["amendment"]
+                "required": ["scope"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_spec_update",
+            "description": "Queue a reviewed proposal to change a durable spec. Use this when the user expresses a lasting goal, preference, or constraint that should influence future system behavior.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "description": "Which spec should be updated.", "enum": ["global", "project"]},
+                    "proposed_change": {"type": "string", "description": "The candidate change that should be reviewed against the current spec."},
+                    "rationale": {"type": "string", "description": "Why this should become part of the durable spec."},
+                    "user_signal": {"type": "string", "description": "The user statement or intent that triggered this proposal."}
+                },
+                "required": ["scope", "proposed_change", "rationale"]
             }
         }
     }
@@ -473,6 +573,7 @@ async def lifespan(app: FastAPI):
     from strata.storage.models import Base
     from strata.storage.services.main import _engine
     Base.metadata.create_all(_engine)
+    ensure_spec_files()
     storage = StorageManager()
     try:
         persisted_settings = storage.parameters.get_parameter(
@@ -508,6 +609,21 @@ def get_storage():
         storage.close()
 
 
+def _find_pending_spec_clarification(storage: StorageManager, session_id: str) -> Optional[Dict[str, Any]]:
+    pending = get_active_question(storage, session_id)
+    if not pending or pending.get("source_type") != "spec_clarification":
+        return None
+    proposal_id = str(pending.get("source_id") or "")
+    if not proposal_id:
+        return None
+    proposal = get_spec_proposal(storage, proposal_id)
+    if proposal and proposal.get("status") == "needs_clarification":
+        proposal = dict(proposal)
+        proposal["_pending_question"] = pending
+        return proposal
+    return None
+
+
 # ── Standard endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/tasks", response_model=List[Dict[str, Any]])
@@ -522,6 +638,11 @@ async def list_tasks(storage: StorageManager = Depends(get_storage)):
         "status": t.state.value.lower(),
         "type": t.type.value.lower(),
         "depth": t.depth,
+        "human_intervention_required": t.human_intervention_required,
+        "pending_question": (
+            get_question_for_source(storage, source_type="task_blocked", source_id=t.task_id).get("question")
+            if t.human_intervention_required else None
+        ),
         "attempts": [
             {
                 "id": a.attempt_id,
@@ -553,6 +674,80 @@ async def get_sessions(storage: StorageManager = Depends(get_storage)):
     return storage.messages.get_sessions()
 
 
+@app.get("/admin/specs")
+async def get_specs():
+    return {"status": "ok", "specs": load_specs()}
+
+
+@app.get("/admin/spec_proposals")
+async def get_spec_proposals(status: Optional[str] = None, limit: int = 50, storage: StorageManager = Depends(get_storage)):
+    proposals = list_spec_proposals(storage, status=status, limit=limit)
+    return {"status": "ok", "proposals": proposals}
+
+
+@app.get("/admin/spec_proposals/{proposal_id}")
+async def get_spec_proposal_detail(proposal_id: str, storage: StorageManager = Depends(get_storage)):
+    proposal = get_spec_proposal(storage, proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Spec proposal not found")
+    return {"status": "ok", "proposal": proposal}
+
+
+@app.post("/admin/spec_proposals")
+async def create_spec_proposal_endpoint(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    scope = str(payload.get("scope") or "project")
+    proposed_change = str(payload.get("proposed_change") or "").strip()
+    rationale = str(payload.get("rationale") or "").strip()
+    if not proposed_change or not rationale:
+        raise HTTPException(status_code=400, detail="proposed_change and rationale are required")
+    proposal = create_spec_proposal(
+        storage,
+        scope=scope,
+        proposed_change=proposed_change,
+        rationale=rationale,
+        user_signal=str(payload.get("user_signal") or ""),
+        session_id=payload.get("session_id"),
+        source=str(payload.get("source") or "api"),
+        review_task_id=payload.get("review_task_id"),
+    )
+    storage.commit()
+    return {"status": "ok", "proposal": proposal}
+
+
+@app.post("/admin/spec_proposals/{proposal_id}/resolve")
+async def resolve_spec_proposal_endpoint(proposal_id: str, payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    resolution = str(payload.get("resolution") or "").strip()
+    if not resolution:
+        raise HTTPException(status_code=400, detail="resolution is required")
+    try:
+        proposal = resolve_spec_proposal(
+            storage,
+            proposal_id=proposal_id,
+            resolution=resolution,
+            reviewer_notes=str(payload.get("reviewer_notes") or ""),
+            clarification_request=str(payload.get("clarification_request") or ""),
+            reviewer=str(payload.get("reviewer") or "operator"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Spec proposal not found")
+    if proposal.get("status") == "needs_clarification" and proposal.get("session_id"):
+        enqueue_user_question(
+            storage,
+            session_id=proposal.get("session_id") or "default",
+            question=proposal.get("clarification_request") or "More detail is required before this spec change can be reviewed.",
+            source_type="spec_clarification",
+            source_id=proposal_id,
+            context={
+                "scope": proposal.get("scope"),
+                "proposed_change": proposal.get("proposed_change"),
+            },
+        )
+    storage.commit()
+    return {"status": "ok", "proposal": proposal}
+
+
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, storage: StorageManager = Depends(get_storage)):
     storage.messages.archive_session(session_id)
@@ -570,10 +765,99 @@ async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(g
     """
     session_id = payload.get("session_id", "default")
     content = payload.get("content", "")
+    knowledge_pages = KnowledgePageStore(storage)
 
     # 1. Persist user message immediately so polling sees it
     storage.messages.create(role=payload["role"], content=content, session_id=session_id)
     storage.commit()
+
+    pending_spec_proposal = _find_pending_spec_clarification(storage, session_id)
+    if pending_spec_proposal and payload.get("role") == "user" and pending_spec_proposal.get("_pending_question", {}).get("status") == "asked":
+        updated_proposal = resubmit_spec_proposal_with_clarification(
+            storage,
+            proposal_id=pending_spec_proposal["proposal_id"],
+            clarification_response=content,
+            source="user",
+        )
+        current_specs = load_specs()
+        scope = updated_proposal.get("scope", "project")
+        current_spec = current_specs.get("global_spec" if scope == "global" else "project_spec", "")
+        task = storage.tasks.create(
+            title=f"Spec Clarification Review ({scope.title()}): {updated_proposal.get('proposal_id')}",
+            description=(
+                f"Re-review a spec proposal after user clarification.\n\n"
+                f"Current {scope} spec:\n{current_spec}\n\n"
+                f"Proposed change:\n{updated_proposal.get('proposed_change')}\n\n"
+                f"Rationale:\n{updated_proposal.get('rationale')}\n\n"
+                f"Accumulated user signal:\n{updated_proposal.get('user_signal')}\n\n"
+                "Tasks:\n"
+                "1. Re-check contradictions or ambiguity.\n"
+                "2. If still unresolved, produce a tighter clarification request.\n"
+                "3. If resolved, recommend a clean spec delta without directly editing the spec.\n"
+            ),
+            session_id=session_id,
+            state=TaskState.PENDING,
+            constraints={
+                "target_scope": "codebase",
+                "spec_operation": "review_proposal",
+                "spec_scope": scope,
+                "spec_proposal_id": updated_proposal["proposal_id"],
+                "proposed_change": updated_proposal.get("proposed_change"),
+                "rationale": updated_proposal.get("rationale"),
+                "user_signal": updated_proposal.get("user_signal"),
+            },
+        )
+        task.type = TaskType.RESEARCH
+        storage.commit()
+        await _worker.enqueue(task.task_id)
+        resolve_question(
+            storage,
+            pending_spec_proposal["_pending_question"]["question_id"],
+            resolution="resolved",
+            response=content,
+        )
+        storage.messages.create(
+            role="assistant",
+            content=(
+                f"I’ve attached your clarification to spec proposal {updated_proposal['proposal_id']} "
+                f"and kicked off a fresh review task ({task.task_id})."
+            ),
+            session_id=session_id,
+        )
+        storage.commit()
+        return {
+            "status": "ok",
+            "reply": (
+                f"I’ve attached your clarification to spec proposal {updated_proposal['proposal_id']} "
+                f"and kicked off a fresh review."
+            ),
+            "spec_proposal_id": updated_proposal["proposal_id"],
+            "task_id": task.task_id,
+        }
+
+    pending_question = get_active_question(storage, session_id)
+    if pending_question and payload.get("role") == "user" and pending_question.get("status") == "asked":
+        if pending_question.get("source_type") == "task_blocked":
+            task_id = str(pending_question.get("source_id") or "")
+            task = storage.tasks.get_by_id(task_id)
+            if task:
+                task.description = (task.description or "") + f"\n\nUser clarification:\n{content.strip()}"
+                task.human_intervention_required = False
+                task.state = TaskState.PENDING
+                storage.commit()
+                await _worker.enqueue(task.task_id)
+                resolve_question(storage, pending_question["question_id"], resolution="resolved", response=content)
+                storage.messages.create(
+                    role="assistant",
+                    content=f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
+                    session_id=session_id,
+                )
+                storage.commit()
+                return {
+                    "status": "ok",
+                    "reply": f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
+                    "task_id": task.task_id,
+                }
 
     # 2. Re-construct conversation history for the LLM
     # Use Semantic Memory to retrieve similar past tasks/decisions
@@ -597,6 +881,7 @@ async def post_chat(payload: Dict[str, Any], storage: StorageManager = Depends(g
             "role": "system", 
             "content": f"""You are Strata, a unified AI engineering system. You manage a swarm of background agents, but present yourself as a single, first-person entity.
 If internal processes hit a BLOCKED state, explain the issue to the USER directly.
+If the user expresses a durable desired future state, persistent preference, or architectural constraint, prefer `propose_spec_update` over casual implementation drift. Durable intent should be reviewed against the spec, not silently improvised.
 {memory_context}
 
 Available Tools:
@@ -604,6 +889,21 @@ Available Tools:
 """
         }
     ]
+    if pending_question and payload.get("role") == "user" and pending_question.get("status") == "pending":
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Internal pending user question:\n"
+                    f"- source_type: {pending_question.get('source_type')}\n"
+                    f"- question: {pending_question.get('question')}\n\n"
+                    "Before doing anything else, ask the user this question naturally and briefly. "
+                    "Do not mention internal queues or implementation details."
+                ),
+            }
+        )
+        mark_question_asked(storage, pending_question["question_id"])
+        storage.commit()
     
     # Keep the immediate dialogue context (last 5 messages)
     history_records = storage.messages.get_all(session_id=session_id)
@@ -724,16 +1024,161 @@ Available Tools:
                         tool_content = "Current Swarm Status:\n" + "\n".join(lines)
                     tool_outputs_generated = True
 
-                elif func_name == "amend_project_spec":
-                    amendment = args.get("amendment")
-                    spec_path = ".knowledge/specs/project_spec.md"
-                    from datetime import datetime
-                    os.makedirs(".knowledge/specs", exist_ok=True)
-                    with open(spec_path, "a") as f:
-                        f.write(f"\n- [Update {datetime.utcnow().isoformat()}]: {amendment}")
-                    tool_content = "Project specification successfully amended."
+                elif func_name == "list_knowledge_pages":
+                    pages = knowledge_pages.list_pages(
+                        query=args.get("query"),
+                        tag=args.get("tag"),
+                        domain=args.get("domain"),
+                        audience="agent",
+                        limit=int(args.get("limit") or 8),
+                    )
+                    if not pages:
+                        tool_content = "No synthesized knowledge pages matched that query."
+                    else:
+                        lines = []
+                        for page in pages:
+                            lines.append(
+                                f"- {page.get('slug')}: {page.get('title')} | summary={page.get('summary')} | "
+                                f"domain={page.get('domain')} | visibility={page.get('visibility_policy')} | "
+                                f"last_updated={page.get('last_updated')} | tags={page.get('tags') or []}"
+                            )
+                        tool_content = "Knowledge Page Metadata:\n" + "\n".join(lines)
                     tool_outputs_generated = True
-                
+
+                elif func_name == "get_knowledge_page_metadata":
+                    slug = str(args.get("slug") or "")
+                    metadata_view = knowledge_pages.get_page_metadata_view(slug, audience="agent")
+                    if metadata_view.get("status") == "missing":
+                        tool_content = f"No synthesized knowledge page found for '{slug}'."
+                    elif metadata_view.get("status") == "restricted":
+                        meta = metadata_view.get("page_metadata") or {}
+                        tool_content = (
+                            f"Knowledge page '{slug}' exists but is permission-restricted for the current audience. "
+                            f"Domain={meta.get('domain')} visibility={meta.get('visibility_policy')}. "
+                            "Use a summarized, consent-aware response or request operator intervention if direct disclosure is needed."
+                        )
+                    else:
+                        tool_content = json.dumps(metadata_view.get("page") or {}, indent=2)
+                    tool_outputs_generated = True
+
+                elif func_name == "read_knowledge_page":
+                    slug = str(args.get("slug") or "")
+                    heading = args.get("heading")
+                    if heading:
+                        section_view = knowledge_pages.get_page_section_view(slug, str(heading), audience="agent")
+                        if section_view.get("status") == "missing":
+                            tool_content = f"No synthesized knowledge page found for '{slug}'."
+                        elif section_view.get("status") == "restricted":
+                            meta = section_view.get("page_metadata") or {}
+                            tool_content = (
+                                f"Knowledge page '{slug}' exists but section access is permission-restricted. "
+                                f"Domain={meta.get('domain')} visibility={meta.get('visibility_policy')}. "
+                                "If the user needs this, provide only a safe high-level explanation or ask for consent/operator review."
+                            )
+                        else:
+                            section = section_view.get("section") or {}
+                            prefix = "Summary-only view due to disclosure rules:\n" if section.get("content_redacted") else ""
+                            tool_content = prefix + (section.get("content") or f"No section '{heading}' found in knowledge page '{slug}'.")
+                    else:
+                        page_view = knowledge_pages.get_page_view(slug, audience="agent")
+                        if page_view.get("status") == "missing":
+                            tool_content = f"No synthesized knowledge page found for '{slug}'."
+                        elif page_view.get("status") == "restricted":
+                            meta = page_view.get("page_metadata") or {}
+                            tool_content = (
+                                f"Knowledge page '{slug}' exists but is permission-restricted. "
+                                f"Domain={meta.get('domain')} visibility={meta.get('visibility_policy')}. "
+                                "Do not quote it directly; summarize cautiously or ask for consent/operator intervention if needed."
+                            )
+                        else:
+                            page = page_view.get("page") or {}
+                            prefix = "Summary-only view due to disclosure rules:\n" if page.get("content_redacted") else ""
+                            tool_content = prefix + (page.get("body") or "")
+                    tool_outputs_generated = True
+
+                elif func_name == "update_knowledge":
+                    slug = str(args.get("slug") or "")
+                    reason = str(args.get("reason") or "knowledge gap detected")
+                    target_scope = str(args.get("target_scope") or "codebase")
+                    evidence_hints = [str(item) for item in (args.get("evidence_hints") or [])]
+                    task = knowledge_pages.enqueue_update_task(
+                        slug=slug,
+                        reason=reason,
+                        session_id=session_id,
+                        target_scope=target_scope,
+                        evidence=evidence_hints,
+                        domain=args.get("domain"),
+                    )
+                    storage.commit()
+                    await _worker.enqueue(task.task_id)
+                    async_task_ids.append(task.task_id)
+                    tool_content = f"Queued knowledge update task {task.task_id} for page '{slugify_page_title(slug)}'."
+
+                elif func_name == "read_spec":
+                    scope = str(args.get("scope") or "project")
+                    specs = load_specs()
+                    if scope == "global":
+                        tool_content = specs.get("global_spec", "")
+                    else:
+                        tool_content = specs.get("project_spec", "")
+                    tool_outputs_generated = True
+
+                elif func_name == "propose_spec_update":
+                    scope = str(args.get("scope") or "project")
+                    proposed_change = str(args.get("proposed_change") or "").strip()
+                    rationale = str(args.get("rationale") or "").strip()
+                    user_signal = str(args.get("user_signal") or content).strip()
+                    current_specs = load_specs()
+                    current_spec = current_specs.get("global_spec" if scope == "global" else "project_spec", "")
+                    title = f"Spec Review ({scope.title()}): {proposed_change[:48] or rationale[:48] or 'pending proposal'}"
+                    review_prompt = (
+                        f"Review a proposed {scope} spec update.\n\n"
+                        f"Current {scope} spec:\n{current_spec}\n\n"
+                        f"Proposed change:\n{proposed_change}\n\n"
+                        f"Rationale:\n{rationale}\n\n"
+                        f"Triggering user signal:\n{user_signal}\n\n"
+                        "Tasks:\n"
+                        "1. Compare the proposal against the current spec.\n"
+                        "2. Identify contradictions, ambiguity, or missing details.\n"
+                        "3. Draft clarification questions if needed.\n"
+                        "4. Suggest a clean spec delta without directly editing the spec file.\n"
+                        "5. Treat the spec as durable gospel unless the user explicitly wants to change it.\n"
+                    )
+                    task = storage.tasks.create(
+                        title=title,
+                        description=review_prompt,
+                        session_id=session_id,
+                        state=TaskState.PENDING,
+                        constraints={
+                            "target_scope": "codebase",
+                            "spec_operation": "review_proposal",
+                            "spec_scope": scope,
+                            "proposed_change": proposed_change,
+                            "rationale": rationale,
+                            "user_signal": user_signal,
+                        },
+                    )
+                    task.type = TaskType.RESEARCH
+                    proposal = create_spec_proposal(
+                        storage,
+                        scope=scope,
+                        proposed_change=proposed_change,
+                        rationale=rationale,
+                        user_signal=user_signal,
+                        session_id=session_id,
+                        source="chat_agent",
+                        review_task_id=task.task_id,
+                    )
+                    task.constraints["spec_proposal_id"] = proposal["proposal_id"]
+                    storage.commit()
+                    await _worker.enqueue(task.task_id)
+                    async_task_ids.append(task.task_id)
+                    tool_content = (
+                        f"Queued reviewed spec proposal task {task.task_id} for the {scope} spec "
+                        f"(proposal_id={proposal['proposal_id']}). "
+                        "I will treat this as durable intent under review rather than editing the spec directly."
+                    )
+
                 else:
                     tool_content = f"Error: Tool '{func_name}' not implemented."
 
@@ -800,6 +1245,9 @@ async def task_intervene(task_id: str, payload: Dict[str, Any], storage: Storage
     task.description += f"\n\n[USER INTERVENTION]: {override}"
     task.state = TaskState.PENDING
     task.human_intervention_required = False
+    queued_question = get_question_for_source(storage, source_type="task_blocked", source_id=task_id)
+    if queued_question:
+        resolve_question(storage, queued_question["question_id"], resolution="resolved", response=override)
     storage.commit()
     
     # Re-enqueue the task for the background worker
@@ -1027,6 +1475,214 @@ async def run_structured_eval_suite(payload: Dict[str, Any] | None = None, stora
         )
         reports.append(report)
     return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
+
+@app.post("/admin/evals/matrix")
+async def run_eval_matrix_suite(payload: Dict[str, Any] | None = None, storage: StorageManager = Depends(get_storage)):
+    payload = payload or {}
+    suite_name = payload.get("suite_name", "mmlu_mini_v1")
+    include_context = bool(payload.get("include_context", True))
+    include_strong = bool(payload.get("include_strong", True))
+    include_weak = bool(payload.get("include_weak", True))
+    profiles = payload.get("profiles")
+    sample_size = payload.get("sample_size")
+    random_seed = payload.get("random_seed")
+    report = await run_eval_matrix(
+        suite_name=suite_name,
+        include_context=include_context,
+        include_strong=include_strong,
+        include_weak=include_weak,
+        profiles=profiles,
+        sample_size=int(sample_size) if sample_size is not None else None,
+        random_seed=int(random_seed) if random_seed is not None else None,
+    )
+    for variant in report.get("variants", []):
+        details = {
+            "suite_name": suite_name,
+            "variant_id": variant.get("variant_id"),
+            "mode": variant.get("mode"),
+            "profile": variant.get("profile"),
+            "include_context": include_context,
+            "case_count": report.get("case_count"),
+        }
+        for metric_name, value in (
+            ("eval_matrix_accuracy", float(variant.get("accuracy", 0.0) or 0.0)),
+            ("eval_matrix_latency_s", float(variant.get("avg_latency_s", 0.0) or 0.0)),
+            ("eval_matrix_prompt_tokens", float(variant.get("prompt_tokens", 0) or 0.0)),
+            ("eval_matrix_completion_tokens", float(variant.get("completion_tokens", 0) or 0.0)),
+            ("eval_matrix_total_tokens", float(variant.get("total_tokens", 0) or 0.0)),
+        ):
+            from strata.orchestrator.worker.telemetry import record_metric
+            record_metric(
+                storage,
+                metric_name=metric_name,
+                value=value,
+                model_id=variant.get("variant_id"),
+                task_type="EVAL_MATRIX",
+                run_mode="eval_matrix",
+                execution_context=variant.get("mode"),
+                details=details,
+            )
+    storage.commit()
+    return {"status": "ok", "report": report}
+
+@app.post("/admin/evals/sample_tick")
+async def run_sampled_eval_tick(payload: Dict[str, Any] | None = None, storage: StorageManager = Depends(get_storage)):
+    payload = payload or {}
+    suite_name = payload.get("suite_name", "mmlu_mini_v1")
+    sample_size = max(1, int(payload.get("sample_size", 2) or 2))
+    include_context = bool(payload.get("include_context", False))
+    profiles = payload.get(
+        "profiles",
+        ["raw_model", "harness_no_capes", "harness_tools_no_web", "harness_web_no_tools", "harness_tools_web"],
+    )
+    report = await run_eval_matrix(
+        suite_name=suite_name,
+        include_context=include_context,
+        include_strong=bool(payload.get("include_strong", True)),
+        include_weak=bool(payload.get("include_weak", True)),
+        profiles=profiles,
+        sample_size=sample_size,
+        random_seed=int(time.time()),
+    )
+    for variant in report.get("variants", []):
+        details = {
+            "suite_name": suite_name,
+            "variant_id": variant.get("variant_id"),
+            "mode": variant.get("mode"),
+            "profile": variant.get("profile"),
+            "include_context": include_context,
+            "case_count": report.get("case_count"),
+            "sampled": True,
+        }
+        from strata.orchestrator.worker.telemetry import record_metric
+        record_metric(
+            storage,
+            metric_name="eval_sample_tick_accuracy",
+            value=float(variant.get("accuracy", 0.0) or 0.0),
+            model_id=variant.get("variant_id"),
+            task_type="EVAL_SAMPLE_TICK",
+            run_mode="eval_sample_tick",
+            execution_context=variant.get("mode"),
+            details=details,
+        )
+        record_metric(
+            storage,
+            metric_name="eval_sample_tick_latency_s",
+            value=float(variant.get("avg_latency_s", 0.0) or 0.0),
+            model_id=variant.get("variant_id"),
+            task_type="EVAL_SAMPLE_TICK",
+            run_mode="eval_sample_tick",
+            execution_context=variant.get("mode"),
+            details=details,
+        )
+        record_metric(
+            storage,
+            metric_name="eval_sample_tick_total_tokens",
+            value=float(variant.get("total_tokens", 0.0) or 0.0),
+            model_id=variant.get("variant_id"),
+            task_type="EVAL_SAMPLE_TICK",
+            run_mode="eval_sample_tick",
+            execution_context=variant.get("mode"),
+            details=details,
+        )
+    storage.commit()
+    return {"status": "ok", "report": report}
+
+@app.post("/admin/knowledge/compact")
+async def compact_knowledge_base():
+    script_path = os.path.join(_BASE_DIR, "scripts", "compact_knowledge.py")
+    result = subprocess.run(
+        ["./venv/bin/python", script_path],
+        cwd=_BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {"status": "ok", "report": json.loads(result.stdout)}
+
+@app.get("/admin/knowledge/pages")
+async def list_knowledge_pages(
+    query: Optional[str] = None,
+    tag: Optional[str] = None,
+    domain: Optional[str] = None,
+    audience: str = "user",
+    limit: int = 50,
+    storage: StorageManager = Depends(get_storage),
+):
+    pages = KnowledgePageStore(storage).list_pages(query=query, tag=tag, domain=domain, audience=audience, limit=limit)
+    return {"status": "ok", "pages": pages}
+
+@app.get("/admin/knowledge/pages/{slug}/metadata")
+async def get_knowledge_page_metadata(slug: str, audience: str = "user", storage: StorageManager = Depends(get_storage)):
+    page = KnowledgePageStore(storage).get_page_metadata(slug, audience=audience)
+    if not page:
+        raise HTTPException(status_code=404, detail="Knowledge page not found")
+    return {"status": "ok", "page": page}
+
+@app.get("/admin/knowledge/pages/{slug}")
+async def get_knowledge_page(slug: str, audience: str = "user", storage: StorageManager = Depends(get_storage)):
+    page = KnowledgePageStore(storage).get_page(slug, audience=audience)
+    if not page:
+        raise HTTPException(status_code=404, detail="Knowledge page not found")
+    return {"status": "ok", "page": page}
+
+@app.get("/admin/knowledge/pages/{slug}/section")
+async def get_knowledge_page_section(slug: str, heading: str, audience: str = "user", storage: StorageManager = Depends(get_storage)):
+    section = KnowledgePageStore(storage).get_page_section(slug, heading, audience=audience)
+    if not section:
+        raise HTTPException(status_code=404, detail="Knowledge page not found")
+    return {"status": "ok", "section": section}
+
+@app.post("/admin/knowledge/pages")
+async def upsert_knowledge_page(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    title = str(payload.get("title") or "").strip()
+    body = str(payload.get("body") or "").strip()
+    if not title or not body:
+        raise HTTPException(status_code=400, detail="title and body are required")
+    page = KnowledgePageStore(storage).upsert_page(
+        slug=payload.get("slug"),
+        title=title,
+        body=body,
+        summary=payload.get("summary"),
+        tags=payload.get("tags"),
+        aliases=payload.get("aliases"),
+        related_pages=payload.get("related_pages"),
+        provenance=payload.get("provenance"),
+        confidence=float(payload.get("confidence", 0.5) or 0.5),
+        created_by=str(payload.get("created_by") or "api"),
+        updated_reason=str(payload.get("updated_reason") or "manual_upsert"),
+        domain=str(payload.get("domain") or "project"),
+        visibility_policy=payload.get("visibility_policy"),
+        disclosure_rules=payload.get("disclosure_rules"),
+        scope_id=str(payload.get("scope_id") or ""),
+        project_id=str(payload.get("project_id") or ""),
+        owner_id=str(payload.get("owner_id") or ""),
+        retention_policy=str(payload.get("retention_policy") or "persistent"),
+    )
+    storage.commit()
+    return {"status": "ok", "page": page}
+
+@app.post("/admin/knowledge/update")
+async def queue_knowledge_update(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    slug = str(payload.get("slug") or payload.get("title") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    if not slug or not reason:
+        raise HTTPException(status_code=400, detail="slug/title and reason are required")
+    task = KnowledgePageStore(storage).enqueue_update_task(
+        slug=slug,
+        reason=reason,
+        session_id=payload.get("session_id"),
+        target_scope=str(payload.get("target_scope") or "codebase"),
+        evidence=[str(item) for item in (payload.get("evidence_hints") or [])],
+        domain=payload.get("domain"),
+    )
+    storage.commit()
+    await _worker.enqueue(task.task_id)
+    return {
+        "status": "ok",
+        "task_id": task.task_id,
+        "knowledge_slug": slugify_page_title(slug),
+    }
 
 @app.post("/admin/experiments/full_eval")
 async def run_full_eval_experiment(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):

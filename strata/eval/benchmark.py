@@ -177,10 +177,11 @@ async def run_benchmark(
         prompt = prompt_def["prompt"]
         prompt_id = prompt_def["id"]
         baseline_response, baseline_latency = await _run_direct_baseline(baseline_adapter, prompt)
-        harness_response, harness_latency = await run_harness_response(
+        harness_response, harness_latency, _ = await run_harness_response(
             prompt,
             run_id=f"benchmark-{run_label}-{prompt_id}-{idx}",
             config_override=eval_harness_config_override,
+            profile="harness_no_capes",
         )
         judgment = await _judge_pair(judge_adapter, prompt, baseline_response, harness_response)
 

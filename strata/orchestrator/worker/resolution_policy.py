@@ -10,6 +10,7 @@ from typing import Optional, List
 from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, TaskState, TaskType
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
+from strata.orchestrator.user_questions import enqueue_user_question
 
 logger = logging.getLogger(__name__)
 MAX_RESEARCH_REATTEMPTS = 2
@@ -110,15 +111,16 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         if len(failed_attempts) >= max_reattempts and repeated_iteration_limit:
             task.state = TaskState.BLOCKED
             task.human_intervention_required = True
-            storage.messages.create(
-                role="system",
-                content=(
-                    f"Task {task.task_id} hit repeated autonomous iteration limits "
-                    f"({len(failed_attempts)} failed attempts). Blocking it to avoid endless churn."
-                ),
+            enqueue_user_question(
+                storage,
                 session_id=task.session_id or "default",
-                is_intervention=True,
-                task_id=task.task_id,
+                question=(
+                    f"Task '{task.title}' hit repeated autonomous iteration limits after "
+                    f"{len(failed_attempts)} failed attempts. What should I change or clarify before retrying?"
+                ),
+                source_type="task_blocked",
+                source_id=task.task_id,
+                context={"reasoning": str(error), "title": task.title},
             )
             storage.commit()
             return
@@ -180,19 +182,21 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         await enqueue_fn(repair_task.task_id)
 
     elif res == "blocked":
-        import json
         task.state = TaskState.BLOCKED
         task.human_intervention_required = True
-        storage.messages.create(
-            role="system",
-            content=json.dumps({
-                "error": "Task Blocked",
-                "reasoning": resolution_data.reasoning,
-                "task_id": task.task_id,
-                "title": task.title
-            }),
+        enqueue_user_question(
+            storage,
             session_id=task.session_id or "default",
-            is_intervention=True,
-            task_id=task.task_id
+            question=(
+                f"I’m blocked on task '{task.title}'. "
+                f"What should I know or change to proceed? Reason: {resolution_data.reasoning}"
+            ),
+            source_type="task_blocked",
+            source_id=task.task_id,
+            context={
+                "reasoning": resolution_data.reasoning,
+                "title": task.title,
+                "task_id": task.task_id,
+            },
         )
         storage.commit()

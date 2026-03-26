@@ -26,7 +26,8 @@ This is why the codebase emphasizes explicit task structure, external state, eva
 - `strata/models/`: model adapter, provider, and registry logic.
 - `strata_ui/`: active frontend for the dashboard.
 - `docs/`: design notes and agent-specific documentation.
-- `.knowledge/`: generated research artifacts and project memory.
+- `.knowledge/`: raw generated research artifacts and provenance archive.
+- `docs/spec/kb/`: synthesized knowledge pages mirrored for human and model browsing.
 
 ## Runtime Architecture
 
@@ -36,6 +37,7 @@ This is why the codebase emphasizes explicit task structure, external state, eva
 4. Background tasks are persisted in SQLite and executed asynchronously by the worker.
 
 By default the backend stores relational state in `strata/runtime/strata.db` and semantic memory in `memory/vector_db/`.
+The API startup path also bootstraps `.knowledge/specs/global_spec.md` and `.knowledge/specs/project_spec.md` so alignment tasks always have stable spec files to inspect.
 
 ## Weak/Strong Bootstrap Loop
 
@@ -139,6 +141,11 @@ Key endpoints implemented in [strata/api/main.py](/Users/jon/Projects/strata/str
 - `POST /tasks`
 - `POST /tasks/{task_id}/intervene`
 - `GET /events`
+- `GET /admin/specs`
+- `GET /admin/spec_proposals`
+- `GET /admin/spec_proposals/{proposal_id}`
+- `POST /admin/spec_proposals`
+- `POST /admin/spec_proposals/{proposal_id}/resolve`
 - `GET/POST /admin/settings`
 - `GET/POST /admin/registry`
 - `GET /admin/health`
@@ -156,6 +163,7 @@ The main eval endpoints are:
 
 - `POST /admin/benchmark/run`
 - `POST /admin/evals/run`
+- `POST /admin/evals/matrix`
 - `POST /admin/experiments/benchmark`
 - `POST /admin/experiments/full_eval`
 - `GET /admin/experiments/compare`
@@ -166,14 +174,49 @@ The main eval endpoints are:
 - `GET /admin/experiments/secondary_ignition`
 - `GET /admin/experiments/history`
 - `POST /admin/experiments/tool_cycle`
+- `GET /admin/knowledge/pages`
+- `GET /admin/knowledge/pages/{slug}/metadata`
+- `GET /admin/knowledge/pages/{slug}`
+- `GET /admin/knowledge/pages/{slug}/section`
+- `POST /admin/knowledge/pages`
+- `POST /admin/knowledge/update`
+- `POST /admin/knowledge/compact`
 
 `/admin/experiments/full_eval` persists an exact sampled report for a candidate change, including the underlying benchmark and structured-eval runs. That gives the harness a concrete promotion record to inspect later instead of relying only on blended historical metric averages.
 
 The eval harness prompt/context is now configurable through `/admin/evals/config`, so a strong tier can propose prompt/context changes, evaluate them as a candidate, and promote the winning configuration through `/admin/experiments/promote` without requiring a code edit for each iteration.
 
+`/admin/evals/matrix` runs a standard structured suite across weak/strong and direct/scaffolded variants, returning per-question answers plus aggregate accuracy, latency, and token counts. This is the path toward a simple `run_eval(eval)` style operator surface.
+
 `/admin/experiments/bootstrap_cycle` can now ask both the weak and strong tiers to propose small eval-harness changes in parallel, evaluate them with provenance, and auto-promote any winner into the shared active harness configuration. Promotions now require repeated sample wins by default instead of a single pass. `GET /admin/experiments/history` exposes recent experiment reports and promotion readiness, while `GET /admin/experiments/secondary_ignition` reports whether a weak-originated promoted change has produced a measurable weak-tier gain.
 
 For a first bounded code-change lane, `/admin/experiments/tool_cycle` lets a proposer tier generate a dynamic tool under `strata/tools/`, run it through the existing tool promotion pipeline, and persist the outcome as a provenance-tagged experiment report.
+
+## Knowledge System
+
+Strata now treats raw note accumulation and current synthesized knowledge as separate layers:
+
+- raw archive: `.knowledge/`
+- synthesized page store: parameter-backed pages mirrored to `docs/spec/kb/`
+- provenance map: `.knowledge/provenance_index.json`
+
+Knowledge pages also carry first-class scope and disclosure metadata so the system can decide what it may use or reveal:
+
+- `domain`: `system`, `agent`, `user`, `contacts`, `project`, or `world`
+- `visibility_policy`: how broadly the page may be disclosed
+- `disclosure_rules`: quoting/summarization/personalization/tool-use rules
+- optional scope fields like `project_id`, `scope_id`, and `owner_id`
+
+The intended access pattern is progressive disclosure:
+
+1. list pages or fetch metadata first
+2. read a section only if needed
+3. read the full page only when necessary
+4. queue `update_knowledge` work when a page is missing, stale, inaccurate, or thin
+
+This keeps the knowledge layer friendlier to both humans and small-context models.
+
+Knowledge reads are now audience-aware. The page store distinguishes at least `user`, `agent`, `tool`, and `operator` reads, so internal agent memory can remain available for reasoning without automatically becoming user-visible or tool-exportable.
 
 ## Current Caveats
 

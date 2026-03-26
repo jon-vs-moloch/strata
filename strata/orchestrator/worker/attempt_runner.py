@@ -4,6 +4,7 @@
 """
 
 import logging
+import time
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.orchestrator.research import ResearchModule
 from strata.orchestrator.decomposition import DecompositionModule
@@ -18,6 +19,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
     # Start a new Attempt
     attempt = storage.attempts.create(task_id=task.task_id)
     storage.commit()
+    started_at = time.perf_counter()
     
     logger.info(f"Running task {task.task_id} ({task.type.value}), Attempt {attempt.attempt_id}")
 
@@ -38,6 +40,8 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         if hasattr(model_adapter, 'last_response') and model_adapter.last_response:
             attempt.artifacts["model"] = model_adapter.last_response.model
             attempt.artifacts["provider"] = model_adapter.last_response.provider
+            attempt.artifacts["usage"] = model_adapter.last_response.usage or {}
+        attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
             
         task.state = TaskState.COMPLETE
         storage.commit()
@@ -45,6 +49,11 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         return True, None, attempt
 
     except Exception as e:
+        if hasattr(model_adapter, 'last_response') and model_adapter.last_response:
+            attempt.artifacts["model"] = model_adapter.last_response.model
+            attempt.artifacts["provider"] = model_adapter.last_response.provider
+            attempt.artifacts["usage"] = model_adapter.last_response.usage or {}
+        attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
         storage.rollback()
         return False, e, attempt
 

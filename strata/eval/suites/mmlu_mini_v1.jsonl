@@ -1,0 +1,8 @@
+{"id":"mmlu_history_roman","prompt":"Which language was primarily spoken in the western Roman Empire?\nA. Greek\nB. Latin\nC. Arabic\nD. Sanskrit\nAnswer with only the letter.","expected_answer":"B","grading":"choice"}
+{"id":"mmlu_biology_dna","prompt":"Which molecule carries hereditary information in most living organisms?\nA. ATP\nB. RNA polymerase\nC. DNA\nD. Hemoglobin\nAnswer with only the letter.","expected_answer":"C","grading":"choice"}
+{"id":"mmlu_physics_acceleration","prompt":"If an object moves at constant velocity in a straight line, what is its acceleration?\nA. Positive\nB. Negative\nC. Variable\nD. Zero\nAnswer with only the letter.","expected_answer":"D","grading":"choice"}
+{"id":"mmlu_math_prime","prompt":"Which of the following numbers is prime?\nA. 21\nB. 27\nC. 29\nD. 39\nAnswer with only the letter.","expected_answer":"C","grading":"choice"}
+{"id":"mmlu_geography_capital","prompt":"What is the capital of Canada?\nA. Toronto\nB. Ottawa\nC. Vancouver\nD. Montreal\nAnswer with only the letter.","expected_answer":"B","grading":"choice"}
+{"id":"mmlu_cs_binary","prompt":"In binary, what decimal value does 1010 represent?\nA. 8\nB. 9\nC. 10\nD. 12\nAnswer with only the letter.","expected_answer":"C","grading":"choice"}
+{"id":"mmlu_chemistry_water","prompt":"What is the chemical formula for water?\nA. CO2\nB. H2O\nC. O2\nD. NaCl\nAnswer with only the letter.","expected_answer":"B","grading":"choice"}
+{"id":"mmlu_civics_us","prompt":"How many voting members are in the United States Senate?\nA. 50\nB. 100\nC. 435\nD. 538\nAnswer with only the letter.","expected_answer":"B","grading":"choice"}

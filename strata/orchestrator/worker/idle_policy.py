@@ -3,10 +3,10 @@
 @purpose Alignment policy to be run when the system is idle.
 """
 
-import os
 import logging
 from datetime import datetime
 from strata.storage.models import TaskModel, TaskState, TaskType
+from strata.specs.bootstrap import load_specs
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +17,10 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
     logger.info("System is idle. Triggering Constitutional Alignment Task.")
     storage = storage_factory()
     try:
-        # 1. Read the user specifications
-        kb_dir = ".knowledge/specs"
-        global_spec = "None."
-        project_spec = "None."
-        if os.path.exists(os.path.join(kb_dir, "global_spec.md")):
-            with open(os.path.join(kb_dir, "global_spec.md"), "r") as f:
-                global_spec = f.read()
-        if os.path.exists(os.path.join(kb_dir, "project_spec.md")):
-            with open(os.path.join(kb_dir, "project_spec.md"), "r") as f:
-                project_spec = f.read()
+        # 1. Read the user specifications from a guaranteed bootstrap location
+        specs = load_specs()
+        global_spec = specs.get("global_spec", "None.")
+        project_spec = specs.get("project_spec", "None.")
 
         has_usable_specs = any(
             spec.strip() and spec.strip().lower() != "none."

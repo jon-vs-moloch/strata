@@ -21,6 +21,7 @@ class ModelResponse(BaseModel):
     tool_calls: Optional[List[Dict]] = Field(None)
     model: str = Field(...)
     provider: str = Field(...)
+    usage: Optional[Dict[str, int | float | str | None]] = Field(default=None)
 
 @dataclass
 class ThrottleState:
@@ -186,7 +187,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                             content=content,
                             tool_calls=tool_calls,
                             model=self.model_id,
-                            provider=self.provider_id
+                            provider=self.provider_id,
+                            usage=result.get("usage") or {},
                         )
                 except httpx.HTTPStatusError as e:
                     status_code = e.response.status_code
@@ -218,7 +220,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         status="error",
                         content=f"HTTP {status_code}: {e.response.text}",
                         model=self.model_id,
-                        provider=self.provider_id
+                        provider=self.provider_id,
+                        usage={},
                     )
                 except Exception as e:
                     telemetry.error_count += 1
@@ -234,14 +237,16 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         status="error",
                         content=str(e),
                         model=self.model_id,
-                        provider=self.provider_id
+                        provider=self.provider_id,
+                        usage={},
                     )
         
         return ModelResponse(
             status="error", 
             content="Max retries reached", 
             model=self.model_id, 
-            provider=self.provider_id
+            provider=self.provider_id,
+            usage={},
         )
 
 class LocalProvider(GenericOpenAICompatibleProvider):

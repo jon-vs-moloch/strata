@@ -203,6 +203,52 @@ class BackgroundWorker:
             ctx_mode = context.mode
             change_id = getattr(context, "candidate_change_id", None)
 
+            def _record_attempt_efficiency_metrics(outcome: str):
+                from strata.orchestrator.worker.telemetry import record_metric
+                duration_s = float(attempt.artifacts.get("duration_s", 0.0) or 0.0)
+                usage = attempt.artifacts.get("usage") or {}
+                base_kwargs = {
+                    "storage": storage,
+                    "model_id": f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
+                    "task_type": task.type.value if hasattr(task.type, 'value') else str(task.type),
+                    "task_id": task_id,
+                    "run_mode": run_mode,
+                    "execution_context": ctx_mode,
+                    "candidate_change_id": change_id,
+                    "details": {"outcome": outcome},
+                }
+                if duration_s > 0.0:
+                    record_metric(
+                        base_kwargs["storage"],
+                        metric_name="task_attempt_duration_s",
+                        value=duration_s,
+                        model_id=base_kwargs["model_id"],
+                        task_type=base_kwargs["task_type"],
+                        task_id=base_kwargs["task_id"],
+                        run_mode=base_kwargs["run_mode"],
+                        execution_context=base_kwargs["execution_context"],
+                        candidate_change_id=base_kwargs["candidate_change_id"],
+                        details=base_kwargs["details"],
+                    )
+                for key, metric_name in (
+                    ("prompt_tokens", "task_prompt_tokens"),
+                    ("completion_tokens", "task_completion_tokens"),
+                    ("total_tokens", "task_total_tokens"),
+                ):
+                    if usage.get(key) is not None:
+                        record_metric(
+                            base_kwargs["storage"],
+                            metric_name=metric_name,
+                            value=float(usage.get(key) or 0.0),
+                            model_id=base_kwargs["model_id"],
+                            task_type=base_kwargs["task_type"],
+                            task_id=base_kwargs["task_id"],
+                            run_mode=base_kwargs["run_mode"],
+                            execution_context=base_kwargs["execution_context"],
+                            candidate_change_id=base_kwargs["candidate_change_id"],
+                            details=base_kwargs["details"],
+                        )
+
             if not success:
                 # --- RESOLUTION ---
                 resolution_data = await determine_resolution(task, error, self._model, storage)
@@ -234,6 +280,7 @@ class BackgroundWorker:
                     candidate_change_id=change_id,
                     details={"error": str(error), "resolution": resolution_data.resolution}
                 )
+                _record_attempt_efficiency_metrics("failed")
                 
                 # Record valid candidate rate if applicable
                 from strata.storage.models import CandidateModel
@@ -275,6 +322,7 @@ class BackgroundWorker:
                     execution_context=ctx_mode,
                     candidate_change_id=change_id
                 )
+                _record_attempt_efficiency_metrics("succeeded")
                 storage.commit()
             
             # --- REVIEW ---

@@ -59,7 +59,7 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
   );
 };
 
-const InterventionWidget = ({ taskId, onResolve }) => {
+const InterventionWidget = ({ taskId, question, onResolve }) => {
   const [input, setInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -96,11 +96,14 @@ const InterventionWidget = ({ taskId, onResolve }) => {
       <div style={{ fontSize: '11px', color: '#ffb84d', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
         Human Intervention Required
       </div>
+      <div style={{ fontSize: '12px', color: '#ffe2b8', lineHeight: 1.45 }}>
+        {question || 'Provide the missing context or decision this blocked task needs.'}
+      </div>
       <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px' }}>
         <input 
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Provide missing context or instructions..."
+          placeholder="Answer this question as specifically as you can..."
           style={{
             flex: 1, background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,119,0,0.2)',
             borderRadius: '6px', padding: '6px 10px', color: '#fff', fontSize: '12px',
@@ -217,7 +220,7 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
 
         {task.status === 'blocked' && (
           <div onClick={(e) => e.stopPropagation()}>
-            <InterventionWidget taskId={task.id} />
+            <InterventionWidget taskId={task.id} question={task.pending_question} />
           </div>
         )}
 
