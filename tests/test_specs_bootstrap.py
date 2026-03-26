@@ -149,3 +149,11 @@ def test_spec_proposal_index_is_bounded(tmp_path, monkeypatch):
 
     listed = bootstrap.list_spec_proposals(storage, limit=10)
     assert len(listed) == 3
+
+
+def test_spec_placeholder_detection():
+    assert bootstrap.spec_is_bootstrap_placeholder(bootstrap.DEFAULT_PROJECT_SPEC)
+    assert bootstrap.spec_is_bootstrap_placeholder(bootstrap.DEFAULT_GLOBAL_SPEC)
+    assert not bootstrap.spec_is_bootstrap_placeholder(
+        "# Project Spec\n\nCurrent project intent:\n- make the weak tier improve itself\n"
+    )

@@ -28,8 +28,8 @@ def register_spec_admin_routes(
     exported: Dict[str, Any] = {}
 
     @app.get("/admin/specs")
-    async def get_specs():
-        return {"status": "ok", "specs": load_specs()}
+    async def get_specs(storage=Depends(get_storage)):
+        return {"status": "ok", "specs": load_specs(storage=storage)}
 
     @app.get("/admin/spec_proposals")
     async def get_spec_proposals(status: Optional[str] = None, limit: int = 50, storage=Depends(get_storage)):

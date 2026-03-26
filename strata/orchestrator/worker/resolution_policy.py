@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 MAX_RESEARCH_REATTEMPTS = 2
 MAX_DEFAULT_REATTEMPTS = 3
 
+
+def _tool_repair_shape(improvement_reason: str) -> tuple[str, TaskType]:
+    normalized = str(improvement_reason or "unknown").strip().lower()
+    if normalized == "tool_broken":
+        return "Tool Fix", TaskType.BUG_FIX
+    if normalized == "tool_missing":
+        return "New Tool", TaskType.IMPL
+    if normalized == "tool_too_weak":
+        return "Tool Upgrade", TaskType.REFACTOR
+    if normalized == "tool_misused":
+        return "Tool Guidance", TaskType.REFACTOR
+    return "Tool Repair", TaskType.IMPL
+
 async def determine_resolution(task: TaskModel, error: Exception, model_adapter, storage) -> AttemptResolutionSchema:
     """
     @summary Choose a resolution strategy for a failed task.
@@ -63,6 +76,13 @@ RESOLUTIONS:
 - abandon_to_parent: This leaf task is impossible OR requires architectural decisions beyond this scope.
 - blocked: Use when the task is blocked by a missing physical requirement that ONLY a human can provide (e.g. missing API keys, manual environment setup, clarification on ambiguous user intent, access to a private resource).
 - improve_tooling: Use when the task failed because a specific tool is missing or inadequate.
+
+If you choose improve_tooling, also provide:
+- tool_modification_target: the exact tool or capability involved
+- tool_improvement_reason: one of tool_too_weak, tool_broken, tool_missing, tool_misused, unknown
+
+Use tool_broken when the tool is behaving incorrectly and should be treated as untrustworthy until fixed.
+Use tool_too_weak when the tool works but is insufficient for the task.
 
 Respond with structured reasoning first, then the resolution choice.
 """
@@ -166,15 +186,29 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
 
     elif res == "improve_tooling":
         target = resolution_data.tool_modification_target or "unknown_tool"
+        improvement_reason = resolution_data.tool_improvement_reason or "unknown"
+        repair_prefix, repair_type = _tool_repair_shape(improvement_reason)
         task.state = TaskState.BLOCKED
         repair_task = storage.tasks.create(
-            title=f"Tool Repair: {target}",
-            description=f"The Orchestrator failed an objective because a tool is inadequate or missing. Target: {target}. Reasoning: {resolution_data.reasoning}.",
+            title=f"{repair_prefix}: {target}",
+            description=(
+                "The Orchestrator failed an objective because a tool lane needs intervention. "
+                f"Target: {target}. Improvement reason: {improvement_reason}. "
+                f"Reasoning: {resolution_data.reasoning}."
+            ),
             session_id=task.session_id,
             state=TaskState.PENDING,
-            type=TaskType.IMPL,
+            type=repair_type,
             depth=task.depth + 1,
-            priority=100.0 # Maximum priority
+            priority=float(task.priority or 0.0),
+            constraints={
+                "target_scope": "tooling",
+                "source_task_id": task.task_id,
+                "source_task_priority": float(task.priority or 0.0),
+                "tool_modification_target": target,
+                "tool_improvement_reason": improvement_reason,
+                "tool_improvement_reasoning": resolution_data.reasoning,
+            },
         )
         storage.commit()
         storage.tasks.add_dependency(task.task_id, repair_task.task_id)

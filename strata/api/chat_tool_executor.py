@@ -160,15 +160,17 @@ class ChatToolExecutor:
             tool_content = f"Queued knowledge update task {task.task_id} for page '{slugify_page_title(slug)}'."
         elif func_name == "read_spec":
             scope = str(args.get("scope") or "project")
-            specs = load_specs()
-            tool_content = specs.get("global_spec", "") if scope == "global" else specs.get("project_spec", "")
+            specs = load_specs(storage=storage)
+            path = ".knowledge/specs/global_spec.md" if scope == "global" else ".knowledge/specs/project_spec.md"
+            body = specs.get("global_spec", "") if scope == "global" else specs.get("project_spec", "")
+            tool_content = f"Source: {path}\n\n{body}"
             tool_outputs_generated = True
         elif func_name == "propose_spec_update":
             scope = str(args.get("scope") or "project")
             proposed_change = str(args.get("proposed_change") or "").strip()
             rationale = str(args.get("rationale") or "").strip()
             user_signal = str(args.get("user_signal") or content).strip()
-            current_specs = load_specs()
+            current_specs = load_specs(storage=storage)
             current_spec = current_specs.get("global_spec" if scope == "global" else "project_spec", "")
             title = f"Spec Review ({scope.title()}): {proposed_change[:48] or rationale[:48] or 'pending proposal'}"
             review_prompt = (

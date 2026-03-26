@@ -43,11 +43,15 @@ def eval_override_signature(config: Optional[Dict[str, Any]]) -> str:
 
 
 def extract_json_object(raw: str) -> Dict[str, Any]:
+    normalized = str(raw or "").strip()
+    if normalized.startswith("```"):
+        normalized = re.sub(r"^```(?:json)?", "", normalized).strip()
+        normalized = re.sub(r"```$", "", normalized).strip()
     try:
-        return json.loads(raw)
+        return json.loads(normalized)
     except Exception:
         pass
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    match = re.search(r"\{.*\}", normalized, re.DOTALL)
     if not match:
         raise ValueError("No JSON object found in model output.")
     return json.loads(match.group(0))
@@ -90,7 +94,18 @@ Current eval harness config:
         [{"role": "user", "content": proposal_prompt}],
         temperature=0.2 if proposer_tier == "weak" else 0.1,
     )
-    proposal = extract_json_object(response.get("content", ""))
+    raw_content = response.get("content", "")
+    try:
+        proposal = extract_json_object(raw_content)
+    except Exception:
+        proposal = {
+            "candidate_suffix": f"{proposer_tier}_fallback",
+            "system_prompt": current_config.get("system_prompt") or "",
+            "context_files": current_config.get("context_files") or [],
+            "rationale": "Proposal generation returned malformed JSON; preserving the current config instead of failing the cycle.",
+            "expected_gain": "No-op fallback to keep the bootstrap cycle alive while capturing malformed proposer output.",
+            "parse_error": str(raw_content or "")[:2000],
+        }
     suffix = slugify_candidate_suffix(str(proposal.get("candidate_suffix", proposer_tier)))
     return {
         "proposer_tier": proposer_tier,
@@ -142,7 +157,20 @@ Requirements:
         [{"role": "user", "content": proposal_prompt}],
         temperature=0.15 if proposer_tier == "strong" else 0.25,
     )
-    proposal = extract_json_object(response.get("content", ""))
+    raw_content = response.get("content", "")
+    try:
+        proposal = extract_json_object(raw_content)
+    except Exception:
+        proposal = {
+            "source": "",
+            "manifest": {},
+            "smoke_test": "",
+            "spec_citations": [],
+            "evaluation_plan": "",
+            "rationale": "Tool proposal generation returned malformed JSON; treating the proposal as invalid instead of failing the whole cycle.",
+            "expected_gain": "No-op fallback that keeps the tool cycle alive while preserving the bad proposer output for debugging.",
+            "parse_error": str(raw_content or "")[:2000],
+        }
     return {
         "proposer_tier": proposer_tier,
         "candidate_change_id": f"{proposer_tier}_{tool_name}_{int(datetime.now(timezone.utc).timestamp())}",

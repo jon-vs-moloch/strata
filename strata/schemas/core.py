@@ -33,6 +33,10 @@ class AttemptResolutionSchema(BaseModel):
         None,
         description="If resolution is 'improve_tooling', specify the exact name of the tool to be fixed, or the name of a new tool that needs to be created."
     )
+    tool_improvement_reason: Optional[Literal["tool_too_weak", "tool_broken", "tool_missing", "tool_misused", "unknown"]] = Field(
+        None,
+        description="If resolution is 'improve_tooling', classify why the tool lane needs intervention."
+    )
     new_subtasks: List[SubtaskDraft] = Field(
         default_factory=list,
         description="If resolution is 'decompose' or 'internal_replan', provide the new child tasks here. If 'reattempt' or 'abandon_to_parent', leave this array empty."

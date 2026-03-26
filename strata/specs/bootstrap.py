@@ -27,11 +27,13 @@ DEFAULT_GLOBAL_SPEC = """# Global Spec
 
 This file stores persistent, cross-project instructions and preferences for Strata.
 
-Suggested contents:
-- durable operator preferences
-- disclosure or safety constraints
-- hardware or rate-limit preferences
-- global product goals that should outlive a single task
+Canonical location: `.knowledge/specs/global_spec.md`
+
+Current durable guidance:
+- prefer explicit evaluation over vague hope; if we want an outcome, we should measure it
+- respect disclosure and permission boundaries for knowledge and memory
+- prefer modest resource use and gentle local-hardware defaults unless the operator asks otherwise
+- preserve provenance for spec changes, knowledge synthesis, and promotions so decisions stay explainable
 
 If there are no durable global preferences yet, leave this file in place and update it as they become clear.
 """
@@ -40,11 +42,19 @@ DEFAULT_PROJECT_SPEC = """# Project Spec
 
 This file stores the current high-level vision for the active Strata project.
 
-Suggested contents:
-- what the system is trying to accomplish
-- important design constraints
-- the current bootstrap/eval objective
-- any active architectural priorities
+Canonical location: `.knowledge/specs/project_spec.md`
+
+Current project intent:
+- extract useful work from small local models by pushing rigor into the system rather than the model
+- improve outputs through multi-step refinement, validation against downstream data, and explicit evaluation
+- use a stronger tier to improve the harness until the weak tier can improve the system itself
+- treat repo structure, modularity, and progressive disclosure as supports for small models with small context
+- keep bootstrap progress measurable through evals, telemetry, and promotion evidence
+
+Canonical supporting references:
+- `README.md`
+- `docs/spec/project-philosophy.md`
+- `docs/spec/codemap.md`
 
 This file should exist even when it is sparse, because alignment and maintenance tasks depend on having a stable place to look for project intent.
 """
@@ -87,6 +97,18 @@ def load_specs(*, storage=None) -> Dict[str, str]:
         "global_spec": global_spec,
         "project_spec": project_spec,
     }
+
+
+def spec_is_bootstrap_placeholder(spec_text: str) -> bool:
+    normalized = str(spec_text or "").strip()
+    if not normalized:
+        return True
+    markers = [
+        "Suggested contents:",
+        "If there are no durable global preferences yet",
+        "This file should exist even when it is sparse",
+    ]
+    return any(marker in normalized for marker in markers)
 
 
 def _proposal_key(proposal_id: str) -> str:
