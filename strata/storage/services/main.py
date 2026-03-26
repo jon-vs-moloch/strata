@@ -10,7 +10,13 @@ from strata.storage.repositories.attempts import AttemptRepository
 
 # ── Module level shared resources ──────────────────────────────────────────────
 _DB_URL = os.getenv("DATABASE_URL", "sqlite:///strata/runtime/strata.db")
-_engine = create_engine(_DB_URL)
+_engine_kwargs = {}
+if _DB_URL.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {
+        "timeout": 30,
+        "check_same_thread": False,
+    }
+_engine = create_engine(_DB_URL, **_engine_kwargs)
 
 # SQLite-specific performance tuning: Enable Write-Ahead Logging (WAL)
 if _DB_URL.startswith("sqlite"):
@@ -26,6 +32,10 @@ _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
 class StorageManager:
     """
     @summary Central entrypoint for database access.
+
+    Strata keeps state outside the model on purpose. Durable storage is one of the
+    main ways the harness compensates for small context windows and lets the
+    system learn from prior outcomes instead of re-deriving everything in-prompt.
     """
     def __init__(self, session: Optional[Session] = None):
         """
@@ -35,13 +45,7 @@ class StorageManager:
             self.session = session
         else:
             self.session = _SessionLocal()
-        
-        # Repositories for domain-specific logic
-        self.tasks = TaskRepository(self.session)
-        self.messages = MessageRepository(self.session)
-        self.parameters = ParameterRepository(self.session)
-        self.attempts = AttemptRepository(self.session)
-        
+
         # Repositories for domain-specific logic
         self.tasks = TaskRepository(self.session)
         self.messages = MessageRepository(self.session)
@@ -49,6 +53,14 @@ class StorageManager:
         self.attempts = AttemptRepository(self.session)
         # self.candidates = CandidateRepository(self.session)
         # self.prompts = PromptRepository(self.session)
+
+    @property
+    def engine(self):
+        return _engine
+
+    @property
+    def SessionLocal(self):
+        return _SessionLocal
 
     def commit(self):
         """

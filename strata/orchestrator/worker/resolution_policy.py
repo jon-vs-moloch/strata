@@ -12,6 +12,8 @@ from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
 
 logger = logging.getLogger(__name__)
+MAX_RESEARCH_REATTEMPTS = 2
+MAX_DEFAULT_REATTEMPTS = 3
 
 async def determine_resolution(task: TaskModel, error: Exception, model_adapter, storage) -> AttemptResolutionSchema:
     """
@@ -100,6 +102,26 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
     logger.info(f"Applying Resolution: {res.upper()} for task {task.task_id} ({resolution_data.reasoning})")
     
     if res == "reattempt":
+        attempts = storage.attempts.get_by_task_id(task.task_id)
+        failed_attempts = [attempt for attempt in attempts if attempt.outcome == AttemptOutcome.FAILED]
+        error_text = str(error).lower()
+        max_reattempts = MAX_RESEARCH_REATTEMPTS if task.type == TaskType.RESEARCH else MAX_DEFAULT_REATTEMPTS
+        repeated_iteration_limit = "iteration limit reached" in error_text
+        if len(failed_attempts) >= max_reattempts and repeated_iteration_limit:
+            task.state = TaskState.BLOCKED
+            task.human_intervention_required = True
+            storage.messages.create(
+                role="system",
+                content=(
+                    f"Task {task.task_id} hit repeated autonomous iteration limits "
+                    f"({len(failed_attempts)} failed attempts). Blocking it to avoid endless churn."
+                ),
+                session_id=task.session_id or "default",
+                is_intervention=True,
+                task_id=task.task_id,
+            )
+            storage.commit()
+            return
         task.state = TaskState.PENDING
         await enqueue_fn(task.task_id)
         

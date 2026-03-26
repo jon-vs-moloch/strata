@@ -28,7 +28,31 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             with open(os.path.join(kb_dir, "project_spec.md"), "r") as f:
                 project_spec = f.read()
 
+        has_usable_specs = any(
+            spec.strip() and spec.strip().lower() != "none."
+            for spec in [global_spec, project_spec]
+        )
+        if not has_usable_specs:
+            logger.info("Idle alignment skipped because no usable specs are present.")
+            return
+
+        active_alignment = (
+            storage.session.query(TaskModel)
+            .filter(
+                TaskModel.type == TaskType.RESEARCH,
+                TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING, TaskState.BLOCKED]),
+                TaskModel.title.like("Alignment:%"),
+            )
+            .count()
+        )
+        if active_alignment:
+            logger.info("Idle alignment skipped because an alignment-style research task already exists.")
+            return
+
         # 2. Prompt for Alignment
+        from strata.schemas.execution import WeakExecutionContext
+        model_adapter.bind_execution_context(WeakExecutionContext(run_id="idle_alignment"))
+        
         sys_prompt = f"""You are the Alignment Module for the Strata Swarm.
 The system is currently IDLE. You must identify gaps between the user's vision and the current codebase state.
 

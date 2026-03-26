@@ -1,6 +1,5 @@
 
 
-```python
 #!/usr/bin/env python3
 """
 Configuration Security Validator
@@ -343,4 +342,3 @@ def main():
 
 if __name__ == "__main__":
     result = main()
-```

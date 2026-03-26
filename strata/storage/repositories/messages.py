@@ -7,8 +7,10 @@
 """
 
 from typing import List, Dict, Any, Optional
+import time
 from sqlalchemy import select, desc, distinct
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 from strata.storage.models import MessageModel
 
 class MessageRepository:
@@ -33,16 +35,26 @@ class MessageRepository:
         @inputs role: ('user', 'assistant', 'system'), content: message text
         @outputs the created MessageModel
         """
-        msg = MessageModel(
-            role=role, 
-            content=content, 
-            session_id=session_id,
-            is_intervention=is_intervention,
-            associated_task_id=task_id
-        )
-        self.session.add(msg)
-        self.session.flush()
-        return msg
+        last_error = None
+        for attempt in range(5):
+            msg = MessageModel(
+                role=role,
+                content=content,
+                session_id=session_id,
+                is_intervention=is_intervention,
+                associated_task_id=task_id
+            )
+            try:
+                self.session.add(msg)
+                self.session.flush()
+                return msg
+            except OperationalError as e:
+                last_error = e
+                if "database is locked" not in str(e).lower() or attempt == 4:
+                    raise
+                self.session.rollback()
+                time.sleep(0.2 * (attempt + 1))
+        raise last_error
 
     def get_all(self, session_id: Optional[str] = None) -> List[MessageModel]:
 

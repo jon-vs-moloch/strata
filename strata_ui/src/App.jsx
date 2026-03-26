@@ -12,6 +12,21 @@ import {
 } from 'lucide-react';
 import TaskCard from './components/TaskCard';
 
+const MotionDiv = motion.div;
+const MotionSpan = motion.span;
+
+const API_KEY_LINKS = {
+  cerebras: 'https://cloud.cerebras.ai/',
+  google: 'https://aistudio.google.com/apikey',
+  openrouter: 'https://openrouter.ai/settings/keys',
+};
+
+const PROVIDER_SETUP_LINKS = [
+  { label: 'Cerebras Key', href: 'https://cloud.cerebras.ai/' },
+  { label: 'Google AI Studio Key', href: 'https://aistudio.google.com/apikey' },
+  { label: 'OpenRouter Keys', href: 'https://openrouter.ai/settings/keys' },
+];
+
 
 // ─── Settings Modal ────────────────────────────────────────────────────────────
 const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
@@ -23,49 +38,55 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
   const [testResult, setTestResult] = useState(null); // null | { ok, latency?, error?, llm? }
   const [testing, setTesting] = useState(false);
 
-  // Model selector state
-  const [models, setModels] = useState([]);
-  const [currentModel, setCurrentModel] = useState(null);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState(null);
-  const [selectingModel, setSelectingModel] = useState(null);
-
   // Orchestrator Settings
   const [maxSyncIters, setMaxSyncIters] = useState(3);
+  const [automaticTaskGeneration, setAutomaticTaskGeneration] = useState(false);
+  const [testingMode, setTestingMode] = useState(false);
+  const [replayPendingOnStartup, setReplayPendingOnStartup] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Model Registry Settings
   const [registryConfig, setRegistryConfig] = useState({ strong: [], weak: [] });
-  const [registryLoading, setRegistryLoading] = useState(false);
+  const [registryPresets, setRegistryPresets] = useState({ strong: {}, weak: {} });
   const [savingRegistry, setSavingRegistry] = useState(false);
 
-  // Load state on mount
-  useEffect(() => {
-    loadModels();
-    loadSettings();
-    loadRegistry();
-  }, []);
-
-  const loadSettings = async () => {
+  const loadSettings = useCallback(async () => {
     try {
       const res = await axios.get(`${apiUrl}/admin/settings`);
       if (res.data.status === 'ok') {
         setMaxSyncIters(res.data.settings.max_sync_tool_iterations || 3);
+        setAutomaticTaskGeneration(Boolean(res.data.settings.automatic_task_generation));
+        setTestingMode(Boolean(res.data.settings.testing_mode));
+        setReplayPendingOnStartup(Boolean(res.data.settings.replay_pending_tasks_on_startup));
       }
     } catch (e) { console.error('Failed to load settings', e); }
-  };
+  }, [apiUrl]);
 
-  const loadRegistry = async () => {
-    setRegistryLoading(true);
+  const loadRegistry = useCallback(async () => {
     try {
       const res = await axios.get(`${apiUrl}/admin/registry`);
       setRegistryConfig(res.data.config);
     } catch (e) {
       console.error('Failed to load registry', e);
-    } finally {
-      setRegistryLoading(false);
     }
-  };
+  }, [apiUrl]);
+
+  const loadRegistryPresets = useCallback(async () => {
+    try {
+      const res = await axios.get(`${apiUrl}/admin/registry/presets`);
+      if (res.data.status === 'ok') {
+        setRegistryPresets(res.data.presets || { strong: {}, weak: {} });
+      }
+    } catch (e) {
+      console.error('Failed to load registry presets', e);
+    }
+  }, [apiUrl]);
+
+  useEffect(() => {
+    void loadSettings();
+    void loadRegistry();
+    void loadRegistryPresets();
+  }, [loadRegistry, loadRegistryPresets, loadSettings]);
 
   const handleUpdateRegistry = async (pool, field, value, index = 0) => {
     const next = { ...registryConfig };
@@ -91,46 +112,35 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
     }
   };
 
-  const handleSaveSettings = async (val) => {
+  const applyPreset = async (pool, presetKey) => {
+    const preset = registryPresets?.[pool]?.[presetKey];
+    if (!preset) return;
+    const next = { ...registryConfig, [pool]: [{ ...preset }] };
+    setRegistryConfig(next);
+    setSavingRegistry(true);
+    try {
+      await axios.post(`${apiUrl}/admin/registry`, next);
+    } catch (e) {
+      console.error('Failed to apply preset', e);
+    } finally {
+      setSavingRegistry(false);
+    }
+  };
+
+  const persistSettings = async (overrides = {}) => {
+    const payload = {
+      max_sync_tool_iterations: parseInt(overrides.max_sync_tool_iterations ?? maxSyncIters, 10) || 3,
+      automatic_task_generation: overrides.automatic_task_generation ?? automaticTaskGeneration,
+      testing_mode: overrides.testing_mode ?? testingMode,
+      replay_pending_tasks_on_startup: overrides.replay_pending_tasks_on_startup ?? replayPendingOnStartup,
+    };
     setSavingSettings(true);
     try {
-      await axios.post(`${apiUrl}/admin/settings`, { max_sync_tool_iterations: parseInt(val, 10) || 3 });
+      await axios.post(`${apiUrl}/admin/settings`, payload);
     } catch (e) {
       console.error('Failed to save settings', e);
     } finally {
       setSavingSettings(false);
-    }
-  };
-
-  const loadModels = async () => {
-    setModelsLoading(true);
-    setModelsError(null);
-    try {
-      const res = await axios.get(`${apiUrl}/models`);
-      if (res.data.status === 'ok') {
-        setModels(res.data.models);
-        setCurrentModel(res.data.current);
-      } else {
-        setModelsError(res.data.message || 'Could not reach model provider');
-        setModels([]);
-      }
-    } catch (e) {
-      setModelsError('Strata API unreachable — is the backend running?');
-      setModels([]);
-    } finally {
-      setModelsLoading(false);
-    }
-  };
-
-  const handleSelectModel = async (modelId) => {
-    setSelectingModel(modelId);
-    try {
-      await axios.post(`${apiUrl}/models/select`, { model: modelId });
-      setCurrentModel(modelId);
-    } catch (e) {
-      console.error('Model selection failed', e);
-    } finally {
-      setSelectingModel(null);
     }
   };
 
@@ -142,8 +152,8 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
       const res = await axios.get(`${apiUrl}/admin/test`, { timeout: 5000 });
       const latency = Math.round(performance.now() - start);
       setTestResult({ ok: true, latency, llm: res.data.llm_endpoint });
-    } catch (e) {
-      setTestResult({ ok: false, error: e.message || 'Connection failed' });
+    } catch (error) {
+      setTestResult({ ok: false, error: error.message || 'Connection failed' });
     } finally {
       setTesting(false);
     }
@@ -178,7 +188,7 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
   };
 
   return (
-    <motion.div
+    <MotionDiv
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -189,7 +199,7 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
         zIndex: 1000, backdropFilter: 'blur(4px)'
       }}
     >
-      <motion.div
+      <MotionDiv
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -236,6 +246,11 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               {testing ? 'Testing…' : 'Test'}
             </button>
           </div>
+          {testResult && (
+            <div style={{ fontSize: '11px', color: testResult.ok ? '#00f294' : '#ff4d4d', marginTop: '8px' }}>
+              {testResult.ok ? `Connected in ${testResult.latency}ms` : testResult.error}
+            </div>
+          )}
         </div>
 
         {/* ── Model Registry ───────────────────────────────────────────────── */}
@@ -244,11 +259,88 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
             <div style={sectionLabel}>MODEL REGISTRY</div>
             {savingRegistry && <span style={{ fontSize: '10px', color: '#8257e5', fontWeight: 700 }}>SAVING…</span>}
           </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
+            {PROVIDER_SETUP_LINKS.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: '999px',
+                  color: '#d8d9e6',
+                  padding: '6px 10px',
+                  fontSize: '11px',
+                  textDecoration: 'none'
+                }}
+              >
+                {link.label}
+              </a>
+            ))}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}>
+            <div>
+              <div style={{ ...sectionLabel, marginBottom: '6px' }}>STRONG PRESETS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {Object.keys(registryPresets.strong || {}).map((presetKey) => (
+                  <button
+                    key={presetKey}
+                    onClick={() => applyPreset('strong', presetKey)}
+                    style={{
+                      background: 'rgba(130,87,229,0.15)',
+                      border: '1px solid rgba(130,87,229,0.3)',
+                      borderRadius: '999px',
+                      color: '#cfc3ff',
+                      padding: '6px 10px',
+                      fontSize: '11px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {presetKey}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div style={{ ...sectionLabel, marginBottom: '6px' }}>WEAK PRESETS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {Object.keys(registryPresets.weak || {}).map((presetKey) => (
+                  <button
+                    key={presetKey}
+                    onClick={() => applyPreset('weak', presetKey)}
+                    style={{
+                      background: 'rgba(0,217,255,0.12)',
+                      border: '1px solid rgba(0,217,255,0.25)',
+                      borderRadius: '999px',
+                      color: '#9fefff',
+                      padding: '6px 10px',
+                      fontSize: '11px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {presetKey}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             {/* Strong Pool */}
             <div style={inputGroupStyle}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL (CLOUD)</div>
+              {registryConfig.strong?.[0]?.provider && API_KEY_LINKS[registryConfig.strong[0].provider] && (
+                <a
+                  href={API_KEY_LINKS[registryConfig.strong[0].provider]}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ fontSize: '11px', color: '#bca9ff', textDecoration: 'none' }}
+                >
+                  Open {registryConfig.strong[0].provider} API key page
+                </a>
+              )}
               <input 
                 style={infoValue} placeholder="Model (e.g. anthropic/claude-3.5-sonnet)"
                 value={registryConfig.strong?.[0]?.model || ''}
@@ -263,6 +355,24 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
                 style={infoValue} placeholder="API Key Env (e.g. OPENROUTER_API_KEY)"
                 value={registryConfig.strong?.[0]?.api_key_env || ''}
                 onChange={e => handleUpdateRegistry('strong', 'api_key_env', e.target.value)}
+              />
+              <input
+                type="number"
+                style={infoValue} placeholder="Requests / minute (optional)"
+                value={registryConfig.strong?.[0]?.requests_per_minute || ''}
+                onChange={e => handleUpdateRegistry('strong', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)}
+              />
+              <input
+                type="number"
+                style={infoValue} placeholder="Max concurrency (optional)"
+                value={registryConfig.strong?.[0]?.max_concurrency || ''}
+                onChange={e => handleUpdateRegistry('strong', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)}
+              />
+              <input
+                type="number"
+                style={infoValue} placeholder="Min interval ms (optional)"
+                value={registryConfig.strong?.[0]?.min_interval_ms || ''}
+                onChange={e => handleUpdateRegistry('strong', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
             </div>
 
@@ -279,26 +389,100 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
                 value={registryConfig.weak?.[0]?.endpoint_url || ''}
                 onChange={e => handleUpdateRegistry('weak', 'endpoint_url', e.target.value)}
               />
+              <input
+                type="number"
+                style={infoValue} placeholder="Requests / minute (optional)"
+                value={registryConfig.weak?.[0]?.requests_per_minute || ''}
+                onChange={e => handleUpdateRegistry('weak', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)}
+              />
+              <input
+                type="number"
+                style={infoValue} placeholder="Max concurrency (optional)"
+                value={registryConfig.weak?.[0]?.max_concurrency || ''}
+                onChange={e => handleUpdateRegistry('weak', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)}
+              />
+              <input
+                type="number"
+                style={infoValue} placeholder="Min interval ms (optional)"
+                value={registryConfig.weak?.[0]?.min_interval_ms || ''}
+                onChange={e => handleUpdateRegistry('weak', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
+              />
             </div>
           </div>
         </div>
 
         {/* ── Orchestrator Settings ────────────────────────────────────────── */}
         <div>
-          <div style={sectionLabel}>ORCHESTRATOR</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <div style={sectionLabel}>ORCHESTRATOR</div>
+            {savingSettings && <span style={{ fontSize: '10px', color: '#8257e5', fontWeight: 700 }}>SAVING…</span>}
+          </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <span style={{ fontSize: '13px', color: '#888', flex: 1 }}>Max Synchronous Tool Iterations</span>
             <input 
               type="number" 
               value={maxSyncIters} 
               onChange={e => setMaxSyncIters(e.target.value)}
-              onBlur={e => handleSaveSettings(e.target.value)}
+              onBlur={e => void persistSettings({ max_sync_tool_iterations: e.target.value })}
               min="1" max="10"
               style={{ ...infoValue, width: '60px', textAlign: 'center', opacity: savingSettings ? 0.5 : 1, padding: '10px 0' }}
             />
           </div>
           <div style={{ fontSize: '11px', color: '#555', marginTop: '6px' }}>
             Limits how many times the model can independently recurse tools on a single message.
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={automaticTaskGeneration}
+                onChange={e => {
+                  const checked = e.target.checked;
+                  setAutomaticTaskGeneration(checked);
+                  void persistSettings({ automatic_task_generation: checked });
+                }}
+              />
+              <span>
+                Automatically generate tasks
+                <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
+                  Lets the chat model spawn background research and implementation tasks on its own. Default is off for quieter testing.
+                </div>
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={testingMode}
+                onChange={e => {
+                  const checked = e.target.checked;
+                  setTestingMode(checked);
+                  void persistSettings({ testing_mode: checked });
+                }}
+              />
+              <span>
+                Testing mode
+                <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
+                  Suppresses autonomous idle task generation so you can run focused evaluations without extra noise.
+                </div>
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={replayPendingOnStartup}
+                onChange={e => {
+                  const checked = e.target.checked;
+                  setReplayPendingOnStartup(checked);
+                  void persistSettings({ replay_pending_tasks_on_startup: checked });
+                }}
+              />
+              <span>
+                Replay pending backlog on startup
+                <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
+                  Re-enqueues old pending tasks after a reboot. Leave this off unless you intentionally want to resume backlog work.
+                </div>
+              </span>
+            </label>
           </div>
         </div>
 
@@ -332,8 +516,8 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
             </button>
           </div>
         </div>
-      </motion.div>
-    </motion.div>
+      </MotionDiv>
+    </MotionDiv>
   );
 };
 
@@ -411,7 +595,9 @@ function App() {
   const fetchGenRef = useRef(0);       // generation counter for stale-poll rejection
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
   const [rebooting, setRebooting] = useState(false);
-  const [backendLogs, setBackendLogs] = useState([]);
+  const [telemetry, setTelemetry] = useState(null);
+  const [providerTelemetry, setProviderTelemetry] = useState({});
+  const [dashboard, setDashboard] = useState(null);
   const API = 'http://localhost:8000';
 
   const [archivedTasks, setArchivedTasks] = useState(() => {
@@ -426,17 +612,29 @@ function App() {
     });
   }, []);
 
+  const [tiers, setTiers] = useState({ Strong: 'unknown', Weak: 'unknown' });
+  const [showCloudModal, setShowCloudModal] = useState(false);
+
   const fetchWorkerStatus = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/admin/worker/status`);
-      setWorkerStatus(res.data.status);
+      setWorkerStatus(res.data.status.worker);
+      setTiers(res.data.status.tiers);
+      if (res.data.status.tiers.Strong === 'error' && !localStorage.getItem('skipCloudWarning')) {
+        setShowCloudModal(true);
+      }
     } catch (e) { console.error('Failed to fetch worker status', e); }
   }, [API]);
 
   useEffect(() => {
-    fetchWorkerStatus();
+    const timer = setTimeout(() => {
+      void fetchWorkerStatus();
+    }, 0);
     const interval = setInterval(fetchWorkerStatus, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
   }, [fetchWorkerStatus]);
 
   const handleReboot = async () => {
@@ -490,10 +688,13 @@ function App() {
     const gen = ++fetchGenRef.current;
 
     try {
-      const [tasksRes, msgsRes, sessionsRes] = await Promise.all([
+      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes] = await Promise.all([
         axios.get(`${API}/tasks`),
         axios.get(`${API}/messages?session_id=${sessionId}`),
-        axios.get(`${API}/sessions`)
+        axios.get(`${API}/sessions`),
+        axios.get(`${API}/admin/telemetry?limit=8`),
+        axios.get(`${API}/admin/providers/telemetry`),
+        axios.get(`${API}/admin/dashboard?limit=6`)
       ]);
 
       // If a newer fetch was launched while we were awaiting, discard this result
@@ -504,6 +705,9 @@ function App() {
       const sessions = sessionsRes.data;
       if (!sessions.includes(sessionId)) sessions.push(sessionId);
       setSessionList(sessions);
+      setTelemetry(telemetryRes.data.telemetry);
+      setProviderTelemetry(providerTelemetryRes.data.providers || {});
+      setDashboard(dashboardRes.data.dashboard || null);
       setApiStatus('ok');
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
@@ -603,7 +807,6 @@ function App() {
     
     const roots = [];
     // Second pass: link children with cycle detection
-    const visited = new Set();
     filteredTasks.forEach(t => {
       if (t.parent_id && map[t.parent_id] && t.parent_id !== t.id) {
         map[t.parent_id].children.push(map[t.id]);
@@ -638,22 +841,50 @@ function App() {
 
   return (
     <div className="app-container" style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
+      {showCloudModal && (
+        <div className="modal-overlay">
+          <div className="modal-content glass">
+            <h2>☁️ Cloud Inference Offline</h2>
+            <p>The <b>Strong</b> model tier (OpenRouter) is currently unreachable or missing an API key.</p>
+            <div className="modal-actions">
+              <button 
+                className="secondary" 
+                onClick={() => {
+                  localStorage.setItem('skipCloudWarning', 'true');
+                  setShowCloudModal(false);
+                }}
+              >
+                Operate Local-Only
+              </button>
+              <button 
+                className="primary" 
+                onClick={() => {
+                  setShowCloudModal(false);
+                  setActiveNav('settings');
+                }}
+              >
+                Configure Cloud
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── COLUMN 1: ICON NAV ─────────────────────────────────────────────── */}
       <div style={{ width: '72px', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px 0', gap: '8px' }}>
         {/* Logo */}
-        <motion.div
+        <MotionDiv
           animate={{ rotate: 360 }}
           transition={{ duration: 20, repeat: Infinity, ease: 'linear' }}
           style={{ width: '38px', height: '38px', borderRadius: '11px', background: 'linear-gradient(135deg, #8257e5, #5e33ba)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '16px', boxShadow: '0 0 18px rgba(130,87,229,0.3)' }}
         >
           <div style={{ width: '12px', height: '12px', background: 'white', borderRadius: '2px', transform: 'rotate(45deg)' }} />
-        </motion.div>
+        </MotionDiv>
 
         {navItems.map(({ id, Icon, label }) => (
           <NavIcon
             key={id}
-            Icon={Icon}
+            icon={Icon}
             label={label}
             active={activeNav === id}
             onClick={() => setActiveNav(id)}
@@ -665,7 +896,7 @@ function App() {
 
         {/* Force refresh */}
         <NavIcon
-          Icon={RefreshCw}
+          icon={RefreshCw}
           label="Refresh"
           active={false}
           onClick={fetchData}
@@ -673,7 +904,7 @@ function App() {
 
         {/* Settings */}
         <NavIcon
-          Icon={Cpu}
+          icon={Cpu}
           label="Settings"
           active={showSettings}
           onClick={() => setShowSettings(true)}
@@ -776,7 +1007,7 @@ function App() {
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <AnimatePresence initial={false}>
             {messages.map((msg, i) => (
-              <motion.div
+              <MotionDiv
                 key={msg.id || i}
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -804,11 +1035,11 @@ function App() {
                 <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.65' }}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                 </div>
-              </motion.div>
+              </MotionDiv>
             ))}
 
             {messages.length === 0 && !isSending && (
-              <motion.div
+              <MotionDiv
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 style={{ textAlign: 'center', color: '#333', marginTop: 'auto', marginBottom: 'auto', padding: '48px 32px' }}
@@ -816,11 +1047,11 @@ function App() {
                 <Zap size={32} color="#2a2a35" style={{ margin: '0 auto 16px' }} />
                 <div style={{ fontSize: '15px', fontWeight: 600, color: '#3d3d4d', marginBottom: '6px' }}>Swarm at rest</div>
                 <div style={{ fontSize: '13px', color: '#2d2d38' }}>Describe a goal to initialize the swarm</div>
-              </motion.div>
+              </MotionDiv>
             )}
 
             {isSending && (
-              <motion.div
+              <MotionDiv
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 0.7 }}
                 style={{ alignSelf: 'flex-start', background: '#1c1c22', padding: '12px 18px', borderRadius: '16px 16px 16px 4px', color: '#888', fontSize: '13px', fontStyle: 'italic', border: '1px solid rgba(255,255,255,0.05)' }}
@@ -828,15 +1059,15 @@ function App() {
                 <span style={{ display: 'inline-flex', gap: '4px', alignItems: 'center' }}>
                   Swarm is formulating
                   {[0,1,2].map(i => (
-                    <motion.span
+                    <MotionSpan
                       key={i}
                       animate={{ opacity: [0.2, 1, 0.2] }}
                       transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
                       style={{ fontSize: '18px', lineHeight: 0.6 }}
-                    >·</motion.span>
+                    >·</MotionSpan>
                   ))}
                 </span>
-              </motion.div>
+              </MotionDiv>
             )}
           </AnimatePresence>
           <div ref={messagesEndRef} />
@@ -877,13 +1108,13 @@ function App() {
           <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#edeeef' }}>Active Swarm</h2>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
             {runningCount > 0 && (
-              <motion.span
+              <MotionSpan
                 animate={{ opacity: [1, 0.5, 1] }}
                 transition={{ duration: 2, repeat: Infinity }}
                 style={{ fontSize: '11px', color: '#00d9ff', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}
               >
                 <Activity size={11} /> {runningCount} RUNNING
-              </motion.span>
+              </MotionSpan>
             )}
             <span style={{ fontSize: '11px', color: '#00f294', fontWeight: 700 }}>{completedCount} DONE</span>
           </div>
@@ -915,6 +1146,73 @@ function App() {
             <TelemetryCell value={runningCount || '—'} label="ACTIVE" />
             <TelemetryCell value={totalCount || '—'} label="TOTAL" />
           </div>
+          {telemetry && (
+            <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+                <TelemetryCell value={telemetry.overview.weak_eval_runs || '—'} label="WEAK EVAL" />
+                <TelemetryCell value={telemetry.overview.unique_experiments || '—'} label="EXPERIMENTS" />
+                <TelemetryCell value={`${tiers.Weak}/${tiers.Strong}`} label="WEAK/STRONG" />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {telemetry.rollups.slice(0, 3).map((rollup) => (
+                  <div key={rollup.metric_name} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
+                    <span style={{ color: '#7f8091', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{rollup.metric_name}</span>
+                    <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                      {rollup.avg_value} avg · {rollup.count}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {Object.keys(providerTelemetry).length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+                  <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>TRANSPORT</div>
+                  {Object.entries(providerTelemetry).slice(0, 2).map(([key, stats]) => (
+                    <div key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
+                      <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{key}</span>
+                      <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                        {stats.rate_limit_hits} rl · {stats.avg_wait_ms}ms wait
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {dashboard && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '6px' }}>
+                  <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>BOOTSTRAP</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+                    <TelemetryCell
+                      value={dashboard.ignition?.detected ? 'LIVE' : 'NO'}
+                      label="IGNITION"
+                    />
+                    <TelemetryCell value={dashboard.promotion_counts?.weak ?? '—'} label="WEAK WINS" />
+                    <TelemetryCell value={dashboard.promotion_counts?.strong ?? '—'} label="STRONG WINS" />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
+                    <TelemetryCell value={dashboard.failure_pressure?.recent_failures ?? '—'} label="FAIL PRESSURE" />
+                    <TelemetryCell value={dashboard.failure_pressure?.recent_research_failures ?? '—'} label="RESEARCH FAIL" />
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
+                      <span style={{ color: '#7f8091', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Current promoted</span>
+                      <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {dashboard.current_promoted_candidate || '—'}
+                      </span>
+                    </div>
+                    {dashboard.reports?.slice(0, 3).map((report) => (
+                      <div key={report.candidate_change_id} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '11px' }}>
+                        <span style={{ color: '#7f8091', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {report.proposal_metadata?.proposer_tier || 'unknown'} · {report.candidate_change_id}
+                        </span>
+                        <span style={{ color: report.recommendation === 'promote' ? '#00f294' : '#ffb84d', fontFamily: "'JetBrains Mono', monospace" }}>
+                          {report.recommendation}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </section>
 
@@ -933,7 +1231,9 @@ function App() {
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
-const NavIcon = ({ Icon, label, active, onClick }) => (
+const NavIcon = ({ icon, label, active, onClick }) => {
+  const IconComponent = icon;
+  return (
   <button
     onClick={onClick}
     title={label}
@@ -946,9 +1246,10 @@ const NavIcon = ({ Icon, label, active, onClick }) => (
       transition: 'all 0.15s'
     }}
   >
-    <Icon size={20} />
+    <IconComponent size={20} />
   </button>
-);
+  );
+};
 
 const TelemetryCell = ({ value, label }) => (
   <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>

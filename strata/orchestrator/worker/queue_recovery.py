@@ -4,28 +4,71 @@
 """
 
 import logging
+from datetime import datetime, timedelta
 from strata.storage.models import TaskModel, TaskState
 
 logger = logging.getLogger(__name__)
 
-async def recover_tasks(storage_factory, queue):
+async def recover_tasks(
+    storage_factory,
+    queue,
+    *,
+    recover_orphaned_running: bool = True,
+    requeue_existing_pending: bool = False,
+    pending_task_max_age_minutes: int | None = None,
+):
     """
-    @summary Sweep for tasks stuck in WORKING and reset to PENDING.
+    @summary Sweep for tasks stuck in WORKING and optionally reload existing PENDING tasks.
+
+    The default startup behavior is intentionally conservative: tasks that were
+    actively running when the process died are recovered, but stale pending
+    backlog is not blindly replayed unless explicitly enabled.
     """
     storage = storage_factory()
     logger.info("Starting recovery sweep for orphaned tasks...")
     try:
+        if not recover_orphaned_running and not requeue_existing_pending:
+            logger.info("Startup recovery disabled; leaving existing queue state untouched.")
+            return
+
         orphaned = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.WORKING).all()
         logger.info(f"Scanning for orphaned tasks, found {len(orphaned)}")
+        recovered_orphaned = []
         for task in orphaned:
-            logger.warning(f"Re-queueing orphaned runtime task: {task.task_id}")
             task.state = TaskState.PENDING
+            if recover_orphaned_running:
+                logger.warning(f"Re-queueing orphaned runtime task: {task.task_id}")
+                recovered_orphaned.append(task)
         storage.commit()
-        
-        # Repopulate the active queue with all PENDING tasks
-        queued = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.PENDING).all()
-        logger.info(f"Found {len(queued)} pending tasks to reload.")
+        if orphaned and not recover_orphaned_running:
+            logger.info("Testing/startup guard active; orphaned running tasks were reset to pending without requeue.")
+
+        for task in recovered_orphaned:
+            queue.put_nowait(task.task_id)
+            logger.info(f"Recovered runtime task into active queue: {task.task_id}")
+
+        if not requeue_existing_pending:
+            logger.info("Skipping reload of pre-existing pending tasks on startup.")
+            logger.info("Recovery sweep complete!")
+            return
+
+        queued_query = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.PENDING)
+        queued = queued_query.all()
+        if pending_task_max_age_minutes:
+            cutoff = datetime.utcnow() - timedelta(minutes=pending_task_max_age_minutes)
+            queued = [task for task in queued if task.updated_at and task.updated_at >= cutoff]
+            logger.info(
+                "Pending startup replay is enabled with an age cutoff of %s minutes; %s tasks qualify.",
+                pending_task_max_age_minutes,
+                len(queued),
+            )
+        else:
+            logger.info(f"Pending startup replay is enabled; found {len(queued)} tasks to reload.")
+
+        recovered_ids = {task.task_id for task in recovered_orphaned}
         for task in queued:
+            if task.task_id in recovered_ids:
+                continue
             queue.put_nowait(task.task_id)
             logger.info(f"Loaded existing queued task: {task.task_id}")
         logger.info("Recovery sweep complete!")

@@ -11,3 +11,4 @@ strata/runtime/
 strata/experimental/candidates/
 strata/attic/
 .venv/
+.env.local

@@ -4,6 +4,10 @@
 @owns structural validation, boundary validation, scorecard generation
 @does_not_own code execution (sandboxing)
 @key_exports EvaluationPipeline
+
+This module exists because Strata does not trust model self-assessment.
+Candidates are supposed to earn validity by surviving explicit downstream checks,
+so weak-model improvement can be measured instead of guessed.
 """
 
 import ast

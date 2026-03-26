@@ -1,27 +1,184 @@
 # Strata
 
-Strata is a powerful agentic task orchestration platform designed for managing complex, recursive agent swarms.
+Strata is an agent orchestration prototype with three main pieces:
 
-## Features
+- A FastAPI backend that exposes task, message, admin, and streaming endpoints.
+- A background worker that routes tasks through research, decomposition, and implementation flows.
+- A React/Vite dashboard in `strata_ui/` for chat, task visibility, and admin controls.
 
-- **Recursive Task Hierarchies:** Break down complex goals into nested subtasks and execution attempts.
-- **Temporal Grouping:** Automatically organizes tasks into **Past**, **Present**, and **Future** strata for clear focus.
-- **FastAPI Backend:** High-performance API with SQLite WAL support for reliable concurrent access.
-- **React + Framer Motion UI:** A premium, dynamic dashboard for real-time swarm visualization.
+The project philosophy and bootstrap strategy are documented in [project-philosophy.md](/Users/jon/Projects/strata/docs/spec/project-philosophy.md). That document is the best explanation of what Strata is trying to accomplish and why the repository is structured the way it is.
+
+## Why This Exists
+
+Strata is built around a simple thesis:
+
+- small local models can be made more useful if the system supplies rigor, memory, decomposition, and validation
+- the goal is not just to assist those models, but to turn that refined capability into an agent that can do useful work on modest local resources
+
+This is why the codebase emphasizes explicit task structure, external state, evaluation, and telemetry. The project is trying to move intelligence out of hidden prompt tricks and into the surrounding system.
+
+## Repository Layout
+
+- `strata/api/`: FastAPI app and hot-reload/promotion endpoints.
+- `strata/orchestrator/`: background worker and task execution pipeline.
+- `strata/storage/`: SQLAlchemy models, repositories, and storage service.
+- `strata/memory/`: semantic memory backed by ChromaDB.
+- `strata/models/`: model adapter, provider, and registry logic.
+- `strata_ui/`: active frontend for the dashboard.
+- `docs/`: design notes and agent-specific documentation.
+- `.knowledge/`: generated research artifacts and project memory.
+
+## Runtime Architecture
+
+1. Start the API.
+2. API startup initializes the database schema and starts the `BackgroundWorker`.
+3. The UI talks to the API over REST and subscribes to `/events` for server-sent events.
+4. Background tasks are persisted in SQLite and executed asynchronously by the worker.
+
+By default the backend stores relational state in `strata/runtime/strata.db` and semantic memory in `memory/vector_db/`.
+
+## Weak/Strong Bootstrap Loop
+
+The `weak` and `strong` model tiers are intentional. They support the project’s improvement loop:
+
+1. use a strong model inside the harness to propose or implement a change
+2. evaluate the weak model with that change
+3. inspect telemetry and downstream results
+4. refine the system
+5. repeat until the weak tier can make meaningful improvements itself
+
+That separation is a core part of the design, not just a configuration detail.
+
+## Requirements
+
+The Python backend currently does not have a checked-in `requirements.txt` or `pyproject.toml`, so environment setup is manual. From the codebase, the backend expects at least these libraries to be available:
+
+- `fastapi`
+- `uvicorn`
+- `sqlalchemy`
+- `pydantic`
+- `httpx`
+- `chromadb`
+
+The UI dependencies are managed in `strata_ui/package.json`.
 
 ## Getting Started
 
-1.  **Backend:**
-    ```bash
-    PYTHONPATH=. ./venv/bin/python strata/api/main.py
-    ```
-2.  **Orchestrator:**
-    ```bash
-    PYTHONPATH=. ./venv/bin/python strata/orchestrator/background.py
-    ```
-3.  **Frontend:**
-    ```bash
-    npm run dev --prefix strata_ui
-    ```
+### Backend
 
-Navigate to `http://localhost:5173` to view the Strata dashboard.
+Run the API from the repository root:
+
+```bash
+PYTHONPATH=. ./venv/bin/python strata/api/main.py
+```
+
+The API listens on `http://localhost:8000`.
+
+### Worker
+
+The background worker is created and started by the API lifespan hook. There is not a separate worker process to launch for the current architecture.
+
+Important startup constraint:
+
+- The worker performs a preflight model check on startup.
+- The weak/local model tier is currently mandatory.
+- If the local model endpoint is not reachable, the API startup will fail.
+
+### Frontend
+
+Run the active UI:
+
+```bash
+npm run dev --prefix strata_ui
+```
+
+Open `http://localhost:5173`.
+
+Running `npm run dev` from the repository root now delegates to `strata_ui/`, which is the single active frontend. The root Vite scaffold is legacy residue and should not be treated as a separate product surface.
+
+## Model Configuration
+
+The default registry is defined in [strata/models/registry.py](/Users/jon/Projects/strata/strata/models/registry.py):
+
+- `strong`: cloud model via OpenRouter, using `OPENROUTER_API_KEY`
+- `weak`: local model via LM Studio at `http://127.0.0.1:1234/v1/chat/completions`
+
+The UI also exposes registry and settings controls through the admin panel.
+
+Each model endpoint can also carry pacing controls so the harness can respect cloud rate limits or be gentler on local hardware:
+
+- `requests_per_minute`
+- `max_concurrency`
+- `min_interval_ms`
+
+These are enforced in the provider transport layer, so they apply regardless of which orchestrator path ends up calling the model.
+
+The admin API also exposes bootstrap-oriented registry presets, including Cerebras `zai-glm-4.7`, Google-hosted `gemma-3-27b-it`, and `openrouter/free`.
+
+If you are using one of the cloud presets, these are the direct key pages:
+
+- Cerebras: [cloud.cerebras.ai](https://cloud.cerebras.ai/)
+- Google AI Studio: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+- OpenRouter: [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)
+
+## Main API Surface
+
+Key endpoints implemented in [strata/api/main.py](/Users/jon/Projects/strata/strata/api/main.py):
+
+- `GET /tasks`
+- `GET /messages`
+- `GET /sessions`
+- `POST /chat`
+- `POST /tasks`
+- `POST /tasks/{task_id}/intervene`
+- `GET /events`
+- `GET/POST /admin/settings`
+- `GET/POST /admin/registry`
+- `GET /admin/health`
+
+There are additional admin endpoints for reboot, promotion, rollback, worker control, and database reset.
+
+## Evaluation Loop
+
+Strata now has two eval paths for the weak-tier bootstrap loop:
+
+- freeform benchmark prompts, judged by the strong tier
+- structured eval suites for dataset-style exact-match or multiple-choice checks
+
+The main eval endpoints are:
+
+- `POST /admin/benchmark/run`
+- `POST /admin/evals/run`
+- `POST /admin/experiments/benchmark`
+- `POST /admin/experiments/full_eval`
+- `GET /admin/experiments/compare`
+- `GET /admin/experiments/report`
+- `GET/POST /admin/evals/config`
+- `POST /admin/experiments/promote`
+- `POST /admin/experiments/bootstrap_cycle`
+- `GET /admin/experiments/secondary_ignition`
+- `GET /admin/experiments/history`
+- `POST /admin/experiments/tool_cycle`
+
+`/admin/experiments/full_eval` persists an exact sampled report for a candidate change, including the underlying benchmark and structured-eval runs. That gives the harness a concrete promotion record to inspect later instead of relying only on blended historical metric averages.
+
+The eval harness prompt/context is now configurable through `/admin/evals/config`, so a strong tier can propose prompt/context changes, evaluate them as a candidate, and promote the winning configuration through `/admin/experiments/promote` without requiring a code edit for each iteration.
+
+`/admin/experiments/bootstrap_cycle` can now ask both the weak and strong tiers to propose small eval-harness changes in parallel, evaluate them with provenance, and auto-promote any winner into the shared active harness configuration. Promotions now require repeated sample wins by default instead of a single pass. `GET /admin/experiments/history` exposes recent experiment reports and promotion readiness, while `GET /admin/experiments/secondary_ignition` reports whether a weak-originated promoted change has produced a measurable weak-tier gain.
+
+For a first bounded code-change lane, `/admin/experiments/tool_cycle` lets a proposer tier generate a dynamic tool under `strata/tools/`, run it through the existing tool promotion pipeline, and persist the outcome as a provenance-tagged experiment report.
+
+## Current Caveats
+
+These are the main current constraints:
+
+- The Python backend still has no checked-in dependency manifest.
+- Provider presets and free-tier availability are operational assumptions and may change over time.
+- The UI build currently emits a large-chunk warning, though the build succeeds.
+
+## Recommended Next Step
+
+The highest-leverage cleanup after this documentation pass would be to either:
+
+- add a real Python dependency manifest, or
+- document the intended backend environment in more detail if the setup is intentionally ad hoc for now.

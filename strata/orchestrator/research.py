@@ -103,11 +103,20 @@ class ResearchModule:
             {
                 "role": "system",
                 "content": f"""You are an Expert Research Agent building a persistent knowledge library.
-Your primary goal is to decompose the user's research task and iteratively gather data using your tools (search_web and read_file).
-As you find complete atomic findings, you MUST use `write_library_file` to save them locally into the `.knowledge/` memory store.
-Enforce a clean library structure: small, atomic files. ALWAYS include YAML metadata (title, subjects, tags) at the top of your files, and use [[Wikilinks]] to reference other documents you create.
-When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the loop.
-You are currently focused heavily on: {target_scope.upper()} scope."""
+Your primary goal is to decompose the user's research task and iteratively gather data.
+
+[CRITICAL - TOOL USE]
+To gather information or save data, you MUST use the structured tool-calling format. 
+If you simply say "I will call a tool" in plain text without a structured tool call, the system will reject your response.
+Your current tools: search_web, read_file, write_library_file. 
+
+[LIBRARY STRUCTURE]
+- As you find complete atomic findings, you MUST use `write_library_file` to save them locally into the `.knowledge/` memory store.
+- Enforce a clean library structure: small, atomic files. ALWAYS include YAML metadata (title, subjects, tags) at the top.
+- Use [[Wikilinks]] to cross-reference other documents you create.
+
+When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
+Focus area: {target_scope.upper()} scope."""
             },
             {
                 "role": "user",
@@ -128,6 +137,10 @@ You are currently focused heavily on: {target_scope.upper()} scope."""
             print(f"Research Loop Iteration {iteration+1}/{max_iterations}")
             response = await self.model.chat(messages, tools=RESEARCH_TOOLS)
             
+            if response.get("status") == "error":
+                err_msg = response.get("message", "Unknown model adapter error.")
+                raise Exception(f"Research loop aborted: Model adapter returned error: {err_msg}")
+
             tool_calls = response.get("tool_calls")
             if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
                 call = tool_calls[0]

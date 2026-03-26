@@ -1,13 +1,17 @@
 """
 @module orchestrator.worker.telemetry
 @purpose Periodically summarize model performance intelligence and fitness signals.
+
+Telemetry is a core control surface in Strata, not just a debugging aid.
+The system uses recorded outcomes to decide whether harness changes are
+actually helping weak models become more capable over time.
 """
 
 import os
 import logging
 from datetime import datetime
-from sqlalchemy import func, select
-from strata.storage.models import ModelTelemetry, AttemptModel, AttemptOutcome, TaskModel, TaskType, MetricModel
+from sqlalchemy import func, desc
+from strata.storage.models import ModelTelemetry, AttemptModel, AttemptOutcome, TaskModel, TaskType, TaskState, MetricModel
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +80,7 @@ async def synthesize_model_performance(storage_factory):
         # Decomposition success rate (Successes in tasks spawned from DECOMP)
         decomp_success = (
             storage.session.query(func.count(TaskModel.task_id))
-            .filter(TaskModel.type == TaskType.DECOMP, TaskModel.state == "complete")
+            .filter(TaskModel.type == TaskType.DECOMP, TaskModel.state == TaskState.COMPLETE)
             .scalar() or 0
         )
         
@@ -107,3 +111,135 @@ async def synthesize_model_performance(storage_factory):
         logger.error(f"Failed to synthesize model performance: {e}")
     finally:
         storage.session.close()
+
+
+def build_telemetry_snapshot(storage, limit: int = 25) -> dict:
+    """
+    @summary Return a compact snapshot of the metrics that drive bootstrap decisions.
+    @notes This is intentionally shaped for both the UI and agent-side introspection.
+    """
+    total_attempts = storage.session.query(func.count(AttemptModel.attempt_id)).scalar() or 0
+    succeeded_attempts = (
+        storage.session.query(func.count(AttemptModel.attempt_id))
+        .filter(AttemptModel.outcome == AttemptOutcome.SUCCEEDED)
+        .scalar()
+        or 0
+    )
+    failed_attempts = (
+        storage.session.query(func.count(AttemptModel.attempt_id))
+        .filter(AttemptModel.outcome == AttemptOutcome.FAILED)
+        .scalar()
+        or 0
+    )
+    weak_eval_runs = (
+        storage.session.query(func.count(MetricModel.id))
+        .filter(MetricModel.run_mode == "weak_eval")
+        .scalar()
+        or 0
+    )
+    unique_experiments = (
+        storage.session.query(func.count(func.distinct(MetricModel.candidate_change_id)))
+        .filter(MetricModel.candidate_change_id.isnot(None))
+        .scalar()
+        or 0
+    )
+
+    success_rate = (succeeded_attempts / total_attempts * 100.0) if total_attempts else 0.0
+
+    rollups = (
+        storage.session.query(
+            MetricModel.metric_name,
+            func.count(MetricModel.id).label("count"),
+            func.avg(MetricModel.value).label("avg_value"),
+            func.max(MetricModel.timestamp).label("last_seen"),
+        )
+        .group_by(MetricModel.metric_name)
+        .order_by(desc("last_seen"))
+        .all()
+    )
+
+    recent_metrics = (
+        storage.session.query(MetricModel)
+        .order_by(MetricModel.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+
+    experiment_rollups = (
+        storage.session.query(
+            MetricModel.candidate_change_id,
+            func.count(MetricModel.id).label("count"),
+            func.avg(MetricModel.value).label("avg_value"),
+            func.max(MetricModel.timestamp).label("last_seen"),
+        )
+        .filter(MetricModel.candidate_change_id.isnot(None))
+        .group_by(MetricModel.candidate_change_id)
+        .order_by(desc("last_seen"))
+        .limit(10)
+        .all()
+    )
+
+    weak_metric_rollups = (
+        storage.session.query(
+            MetricModel.metric_name,
+            func.count(MetricModel.id).label("count"),
+            func.avg(MetricModel.value).label("avg_value"),
+        )
+        .filter(MetricModel.execution_context == "weak")
+        .group_by(MetricModel.metric_name)
+        .order_by(desc("count"))
+        .all()
+    )
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "overview": {
+            "total_attempts": total_attempts,
+            "succeeded_attempts": succeeded_attempts,
+            "failed_attempts": failed_attempts,
+            "success_rate": round(success_rate, 2),
+            "weak_eval_runs": weak_eval_runs,
+            "unique_experiments": unique_experiments,
+        },
+        "rollups": [
+            {
+                "metric_name": row.metric_name,
+                "count": int(row.count),
+                "avg_value": round(float(row.avg_value or 0.0), 4),
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+            }
+            for row in rollups
+        ],
+        "weak_rollups": [
+            {
+                "metric_name": row.metric_name,
+                "count": int(row.count),
+                "avg_value": round(float(row.avg_value or 0.0), 4),
+            }
+            for row in weak_metric_rollups
+        ],
+        "experiments": [
+            {
+                "candidate_change_id": row.candidate_change_id,
+                "count": int(row.count),
+                "avg_value": round(float(row.avg_value or 0.0), 4),
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+            }
+            for row in experiment_rollups
+        ],
+        "recent_metrics": [
+            {
+                "id": metric.id,
+                "timestamp": metric.timestamp.isoformat() if metric.timestamp else None,
+                "metric_name": metric.metric_name,
+                "value": metric.value,
+                "model_id": metric.model_id,
+                "task_type": metric.task_type,
+                "run_mode": metric.run_mode,
+                "execution_context": metric.execution_context,
+                "candidate_change_id": metric.candidate_change_id,
+                "details": metric.details or {},
+            }
+            for metric in recent_metrics
+        ],
+    }

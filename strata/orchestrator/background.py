@@ -2,11 +2,16 @@
 @module orchestrator.background
 @purpose Thin control loop for the Strata background worker.
 @owns orchestrator.worker.*
+
+This loop exists to keep execution discipline outside the model itself.
+Instead of asking one model call to be reliable, Strata wraps work in
+routing, retries, evaluation, telemetry, and resolution policies that a
+small local model can benefit from.
 """
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from strata.storage.models import TaskModel, TaskState, AttemptOutcome
 from strata.orchestrator.worker.queue_recovery import recover_tasks
@@ -24,10 +29,11 @@ class BackgroundWorker:
     @summary Managed background loop for asynchronous task execution.
     """
 
-    def __init__(self, storage_factory, model_adapter, memory=None):
+    def __init__(self, storage_factory, model_adapter, memory=None, settings_provider: Optional[Callable[[], dict]] = None):
         self._storage_factory = storage_factory
         self._model = model_adapter
         self._memory = memory
+        self._settings_provider = settings_provider or (lambda: {})
         self._queue: asyncio.Queue = asyncio.Queue()
         self._running_task: Optional[asyncio.Task] = None
         self._on_update_callback = None
@@ -35,18 +41,64 @@ class BackgroundWorker:
         self._paused = False
         self._current_process: Optional[asyncio.Task] = None
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
+        self._tier_health = {"Strong": "unknown", "Weak": "unknown"}
+
+    def _settings(self) -> dict:
+        try:
+            return dict(self._settings_provider() or {})
+        except Exception as exc:
+            logger.error(f"Failed to read worker settings; using defaults. ({exc})")
+            return {}
 
     async def start(self):
         if self._running:
             return
             
-        # 1. Start Recovery Sweep
-        await recover_tasks(self._storage_factory, self._queue)
+        # 1. Deep Preflight Model Check (Strong + Weak)
+        logger.info("Performing Deep Preflight Check (Strong + Weak tiers)...")
+        from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+        
+        contexts = [
+            ("Strong", StrongExecutionContext(run_id="preflight")),
+            ("Weak", WeakExecutionContext(run_id="preflight"))
+        ]
+        
+        for name, ctx in contexts:
+            logger.info(f"Checking {name} model tier...")
+            self._model.bind_execution_context(ctx)
+            try:
+                # Ping with a simple no-op (Max 5s timeout)
+                # If it's a Cloud transport without an API key, bind_execution_context may throw
+                # or the chat call will throw.
+                await self._model.chat([{"role": "user", "content": "ping"}], timeout=5.0)
+                logger.info(f"  -> {name} tier is reachable.")
+                self._tier_health[name] = "ok"
+            except Exception as e:
+                # Special Case: If it's the Strong tier failing because of a missing API key,
+                # we don't necessarily want to HARD fail if the Weak tier (local) is alive
+                # and the user hasn't provided a key yet. BUT we should log it loudly.
+                logger.error(f"  -> {name} tier FAILED check: {e}")
+                self._tier_health[name] = "error"
+                if name == "Weak":
+                    # Weak (Local) is the mandatory baseline for this dev session.
+                    raise Exception(f"Worker cannot start: Local (Weak) model is unreachable. ({e})")
+                else:
+                    # Strong (Cloud) is optional but critical for high-level reasoning.
+                    logger.warning(f"Worker proceeding without {name} model tier (unreachable/misconfigured).")
 
-        # 2. Start Loop
+        # 2. Start Recovery Sweep
+        settings = self._settings()
+        await recover_tasks(
+            self._storage_factory,
+            self._queue,
+            recover_orphaned_running=not settings.get("testing_mode", False),
+            requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
+        )
+
+        # 3. Start Loop
         self._running = True
         self._running_task = asyncio.create_task(self._loop(), name="background-worker")
-        logger.info("BackgroundWorker started (Refactored)")
+        logger.info("BackgroundWorker started (Hardened Startup)")
 
     async def stop(self):
         self._running = False
@@ -98,8 +150,13 @@ class BackgroundWorker:
             except asyncio.TimeoutError:
                 idle_ticks += 1
                 if idle_ticks >= 30:
-                    # 3. Idle Policies
-                    await run_idle_tasks(self._storage_factory, self._model, self._queue)
+                    settings = self._settings()
+                    if settings.get("testing_mode", False):
+                        logger.info("Testing mode active; skipping autonomous idle task generation.")
+                    elif settings.get("automatic_task_generation", False):
+                        await run_idle_tasks(self._storage_factory, self._model, self._queue)
+                    else:
+                        logger.info("Automatic task generation disabled; worker remains idle without spawning new tasks.")
                     await synthesize_model_performance(self._storage_factory)
                     idle_ticks = 0
             except asyncio.CancelledError:
@@ -244,6 +301,7 @@ class BackgroundWorker:
         return False
     @property
     def status(self):
-        if not self._running: return "STOPPED"
-        if self._paused: return "PAUSED"
-        return "RUNNING"
+        return {
+            "worker": "STOPPED" if not self._running else ("PAUSED" if self._paused else "RUNNING"),
+            "tiers": self._tier_health
+        }

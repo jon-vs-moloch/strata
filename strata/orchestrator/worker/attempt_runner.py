@@ -39,7 +39,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             attempt.artifacts["model"] = model_adapter.last_response.model
             attempt.artifacts["provider"] = model_adapter.last_response.provider
             
-        task.state = TaskState.COMPLETED
+        task.state = TaskState.COMPLETE
         storage.commit()
         await notify_fn(task.task_id, task.state.value)
         return True, None, attempt

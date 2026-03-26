@@ -2,16 +2,19 @@ import React from 'react';
 import { LayoutDashboard, FileCode, Zap, Search, Settings } from 'lucide-react';
 import Logo from './Logo';
 
-const NavItem = ({ icon: Icon, label, active = false, onClick }) => (
+const NavItem = ({ icon, label, active = false, onClick }) => {
+  const IconComponent = icon;
+  return (
   <div 
     className={`nav-item ${active ? 'active' : ''}`}
     onClick={onClick}
     style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', borderRadius: '8px', color: active ? '#8257e5' : '#9499ad', cursor: 'pointer', transition: 'all 0.2s ease', background: active ? 'rgba(130, 87, 229, 0.1)' : 'transparent', fontWeight: 600 }}
   >
-    <Icon size={20} />
+    <IconComponent size={20} />
     <span>{label}</span>
   </div>
-);
+  );
+};
 
 const Sidebar = ({ activeTab, onTabChange }) => {
   return (

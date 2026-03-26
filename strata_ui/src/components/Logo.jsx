@@ -1,10 +1,12 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 
+const MotionDiv = motion.div;
+
 const Logo = () => {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-      <motion.div 
+      <MotionDiv 
         animate={{ rotate: 360 }}
         transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
         style={{
@@ -25,7 +27,7 @@ const Logo = () => {
           borderRadius: '2px',
           transform: 'rotate(45deg)' 
         }} />
-      </motion.div>
+      </MotionDiv>
       <span style={{ fontWeight: 800, fontSize: '20px', letterSpacing: '-0.5px' }}>
         SHOTGUN <span style={{ color: '#8257e5' }}>TOKENS</span>
       </span>

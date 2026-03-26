@@ -3,6 +3,8 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
 
+const MotionDiv = motion.div;
+
 const STATUS_MAP = {
   complete:            { bg: 'rgba(0,242,148,0.1)',   color: '#00f294', label: 'Completed',   progress: '100%' },
   working:             { bg: 'rgba(0,217,255,0.1)',   color: '#00d9ff', label: 'Working',     progress: '65%'  },
@@ -43,14 +45,14 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
       </button>
       <AnimatePresence>
         {expanded && (
-          <motion.div
+          <MotionDiv
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
           >
             {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} />)}
-          </motion.div>
+          </MotionDiv>
         )}
       </AnimatePresence>
     </div>
@@ -140,7 +142,7 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-      <motion.div
+      <MotionDiv
         layout
         initial={{ opacity: 0, y: 10, scale: 0.97 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -224,11 +226,11 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
             <div style={{ height: '100%', width: style.progress, background: accentColor, borderRadius: '10px' }} />
           </div>
         )}
-      </motion.div>
+      </MotionDiv>
 
       <AnimatePresence>
         {isExpanded && (
-          <motion.div
+          <MotionDiv
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
@@ -248,7 +250,7 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
             <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} />
             <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} />
             <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={false} onArchive={onArchive} />
-          </motion.div>
+          </MotionDiv>
         )}
       </AnimatePresence>
     </div>

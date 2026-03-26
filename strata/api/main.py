@@ -4,10 +4,15 @@
 @owns API routing, JSON serialization, StorageManager lifecycle, background worker
 @does_not_own business logic orchestration, database schema definitions
 @key_exports app
+
+The API is part of the harness, not just a frontend convenience layer.
+It exposes the system's state, controls, and telemetry so both humans and
+agents can inspect what the harness is learning and how it is behaving.
 """
 
 import os
 import logging
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -16,23 +21,42 @@ from typing import List, Dict, Any, Optional, Union
 import json
 import asyncio
 from strata.storage.services.main import StorageManager
-from strata.storage.models import TaskModel, TaskType, TaskState
+from strata.storage.models import TaskModel, TaskType, TaskState, ParameterModel
 from strata.models.adapter import ModelAdapter
 from strata.orchestrator.background import BackgroundWorker
 from strata.api.hotreload import HotReloader
 from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchReport, TaskDecomposition, AttemptResolutionSchema
 from strata.memory.semantic import SemanticMemory
+from strata.orchestrator.worker.telemetry import build_telemetry_snapshot
+from strata.models.providers import get_provider_telemetry_snapshot
+from strata.eval.benchmark import run_benchmark, persist_benchmark_report
+from strata.eval.structured_eval import run_structured_eval, persist_structured_eval_report
+from strata.eval.harness_eval import (
+    EVAL_HARNESS_CONFIG_DESCRIPTION,
+    EVAL_HARNESS_CONFIG_KEY,
+    default_eval_harness_config,
+    get_active_eval_harness_config,
+)
+from strata.experimental.experiment_runner import ExperimentRunner
+from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 import importlib.util
 import glob
+import re
 
 logger = logging.getLogger(__name__)
 
 # ── Module-level singletons ────────────────────────────────────────────────────
 GLOBAL_SETTINGS = {
-    "max_sync_tool_iterations": 3
+    "max_sync_tool_iterations": 3,
+    "automatic_task_generation": False,
+    "testing_mode": False,
+    "replay_pending_tasks_on_startup": False,
 }
+SETTINGS_PARAMETER_KEY = "orchestrator_global_settings"
+SETTINGS_PARAMETER_DESCRIPTION = (
+    "Persisted API/orchestrator settings shared between the UI and the worker startup path."
+)
 
-_storage = StorageManager()
 _model = ModelAdapter()
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _hotreloader = HotReloader(_BASE_DIR)
@@ -40,7 +64,8 @@ _memory = SemanticMemory()
 _worker = BackgroundWorker(
     storage_factory=StorageManager,   # each task gets a fresh session
     model_adapter=_model,
-    memory=_memory
+    memory=_memory,
+    settings_provider=lambda: GLOBAL_SETTINGS,
 )
 _event_queue = asyncio.Queue()
 
@@ -54,7 +79,7 @@ _worker.set_on_update(lambda tid, state: asyncio.create_task(_broadcast_event({"
 # ── True Tool Calling ──────────────────────────────────────────────────────────
 # We no longer use string heuristics. Instead, we provide the LLM with explicitly 
 # defined tools to route tasks or fetch facts.
-CORE_TOOLS = [
+TASK_GENERATION_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -99,6 +124,9 @@ CORE_TOOLS = [
             }
         }
     },
+]
+
+NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -133,11 +161,16 @@ def load_dynamic_tools() -> List[Dict[str, Any]]:
     @summary Hot-loads tool schemas from the tools/ directory.
     @returns list of OpenAI-style tool definitions
     """
+    if GLOBAL_SETTINGS.get("testing_mode", False):
+        logger.info("Testing mode active; suppressing chat tool exposure for cleaner evals.")
+        return []
+
     dynamic_tools = []
     tools_dir = os.path.join(_BASE_DIR, "strata", "tools")
-    
-    # Core tools are always present
-    dynamic_tools.extend(CORE_TOOLS)
+
+    if GLOBAL_SETTINGS.get("automatic_task_generation", False):
+        dynamic_tools.extend(TASK_GENERATION_TOOLS)
+    dynamic_tools.extend(NON_GENERATIVE_TOOLS)
     
     # Load custom tools from the tools/ directory
     for tool_file in glob.glob(os.path.join(tools_dir, "*.py")):
@@ -156,6 +189,259 @@ def load_dynamic_tools() -> List[Dict[str, Any]]:
             logger.error(f"Failed to dynamic load tool from {tool_file}: {e}")
             
     return dynamic_tools
+
+def _normalized_settings(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized = dict(GLOBAL_SETTINGS)
+    if payload:
+        normalized.update(payload)
+    return normalized
+
+def _slugify_candidate_suffix(raw: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    return slug[:48] or "candidate"
+
+def _extract_json_object(raw: str) -> Dict[str, Any]:
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON object found in model output.")
+    return json.loads(match.group(0))
+
+async def _generate_eval_candidate_from_tier(
+    proposer_tier: str,
+    current_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    adapter = ModelAdapter()
+    if proposer_tier == "weak":
+        from strata.schemas.execution import WeakExecutionContext
+        context = WeakExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+    else:
+        from strata.schemas.execution import StrongExecutionContext
+        context = StrongExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+    adapter.bind_execution_context(context)
+
+    proposal_prompt = f"""
+You are proposing one small harness-side change to improve weak-model self-improvement in Strata.
+Return only JSON with this schema:
+{{
+  "candidate_suffix": "short_slug_like_name",
+  "system_prompt": "full replacement system prompt",
+  "context_files": ["README.md", "docs/spec/project-philosophy.md"],
+  "rationale": "short explanation of why this should improve weak-model self-improvement",
+  "expected_gain": "what telemetry should improve"
+}}
+
+Constraints:
+- Propose a small, reversible change to the eval harness only.
+- The change must be safe to apply to future eval runs from either proposer tier.
+- Keep context_files short and repository-local.
+- Optimize for the real goal: the weak model proposing and surviving system improvements.
+
+Current eval harness config:
+{json.dumps(current_config, indent=2)}
+""".strip()
+
+    response = await adapter.chat(
+        [{"role": "user", "content": proposal_prompt}],
+        temperature=0.2 if proposer_tier == "weak" else 0.1,
+    )
+    proposal = _extract_json_object(response.get("content", ""))
+    suffix = _slugify_candidate_suffix(str(proposal.get("candidate_suffix", proposer_tier)))
+    return {
+        "proposer_tier": proposer_tier,
+        "candidate_change_id": f"{proposer_tier}_{suffix}_{int(datetime.now(timezone.utc).timestamp())}",
+        "eval_harness_config_override": {
+            "system_prompt": str(proposal.get("system_prompt") or current_config.get("system_prompt") or ""),
+            "context_files": [str(path) for path in proposal.get("context_files") or current_config.get("context_files") or []],
+        },
+        "rationale": str(proposal.get("rationale") or ""),
+        "expected_gain": str(proposal.get("expected_gain") or ""),
+        "raw_proposal": proposal,
+    }
+
+async def _generate_tool_candidate_from_tier(
+    proposer_tier: str,
+    *,
+    tool_name: str,
+    task_description: str,
+) -> Dict[str, Any]:
+    adapter = ModelAdapter()
+    if proposer_tier == "weak":
+        from strata.schemas.execution import WeakExecutionContext
+        context = WeakExecutionContext(run_id=f"tool_bootstrap_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+    else:
+        from strata.schemas.execution import StrongExecutionContext
+        context = StrongExecutionContext(run_id=f"tool_bootstrap_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+    adapter.bind_execution_context(context)
+    proposal_prompt = f"""
+Create a small, safe Strata dynamic tool.
+Return only JSON with this schema:
+{{
+  "source": "full python source for strata/tools/{tool_name}.experimental.py",
+  "manifest": {{
+    "validator": "python_import_only",
+    "smoke_test": "strata/tools/tests/test_{tool_name}_smoke.py"
+  }},
+  "smoke_test": "full python smoke test source",
+  "rationale": "why this tool helps bootstrap progress",
+  "expected_gain": "what operator-visible gain this tool should unlock"
+}}
+
+Requirements:
+- The tool must define a valid TOOL_SCHEMA.
+- The implementation must be read-only or narrowly scoped.
+- The smoke test should pass with a plain `python` invocation.
+- Task: {task_description}
+""".strip()
+    response = await adapter.chat(
+        [{"role": "user", "content": proposal_prompt}],
+        temperature=0.15 if proposer_tier == "strong" else 0.25,
+    )
+    proposal = _extract_json_object(response.get("content", ""))
+    return {
+        "proposer_tier": proposer_tier,
+        "candidate_change_id": f"{proposer_tier}_{tool_name}_{int(datetime.now(timezone.utc).timestamp())}",
+        "tool_name": tool_name,
+        "source": str(proposal.get("source") or ""),
+        "manifest": proposal.get("manifest") or {},
+        "smoke_test": str(proposal.get("smoke_test") or ""),
+        "rationale": str(proposal.get("rationale") or ""),
+        "expected_gain": str(proposal.get("expected_gain") or ""),
+        "raw_proposal": proposal,
+    }
+
+def _apply_experiment_promotion(storage: StorageManager, candidate_change_id: str, *, force: bool = False) -> Dict[str, Any]:
+    runner = ExperimentRunner(storage, _model)
+    report = runner.get_persisted_experiment_report(candidate_change_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="No persisted experiment report found for candidate_change_id")
+    if report.get("recommendation") != "promote" and not force:
+        raise HTTPException(status_code=400, detail="Experiment report does not recommend promotion")
+
+    promotion_state = storage.parameters.peek_parameter(
+        key="promoted_eval_candidates",
+        default_value={"current": None, "history": []},
+    ) or {"current": None, "history": []}
+    history = list(promotion_state.get("history", []))
+    history.append(
+        {
+            "candidate_change_id": candidate_change_id,
+            "recommendation": report.get("recommendation"),
+            "recorded_at": report.get("recorded_at"),
+            "promoted_at": datetime.now(timezone.utc).isoformat(),
+            "proposal_metadata": report.get("proposal_metadata") or {},
+        }
+    )
+    promotion_state["current"] = candidate_change_id
+    promotion_state["history"] = history
+    storage.parameters.set_parameter(
+        key="promoted_eval_candidates",
+        value=promotion_state,
+        description="Accepted eval-harness candidates and their promotion history.",
+    )
+
+    applied_config = None
+    if report.get("eval_harness_config_override"):
+        applied_config = report["eval_harness_config_override"]
+        storage.parameters.set_parameter(
+            EVAL_HARNESS_CONFIG_KEY,
+            applied_config,
+            description=EVAL_HARNESS_CONFIG_DESCRIPTION,
+        )
+
+    storage.commit()
+    return {
+        "candidate_change_id": candidate_change_id,
+        "recommendation": report.get("recommendation"),
+        "applied_eval_harness_config": applied_config,
+        "proposal_metadata": report.get("proposal_metadata") or {},
+    }
+
+def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[str, Any]:
+    telemetry = build_telemetry_snapshot(storage, limit=limit)
+    provider_telemetry = get_provider_telemetry_snapshot() or (
+        storage.parameters.peek_parameter("provider_transport_telemetry_snapshot", default_value={}) or {}
+    )
+    promoted_state = storage.parameters.peek_parameter(
+        "promoted_eval_candidates",
+        default_value={"current": None, "history": []},
+    ) or {"current": None, "history": []}
+    report_rows = (
+        storage.session.query(ParameterModel)
+        .filter(ParameterModel.key.like("experiment_report:%"))
+        .order_by(ParameterModel.updated_at.desc())
+        .limit(limit)
+        .all()
+    )
+    reports = []
+    weak_promotions = 0
+    strong_promotions = 0
+    for row in report_rows:
+        current = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+        metadata = current.get("proposal_metadata") or {}
+        if current.get("recommendation") == "promote":
+            if metadata.get("proposer_tier") == "weak":
+                weak_promotions += 1
+            elif metadata.get("proposer_tier") == "strong":
+                strong_promotions += 1
+        reports.append(
+            {
+                "candidate_change_id": current.get("candidate_change_id"),
+                "evaluation_kind": current.get("evaluation_kind"),
+                "recommendation": current.get("recommendation"),
+                "recorded_at": current.get("recorded_at"),
+                "proposal_metadata": metadata,
+                "promotion_readiness": current.get("promotion_readiness") or {},
+            }
+        )
+    recent_failures = [
+        metric for metric in telemetry.get("recent_metrics", [])
+        if metric.get("metric_name") == "task_failure"
+    ]
+    research_failures = [
+        metric for metric in recent_failures
+        if metric.get("task_type") == "RESEARCH"
+    ]
+    ignition = None
+    for row in report_rows:
+        current = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+        metadata = current.get("proposal_metadata") or {}
+        deltas = current.get("deltas") or {}
+        weak_gain = (
+            float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
+            or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
+            or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
+        )
+        if metadata.get("proposer_tier") == "weak" and current.get("recommendation") == "promote" and weak_gain:
+            ignition = {
+                "detected": True,
+                "candidate_change_id": current.get("candidate_change_id"),
+                "proposal_metadata": metadata,
+                "recorded_at": current.get("recorded_at"),
+            }
+            break
+    if ignition is None:
+        ignition = {"detected": False}
+    return {
+        "generated_at": telemetry.get("generated_at"),
+        "overview": telemetry.get("overview", {}),
+        "ignition": ignition,
+        "current_promoted_candidate": promoted_state.get("current"),
+        "promotion_counts": {
+            "weak": weak_promotions,
+            "strong": strong_promotions,
+            "total_history": len(promoted_state.get("history", [])),
+        },
+        "failure_pressure": {
+            "recent_failures": len(recent_failures),
+            "recent_research_failures": len(research_failures),
+        },
+        "reports": reports,
+        "provider_telemetry": provider_telemetry,
+    }
 
 async def _perform_web_search(query: str) -> str:
     """Synchronous fallback web search using duckduckgo HTML for simple facts."""
@@ -188,6 +474,17 @@ async def lifespan(app: FastAPI):
     from strata.storage.models import Base
     from strata.storage.services.main import _engine
     Base.metadata.create_all(_engine)
+    storage = StorageManager()
+    try:
+        persisted_settings = storage.parameters.get_parameter(
+            key=SETTINGS_PARAMETER_KEY,
+            default_value=dict(GLOBAL_SETTINGS),
+            description=SETTINGS_PARAMETER_DESCRIPTION,
+        ) or {}
+        GLOBAL_SETTINGS.update(_normalized_settings(persisted_settings))
+        storage.commit()
+    finally:
+        storage.close()
     await _worker.start()
     logger.info("Strata API started")
     yield
@@ -205,7 +502,11 @@ app.add_middleware(
 
 
 def get_storage():
-    return _storage
+    storage = StorageManager()
+    try:
+        yield storage
+    finally:
+        storage.close()
 
 
 # ── Standard endpoints ──────────────────────────────────────────────────────────
@@ -551,18 +852,38 @@ async def test_connectivity():
     }
 
 @app.get("/admin/settings")
-async def get_settings():
-    return {"status": "ok", "settings": GLOBAL_SETTINGS}
+async def get_settings(storage: StorageManager = Depends(get_storage)):
+    persisted_settings = storage.parameters.get_parameter(
+        key=SETTINGS_PARAMETER_KEY,
+        default_value=dict(GLOBAL_SETTINGS),
+        description=SETTINGS_PARAMETER_DESCRIPTION,
+    ) or {}
+    merged_settings = _normalized_settings(persisted_settings)
+    GLOBAL_SETTINGS.update(merged_settings)
+    storage.commit()
+    return {"status": "ok", "settings": merged_settings}
 
 @app.post("/admin/settings")
-async def update_settings(payload: Dict[str, Any]):
-    GLOBAL_SETTINGS.update(payload)
-    return {"status": "ok"}
+async def update_settings(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    merged_settings = _normalized_settings(payload)
+    GLOBAL_SETTINGS.update(merged_settings)
+    storage.parameters.set_parameter(
+        key=SETTINGS_PARAMETER_KEY,
+        value=merged_settings,
+        description=SETTINGS_PARAMETER_DESCRIPTION,
+    )
+    storage.commit()
+    return {"status": "ok", "settings": merged_settings}
 
 @app.get("/admin/registry")
 async def get_registry():
     from strata.models.registry import registry
     return {"status": "ok", "config": registry.to_dict()}
+
+@app.get("/admin/registry/presets")
+async def get_registry_presets():
+    from strata.models.registry import registry
+    return {"status": "ok", "presets": registry.presets()}
 
 @app.post("/admin/registry")
 async def update_registry(payload: Dict[str, Any]):
@@ -576,9 +897,10 @@ async def health_check():
     @summary Deep health check of the orchestrator substrate.
     """
     from sqlalchemy import text
+    storage = StorageManager()
     try:
         # Check DB
-        db = _storage.session
+        db = storage.session
         db.execute(text("SELECT 1"))
         
         # Check Worker
@@ -594,6 +916,451 @@ async def health_check():
             "status": "degraded",
             "error": str(e)
         }
+    finally:
+        storage.close()
+
+@app.get("/admin/telemetry")
+async def get_telemetry(limit: int = 25, storage: StorageManager = Depends(get_storage)):
+    """
+    @summary Return bootstrap-oriented telemetry for the UI and agent introspection.
+    """
+    safe_limit = max(1, min(limit, 100))
+    return {"status": "ok", "telemetry": build_telemetry_snapshot(storage, limit=safe_limit)}
+
+@app.get("/admin/dashboard")
+async def get_dashboard(limit: int = 10, storage: StorageManager = Depends(get_storage)):
+    safe_limit = max(1, min(limit, 50))
+    return {"status": "ok", "dashboard": _build_dashboard_snapshot(storage, limit=safe_limit)}
+
+@app.get("/admin/providers/telemetry")
+async def get_provider_telemetry(storage: StorageManager = Depends(get_storage)):
+    providers = get_provider_telemetry_snapshot()
+    if providers:
+        storage.parameters.set_parameter(
+            key="provider_transport_telemetry_snapshot",
+            value=providers,
+            description="Last persisted provider transport telemetry snapshot."
+        )
+        storage.commit()
+        return {"status": "ok", "providers": providers, "source": "live"}
+
+    persisted = storage.parameters.get_parameter(
+        key="provider_transport_telemetry_snapshot",
+        default_value={},
+        description="Last persisted provider transport telemetry snapshot."
+    ) or {}
+    return {"status": "ok", "providers": persisted, "source": "persisted"}
+
+@app.post("/admin/benchmark/run")
+async def run_benchmark_suite(payload: Dict[str, Any] | None = None, storage: StorageManager = Depends(get_storage)):
+    payload = payload or {}
+    candidate_change_id = payload.get("candidate_change_id", "baseline")
+    api_url = payload.get("api_url", "http://127.0.0.1:8000")
+    run_count = max(1, int(payload.get("run_count", 1) or 1))
+    eval_harness_config_override = payload.get("eval_harness_config_override")
+    reports = []
+    for run_index in range(run_count):
+        report = await run_benchmark(
+            api_url=api_url,
+            run_label=f"{candidate_change_id}-benchmark-{run_index + 1}",
+            eval_harness_config_override=eval_harness_config_override,
+        )
+        persist_benchmark_report(
+            storage,
+            report,
+            candidate_change_id=candidate_change_id,
+            run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
+            model_id="benchmark/harness",
+        )
+        reports.append(report)
+    return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
+
+@app.post("/admin/experiments/benchmark")
+async def run_benchmark_experiment(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    candidate_change_id = payload.get("candidate_change_id")
+    if not candidate_change_id:
+        raise HTTPException(status_code=400, detail="candidate_change_id field required")
+    api_url = payload.get("api_url", "http://127.0.0.1:8000")
+    baseline_change_id = payload.get("baseline_change_id", "baseline")
+    run_count = max(1, int(payload.get("run_count", 1) or 1))
+    eval_harness_config_override = payload.get("eval_harness_config_override")
+    proposal_metadata = payload.get("proposal_metadata")
+    runner = ExperimentRunner(storage, _model)
+    result = await runner.run_benchmark_gate(
+        candidate_change_id,
+        api_url=api_url,
+        baseline_change_id=baseline_change_id,
+        run_count=run_count,
+        eval_harness_config_override=eval_harness_config_override,
+        proposal_metadata=proposal_metadata,
+    )
+    return {"status": "ok", "result": result.model_dump()}
+
+@app.post("/admin/evals/run")
+async def run_structured_eval_suite(payload: Dict[str, Any] | None = None, storage: StorageManager = Depends(get_storage)):
+    payload = payload or {}
+    candidate_change_id = payload.get("candidate_change_id", "baseline")
+    suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
+    api_url = payload.get("api_url", "http://127.0.0.1:8000")
+    cases = payload.get("cases")
+    run_count = max(1, int(payload.get("run_count", 1) or 1))
+    eval_harness_config_override = payload.get("eval_harness_config_override")
+    reports = []
+    for run_index in range(run_count):
+        report = await run_structured_eval(
+            api_url=api_url,
+            suite_name=suite_name,
+            cases=cases,
+            run_label=f"{candidate_change_id}-structured-{run_index + 1}",
+            eval_harness_config_override=eval_harness_config_override,
+        )
+        persist_structured_eval_report(
+            storage,
+            report,
+            candidate_change_id=candidate_change_id,
+            run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
+            model_id="structured_eval/harness",
+        )
+        reports.append(report)
+    return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
+
+@app.post("/admin/experiments/full_eval")
+async def run_full_eval_experiment(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    candidate_change_id = payload.get("candidate_change_id")
+    if not candidate_change_id:
+        raise HTTPException(status_code=400, detail="candidate_change_id field required")
+    api_url = payload.get("api_url", "http://127.0.0.1:8000")
+    baseline_change_id = payload.get("baseline_change_id", "baseline")
+    suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
+    run_count = max(1, int(payload.get("run_count", 1) or 1))
+    eval_harness_config_override = payload.get("eval_harness_config_override")
+    proposal_metadata = payload.get("proposal_metadata")
+    runner = ExperimentRunner(storage, _model)
+    result = await runner.run_full_eval_gate(
+        candidate_change_id,
+        api_url=api_url,
+        baseline_change_id=baseline_change_id,
+        suite_name=suite_name,
+        run_count=run_count,
+        eval_harness_config_override=eval_harness_config_override,
+        proposal_metadata=proposal_metadata,
+    )
+    return {"status": "ok", "result": result.model_dump()}
+
+@app.get("/admin/experiments/compare")
+async def compare_experiment_metrics(
+    candidate_change_id: str,
+    baseline_change_id: str = "baseline",
+    storage: StorageManager = Depends(get_storage),
+):
+    runner = ExperimentRunner(storage, _model)
+    persisted_report = runner.get_persisted_experiment_report(candidate_change_id)
+    if persisted_report and persisted_report.get("baseline_change_id") == baseline_change_id:
+        return {
+            "status": "ok",
+            "source": "persisted_report",
+            **persisted_report,
+        }
+    candidate_metrics = runner._gather_metrics(candidate_change_id)
+    baseline_metrics = runner._gather_metrics(baseline_change_id)
+    deltas = runner._calculate_deltas(baseline_metrics, candidate_metrics)
+    recommendation = runner._decide_benchmark_promotion(deltas)
+    return {
+        "status": "ok",
+        "source": "aggregate_metrics",
+        "candidate_change_id": candidate_change_id,
+        "baseline_change_id": baseline_change_id,
+        "baseline_metrics": baseline_metrics,
+        "candidate_metrics": candidate_metrics,
+        "deltas": deltas,
+        "recommendation": recommendation,
+    }
+
+@app.get("/admin/experiments/report")
+async def get_experiment_report(
+    candidate_change_id: str,
+    storage: StorageManager = Depends(get_storage),
+):
+    runner = ExperimentRunner(storage, _model)
+    report = runner.get_persisted_experiment_report(candidate_change_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="No persisted experiment report found for candidate_change_id")
+    return {"status": "ok", "report": report}
+
+@app.get("/admin/experiments/history")
+async def get_experiment_history(limit: int = 25, storage: StorageManager = Depends(get_storage)):
+    safe_limit = max(1, min(limit, 100))
+    rows = (
+        storage.session.query(ParameterModel)
+        .filter(ParameterModel.key.like("experiment_report:%"))
+        .order_by(ParameterModel.updated_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    history = []
+    for row in rows:
+        current = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+        readiness = current.get("promotion_readiness") or {}
+        history.append(
+            {
+                "candidate_change_id": current.get("candidate_change_id"),
+                "evaluation_kind": current.get("evaluation_kind"),
+                "recommendation": current.get("recommendation"),
+                "recorded_at": current.get("recorded_at"),
+                "proposal_metadata": current.get("proposal_metadata") or {},
+                "promotion_readiness": readiness,
+                "has_eval_harness_override": bool(current.get("eval_harness_config_override")),
+                "has_code_validation": bool(current.get("code_validation")),
+            }
+        )
+    promoted_state = storage.parameters.peek_parameter(
+        "promoted_eval_candidates",
+        default_value={"current": None, "history": []},
+    ) or {"current": None, "history": []}
+    return {
+        "status": "ok",
+        "current_promoted_candidate": promoted_state.get("current"),
+        "promotion_history": promoted_state.get("history", []),
+        "reports": history,
+    }
+
+@app.get("/admin/evals/config")
+async def get_eval_harness_config(storage: StorageManager = Depends(get_storage)):
+    active_config = storage.parameters.peek_parameter(
+        EVAL_HARNESS_CONFIG_KEY,
+        default_value=default_eval_harness_config(),
+    ) or default_eval_harness_config()
+    return {"status": "ok", "config": active_config}
+
+@app.post("/admin/evals/config")
+async def set_eval_harness_config(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    system_prompt = payload.get("system_prompt")
+    context_files = payload.get("context_files")
+    current_config = get_active_eval_harness_config()
+    if system_prompt:
+        current_config["system_prompt"] = str(system_prompt)
+    if context_files:
+        current_config["context_files"] = [str(path) for path in context_files]
+    storage.parameters.set_parameter(
+        EVAL_HARNESS_CONFIG_KEY,
+        current_config,
+        description=EVAL_HARNESS_CONFIG_DESCRIPTION,
+    )
+    storage.commit()
+    return {"status": "ok", "config": current_config}
+
+@app.post("/admin/experiments/promote")
+async def promote_experiment_candidate(payload: Dict[str, Any], storage: StorageManager = Depends(get_storage)):
+    candidate_change_id = payload.get("candidate_change_id")
+    if not candidate_change_id:
+        raise HTTPException(status_code=400, detail="candidate_change_id field required")
+    force = bool(payload.get("force", False))
+    result = _apply_experiment_promotion(storage, candidate_change_id, force=force)
+    return {"status": "ok", **result}
+
+@app.post("/admin/experiments/bootstrap_cycle")
+async def run_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage: StorageManager = Depends(get_storage)):
+    payload = payload or {}
+    proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
+    proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+    if not proposer_tiers:
+        raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+
+    auto_promote = bool(payload.get("auto_promote", True))
+    suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
+    run_count = max(1, int(payload.get("run_count", 2) or 2))
+    baseline_change_id = payload.get("baseline_change_id", "baseline")
+    current_config = get_active_eval_harness_config()
+
+    proposals = await asyncio.gather(*[
+        _generate_eval_candidate_from_tier(tier, current_config)
+        for tier in proposer_tiers
+    ])
+
+    runner = ExperimentRunner(storage, _model)
+    evaluated = []
+    promoted = []
+
+    for proposal in proposals:
+        result = await runner.run_full_eval_gate(
+            proposal["candidate_change_id"],
+            api_url="http://127.0.0.1:8000",
+            baseline_change_id=baseline_change_id,
+            suite_name=suite_name,
+            run_count=run_count,
+            eval_harness_config_override=proposal["eval_harness_config_override"],
+            proposal_metadata={
+                "proposer_tier": proposal["proposer_tier"],
+                "rationale": proposal["rationale"],
+                "expected_gain": proposal["expected_gain"],
+                "source": "bootstrap_cycle",
+            },
+        )
+        result_payload = result.model_dump()
+        evaluated.append({
+            "proposal": proposal,
+            "result": result_payload,
+        })
+        if auto_promote and result.recommendation == "promote":
+            promoted.append(_apply_experiment_promotion(storage, proposal["candidate_change_id"]))
+
+    return {
+        "status": "ok",
+        "current_eval_harness_config": current_config,
+        "evaluated": evaluated,
+        "promoted": promoted,
+        "auto_promote": auto_promote,
+    }
+
+@app.post("/admin/experiments/tool_cycle")
+async def run_tool_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage: StorageManager = Depends(get_storage)):
+    payload = payload or {}
+    proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak"])]
+    proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+    if not proposer_tiers:
+        raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+    tool_name = _slugify_candidate_suffix(str(payload.get("tool_name", "bootstrap_history_tool")))
+    task_description = str(
+        payload.get(
+            "task_description",
+            "Create a read-only dynamic tool that helps operators inspect bootstrap history and promotion readiness.",
+        )
+    )
+    proposals = await asyncio.gather(*[
+        _generate_tool_candidate_from_tier(
+            tier,
+            tool_name=tool_name,
+            task_description=task_description,
+        )
+        for tier in proposer_tiers
+    ])
+    pipeline = ToolsPromotionPipeline(storage)
+    evaluated = []
+    for proposal in proposals:
+        os.makedirs("strata/tools", exist_ok=True)
+        os.makedirs("strata/tools/manifests", exist_ok=True)
+        os.makedirs("strata/tools/tests", exist_ok=True)
+        experimental_path = os.path.join("strata/tools", f"{proposal['tool_name']}.experimental.py")
+        manifest_path = os.path.join("strata/tools/manifests", f"{proposal['tool_name']}.json")
+        smoke_path = os.path.join("strata/tools/tests", f"test_{proposal['tool_name']}_smoke.py")
+        with open(experimental_path, "w", encoding="utf-8") as handle:
+            handle.write(proposal["source"])
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "validator": (proposal["manifest"] or {}).get("validator", "python_import_only"),
+                    "smoke_test": (proposal["manifest"] or {}).get("smoke_test", smoke_path),
+                    "proposer_tier": proposal["proposer_tier"],
+                },
+                handle,
+                indent=2,
+            )
+        with open(smoke_path, "w", encoding="utf-8") as handle:
+            handle.write(proposal["smoke_test"])
+        validation = await pipeline.validate_and_promote(proposal["tool_name"])
+        result = ExperimentRunner(storage, _model).record_tool_promotion_result(
+            candidate_change_id=proposal["candidate_change_id"],
+            validation_result=validation.model_dump(),
+            proposal_metadata={
+                "proposer_tier": proposal["proposer_tier"],
+                "tool_name": proposal["tool_name"],
+                "rationale": proposal["rationale"],
+                "expected_gain": proposal["expected_gain"],
+                "source": "tool_cycle",
+            },
+        )
+        evaluated.append(
+            {
+                "proposal": proposal,
+                "validation": validation.model_dump(),
+                "result": result.model_dump(),
+            }
+        )
+    return {"status": "ok", "evaluated": evaluated}
+
+@app.get("/admin/experiments/secondary_ignition")
+async def get_secondary_ignition_status(storage: StorageManager = Depends(get_storage)):
+    promoted_state = storage.parameters.peek_parameter(
+        "promoted_eval_candidates",
+        default_value={"current": None, "history": []},
+    ) or {"current": None, "history": []}
+    current_candidate = promoted_state.get("current")
+    runner = ExperimentRunner(storage, _model)
+    report_rows = (
+        storage.session.query(ParameterModel)
+        .filter(ParameterModel.key.like("experiment_report:%"))
+        .order_by(ParameterModel.updated_at.desc())
+        .all()
+    )
+    matching_report = None
+    for row in report_rows:
+        report = row.value.get("current", {}) if isinstance(row.value, dict) else {}
+        proposal_metadata = report.get("proposal_metadata") or {}
+        recommendation = report.get("recommendation")
+        deltas = report.get("deltas") or {}
+        weak_gain = (
+            float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
+            or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
+            or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
+        )
+        if proposal_metadata.get("proposer_tier") == "weak" and recommendation == "promote" and weak_gain:
+            matching_report = report
+            break
+
+    if current_candidate:
+        current_report = runner.get_persisted_experiment_report(current_candidate)
+    else:
+        current_report = None
+
+    if matching_report:
+        return {
+            "status": "ok",
+            "detected": True,
+            "candidate_change_id": matching_report.get("candidate_change_id"),
+            "current_promoted_candidate": current_candidate,
+            "recommendation": matching_report.get("recommendation"),
+            "proposal_metadata": matching_report.get("proposal_metadata") or {},
+            "weak_gain_detected": True,
+            "reason": "Weak-originated candidate was promoted after improving weak-tier eval metrics.",
+        }
+
+    if not current_candidate:
+        return {
+            "status": "ok",
+            "detected": False,
+            "reason": "No promoted eval candidate is currently active.",
+        }
+
+    report = current_report
+    if not report:
+        return {
+            "status": "ok",
+            "detected": False,
+            "candidate_change_id": current_candidate,
+            "reason": "No persisted experiment report found for the current promoted candidate.",
+        }
+
+    proposal_metadata = report.get("proposal_metadata") or {}
+    recommendation = report.get("recommendation")
+    deltas = report.get("deltas") or {}
+    weak_gain = (
+        float(deltas.get("structured_eval_harness_accuracy", 0.0) or 0.0) > 0.0
+        or float(deltas.get("benchmark_harness_score", 0.0) or 0.0) > 0.0
+        or float(deltas.get("benchmark_harness_win_rate", 0.0) or 0.0) > 0.0
+    )
+    return {
+        "status": "ok",
+        "detected": False,
+        "candidate_change_id": current_candidate,
+        "recommendation": recommendation,
+        "proposal_metadata": proposal_metadata,
+        "weak_gain_detected": weak_gain,
+        "reason": (
+            "Weak-originated candidate was promoted after improving weak-tier eval metrics."
+            if detected
+            else "Secondary ignition has not been detected yet for the current promoted candidate."
+        ),
+    }
 
 @app.get("/admin/logs")
 async def get_logs(limit: int = 50):

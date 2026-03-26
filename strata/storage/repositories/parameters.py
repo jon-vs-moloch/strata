@@ -42,6 +42,17 @@ class ParameterRepository:
         param.usage_count += 1
         return param.value.get("current", default_value)
 
+    def peek_parameter(self, key: str, default_value: Any = None) -> Any:
+        """
+        @summary Fetch a parameter value without mutating usage counters or creating defaults.
+        """
+        param = self.session.query(ParameterModel).filter_by(key=key).first()
+        if not param:
+            return default_value
+        if isinstance(param.value, dict):
+            return param.value.get("current", default_value)
+        return default_value
+
     def record_success(self, key: str):
         """
         @summary Record a successful outcome to reinforce the current parameter.
@@ -70,3 +81,22 @@ class ParameterRepository:
             # Reset counters for the new evolutionary epoch
             param.usage_count = 0
             param.success_count = 0
+
+    def set_parameter(self, key: str, value: Any, description: str = ""):
+        """
+        @summary Upsert a parameter value directly without creating a mutation history entry.
+        """
+        param = self.session.query(ParameterModel).filter_by(key=key).first()
+        if not param:
+            param = ParameterModel(
+                key=key,
+                description=description,
+                value={"current": value, "history": []}
+            )
+            self.session.add(param)
+            self.session.flush()
+            return
+
+        param.description = description or param.description
+        history = param.value.get("history", []) if isinstance(param.value, dict) else []
+        param.value = {"current": value, "history": history}

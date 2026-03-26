@@ -1,6 +1,6 @@
-from typing import Dict, Any, Optional, List, Union
-from strata.schemas.execution import ExecutionContext, StrongExecutionContext, WeakExecutionContext
-from strata.models.registry import ModelRegistry, registry
+from typing import Dict, Any, Optional, List
+from strata.schemas.execution import ExecutionContext, StrongExecutionContext
+from strata.models.registry import registry
 from strata.models.providers import ModelResponse
 
 class ModelAdapter:
@@ -17,12 +17,36 @@ class ModelAdapter:
         self.context = context or StrongExecutionContext(run_id="default")
         self.registry = registry
         self.last_response: Optional[ModelResponse] = None
+        self._selected_models: Dict[str, str] = {}
 
     def bind_execution_context(self, context: ExecutionContext):
         """
         @summary Switch the execution context, re-resolving provider constraints.
         """
         self.context = context
+
+    def _resolve_endpoint(self):
+        preferred_model = self._selected_models.get(self.context.mode)
+        return self.registry.resolve_endpoint_for_context(
+            self.context,
+            preferred_model=preferred_model,
+        )
+
+    @property
+    def endpoint(self) -> str:
+        endpoint = self._resolve_endpoint()
+        if endpoint.transport == "local":
+            return endpoint.endpoint_url or "http://127.0.0.1:1234/v1/chat/completions"
+        return endpoint.endpoint_url or "https://openrouter.ai/api/v1/chat/completions"
+
+    @property
+    def active_model(self) -> str:
+        endpoint = self._resolve_endpoint()
+        return self._selected_models.get(self.context.mode, endpoint.model)
+
+    @active_model.setter
+    def active_model(self, model_id: str):
+        self._selected_models[self.context.mode] = model_id
 
     async def chat(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
         """
@@ -37,12 +61,15 @@ class ModelAdapter:
                 if self.context.allow_cloud:
                     return {"status": "error", "message": "CRITICAL: Cloud usage attempted during weak-eval. Aborting."}
 
-            provider = self.registry.get_provider_for_context(self.context)
+            provider = self.registry.get_provider_for_context(
+                self.context,
+                preferred_model=self._selected_models.get(self.context.mode),
+            )
             
             # Log for auditability
             print(f"DEBUG [Context: {self.context.mode}] Routing to {provider.provider_id}/{provider.model_id} (Transport: {'local' if provider.__class__.__name__ == 'LocalProvider' else 'cloud'})")
 
-            response: ModelResponse = await provider.complete(messages, **kwargs)
+            response: ModelResponse = await provider.complete(messages, timeout=kwargs.get("timeout"), **kwargs)
             self.last_response = response
 
             # Post-call validation: if weak-eval but used cloud provider, mark as invalid
@@ -70,4 +97,3 @@ class ModelAdapter:
             return yaml.safe_load(raw_content)
         except Exception:
             return {"error": "Failed to parse YAML"}
-

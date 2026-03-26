@@ -16,6 +16,9 @@ class ModelEndpoint(BaseModel):
     transport: Literal["local", "cloud"] = Field(..., description="The transport layer used for this model.")
     endpoint_url: Optional[str] = Field(None, description="The custom URL for this endpoint if applicable.")
     api_key_env: Optional[str] = Field(None, description="The environment variable containing the API key.")
+    requests_per_minute: Optional[int] = Field(None, description="Soft request budget for this endpoint.")
+    max_concurrency: Optional[int] = Field(None, description="Maximum in-flight requests allowed for this endpoint.")
+    min_interval_ms: Optional[int] = Field(None, description="Minimum delay between requests to this endpoint.")
     tags: List[str] = Field(default_factory=list, description="Metadata tags for filtering.")
 
 class ModelPool(BaseModel):
