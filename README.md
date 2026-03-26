@@ -7,6 +7,7 @@ Strata is an agent orchestration prototype with three main pieces:
 - A React/Vite dashboard in `strata_ui/` for chat, task visibility, and admin controls.
 
 The project philosophy and bootstrap strategy are documented in [project-philosophy.md](/Users/jon/Projects/strata/docs/spec/project-philosophy.md). That document is the best explanation of what Strata is trying to accomplish and why the repository is structured the way it is.
+The repository structure itself is mapped in [codemap.md](/Users/jon/Projects/strata/docs/spec/codemap.md), which is the fastest way to find the right module without loading the entire codebase.
 
 ## Why This Exists
 
@@ -168,6 +169,7 @@ The main eval endpoints are:
 - `POST /admin/benchmark/run`
 - `POST /admin/evals/run`
 - `POST /admin/evals/matrix`
+- `GET /admin/evals/jobs`
 - `POST /admin/experiments/benchmark`
 - `POST /admin/experiments/full_eval`
 - `GET /admin/experiments/compare`
@@ -193,6 +195,8 @@ Experiment reports can also carry task associations, so if a report was generate
 The eval harness prompt/context is now configurable through `/admin/evals/config`, so a strong tier can propose prompt/context changes, evaluate them as a candidate, and promote the winning configuration through `/admin/experiments/promote` without requiring a code edit for each iteration.
 
 `/admin/evals/matrix` runs a standard structured suite across weak/strong and direct/scaffolded variants, returning per-question answers plus aggregate accuracy, latency, and token counts. This is the path toward a simple `run_eval(eval)` style operator surface.
+
+The heavier eval endpoints also support queued execution with `queue=true`, which creates a `JUDGE` task and returns immediately. `GET /admin/evals/jobs` exposes the queued eval/system-job lane, including current state, system job payloads, and compacted result summaries.
 
 `/admin/experiments/bootstrap_cycle` can now ask both the weak and strong tiers to propose small eval-harness changes in parallel, evaluate them with provenance, and auto-promote any winner into the shared active harness configuration. Promotions now require repeated sample wins by default instead of a single pass. `GET /admin/experiments/history` exposes recent experiment reports and promotion readiness, while `GET /admin/experiments/secondary_ignition` reports whether a weak-originated promoted change has produced a measurable weak-tier gain.
 

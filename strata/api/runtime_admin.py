@@ -1,0 +1,246 @@
+"""
+@module api.runtime_admin
+@purpose Register operator/runtime endpoints separately from the main API assembly.
+
+These routes expose live controls, health, model selection, and process-level
+operations. Keeping them separate reduces the amount of unrelated code a small
+model must ingest to reason about app assembly or chat behavior.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from datetime import datetime
+from typing import Any, Dict
+
+from fastapi import Depends, HTTPException
+from fastapi.responses import StreamingResponse
+
+
+def register_runtime_admin_routes(
+    app,
+    *,
+    get_storage,
+    model_adapter,
+    global_settings,
+    normalized_settings,
+    settings_parameter_key: str,
+    settings_parameter_description: str,
+    worker,
+    event_queue,
+    hotreloader,
+) -> Dict[str, Any]:
+    exported: Dict[str, Any] = {}
+
+    @app.get("/models")
+    async def list_models():
+        import httpx
+
+        base = model_adapter.endpoint.rsplit("/v1/", 1)[0]
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{base}/v1/models", timeout=5.0)
+                resp.raise_for_status()
+                data = resp.json()
+                models = [m.get("id", m.get("name", "unknown")) for m in data.get("data", [])]
+                return {"status": "ok", "models": models, "current": model_adapter.active_model}
+        except Exception as exc:
+            return {"status": "error", "models": [], "message": str(exc)}
+
+    @app.post("/models/select")
+    async def select_model(payload: Dict[str, Any]):
+        model_id = payload.get("model")
+        if not model_id:
+            raise HTTPException(status_code=400, detail="model field required")
+        model_adapter.active_model = model_id
+        return {"status": "ok", "model": model_id}
+
+    @app.get("/admin/test")
+    async def test_connectivity():
+        return {
+            "status": "ok",
+            "timestamp": datetime.utcnow().isoformat(),
+            "llm_endpoint": model_adapter.endpoint,
+        }
+
+    @app.get("/admin/settings")
+    async def get_settings(storage=Depends(get_storage)):
+        persisted_settings = storage.parameters.get_parameter(
+            key=settings_parameter_key,
+            default_value=dict(global_settings),
+            description=settings_parameter_description,
+        ) or {}
+        merged_settings = normalized_settings(persisted_settings)
+        global_settings.update(merged_settings)
+        storage.commit()
+        return {"status": "ok", "settings": merged_settings}
+
+    @app.post("/admin/settings")
+    async def update_settings(payload: Dict[str, Any], storage=Depends(get_storage)):
+        merged_settings = normalized_settings(payload)
+        global_settings.update(merged_settings)
+        storage.parameters.set_parameter(
+            key=settings_parameter_key,
+            value=merged_settings,
+            description=settings_parameter_description,
+        )
+        storage.commit()
+        return {"status": "ok", "settings": merged_settings}
+
+    @app.get("/admin/registry")
+    async def get_registry():
+        from strata.models.registry import registry
+
+        return {"status": "ok", "config": registry.to_dict()}
+
+    @app.get("/admin/registry/presets")
+    async def get_registry_presets():
+        from strata.models.registry import registry
+
+        return {"status": "ok", "presets": registry.presets()}
+
+    @app.post("/admin/registry")
+    async def update_registry(payload: Dict[str, Any]):
+        from strata.models.registry import registry
+
+        registry._load_config(payload)
+        return {"status": "ok"}
+
+    @app.get("/admin/health")
+    async def health_check():
+        from sqlalchemy import text
+        from strata.storage.services.main import StorageManager
+
+        storage = StorageManager()
+        try:
+            db = storage.session
+            db.execute(text("SELECT 1"))
+            worker_alive = worker._running_task is not None and not worker._running_task.done()
+            return {
+                "status": "ok",
+                "database": "connected",
+                "worker": "running" if worker_alive else "dead",
+            }
+        except Exception as exc:
+            return {"status": "degraded", "error": str(exc)}
+        finally:
+            storage.close()
+
+    @app.get("/admin/logs")
+    async def get_logs(limit: int = 50):
+        log_path = "/tmp/strata_backend.log"
+        if not os.path.exists(log_path):
+            return {"logs": ["Log file not found."]}
+        with open(log_path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+        return {"logs": [line.strip() for line in lines[-limit:]]}
+
+    @app.post("/admin/reboot")
+    async def reboot_api():
+        import sys
+
+        async def restart_soon():
+            await asyncio.sleep(0.5)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        asyncio.create_task(restart_soon())
+        return {"status": "rebooting"}
+
+    @app.get("/admin/files")
+    async def list_experimental_files():
+        return {"files": hotreloader.list_experimental()}
+
+    @app.post("/admin/promote")
+    async def promote_file(payload: Dict[str, Any]):
+        module = payload.get("module")
+        if not module:
+            raise HTTPException(status_code=400, detail="module field required")
+        result = await hotreloader.promote(module)
+        return {
+            "success": result.success,
+            "module": result.module,
+            "rolled_back": result.rolled_back,
+            "message": result.message,
+            "validation": result.validation.stages if result.validation else None,
+        }
+
+    @app.post("/admin/rollback")
+    async def rollback_file(payload: Dict[str, Any]):
+        module = payload.get("module")
+        if not module:
+            raise HTTPException(status_code=400, detail="module field required")
+        result = hotreloader.rollback(module)
+        return {"success": result.success, "module": result.module, "message": result.message}
+
+    @app.post("/admin/reset")
+    async def reset_database(storage=Depends(get_storage)):
+        from strata.storage.models import Base
+
+        storage.session.close()
+        Base.metadata.drop_all(storage.engine)
+        Base.metadata.create_all(storage.engine)
+        storage.session = storage.SessionLocal()
+        storage.tasks.session = storage.session
+        storage.messages.session = storage.session
+        storage.attempts.session = storage.session
+        storage.parameters.session = storage.session
+        return {"status": "ok", "message": "Database reset complete."}
+
+    @app.get("/admin/worker/status")
+    async def get_worker_status():
+        return {"status": worker.status}
+
+    @app.post("/admin/worker/pause")
+    async def pause_worker():
+        worker.pause()
+        return {"status": "paused"}
+
+    @app.post("/admin/worker/resume")
+    async def resume_worker():
+        worker.resume()
+        return {"status": "running"}
+
+    @app.post("/admin/worker/stop")
+    async def stop_worker():
+        aborted = worker.stop_current()
+        return {"status": "stopped", "aborted": aborted}
+
+    @app.get("/events")
+    async def sse_events():
+        async def event_generator():
+            while True:
+                try:
+                    data = await event_queue.get()
+                    yield f"data: {json.dumps(data)}\n\n"
+                except Exception:
+                    break
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    exported.update(
+        {
+            "list_models": list_models,
+            "select_model": select_model,
+            "test_connectivity": test_connectivity,
+            "get_settings": get_settings,
+            "update_settings": update_settings,
+            "get_registry": get_registry,
+            "get_registry_presets": get_registry_presets,
+            "update_registry": update_registry,
+            "health_check": health_check,
+            "get_logs": get_logs,
+            "reboot_api": reboot_api,
+            "list_experimental_files": list_experimental_files,
+            "promote_file": promote_file,
+            "rollback_file": rollback_file,
+            "reset_database": reset_database,
+            "get_worker_status": get_worker_status,
+            "pause_worker": pause_worker,
+            "resume_worker": resume_worker,
+            "stop_worker": stop_worker,
+            "sse_events": sse_events,
+        }
+    )
+    return exported

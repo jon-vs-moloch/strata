@@ -1,0 +1,244 @@
+"""
+@module eval.job_runner
+@purpose Execute queued evaluation jobs through the background worker instead of blocking API requests.
+"""
+
+from __future__ import annotations
+
+import time
+import os
+import json
+from typing import Any, Dict
+
+from strata.eval.benchmark import persist_benchmark_report, run_benchmark
+from strata.eval.matrix import run_eval_matrix
+from strata.eval.structured_eval import persist_structured_eval_report, run_structured_eval
+from strata.experimental.experiment_runner import ExperimentRunner
+from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
+from strata.orchestrator.worker.telemetry import record_metric
+from strata.storage.models import AttemptOutcome, TaskState
+
+
+def _trim_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    trimmed = dict(payload)
+    if isinstance(trimmed.get("samples"), list):
+        trimmed["samples_preview"] = trimmed["samples"][:3]
+        trimmed["sample_count"] = len(trimmed["samples"])
+        trimmed.pop("samples", None)
+    if isinstance(trimmed.get("variants"), list):
+        trimmed["variants_preview"] = [
+            {
+                key: variant.get(key)
+                for key in ("variant_id", "mode", "profile", "accuracy", "avg_latency_s", "total_tokens", "case_count")
+            }
+            for variant in trimmed["variants"][:6]
+        ]
+        trimmed["variant_count"] = len(trimmed["variants"])
+        trimmed.pop("variants", None)
+    return trimmed
+
+
+async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
+    system_job = dict((task.constraints or {}).get("system_job") or {})
+    kind = str(system_job.get("kind") or "").strip()
+    payload = dict(system_job.get("payload") or {})
+    if not kind:
+        raise ValueError("Task is missing system_job.kind")
+
+    attempt = storage.attempts.create(task_id=task.task_id)
+    task.state = TaskState.WORKING
+    storage.commit()
+    started_at = time.perf_counter()
+
+    try:
+        if kind == "benchmark":
+            candidate_change_id = payload.get("candidate_change_id", "baseline")
+            report = await run_benchmark(
+                api_url=payload.get("api_url", "http://127.0.0.1:8000"),
+                run_label=payload.get("run_label") or f"{candidate_change_id}-queued",
+                eval_harness_config_override=payload.get("eval_harness_config_override"),
+            )
+            persist_benchmark_report(
+                storage,
+                report,
+                candidate_change_id=candidate_change_id,
+                run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
+                model_id="benchmark/harness",
+            )
+            result = report
+        elif kind == "structured_eval":
+            candidate_change_id = payload.get("candidate_change_id", "baseline")
+            report = await run_structured_eval(
+                api_url=payload.get("api_url", "http://127.0.0.1:8000"),
+                suite_name=payload.get("suite_name", "bootstrap_mcq_v1"),
+                cases=payload.get("cases"),
+                run_label=payload.get("run_label") or f"{candidate_change_id}-queued",
+                eval_harness_config_override=payload.get("eval_harness_config_override"),
+            )
+            persist_structured_eval_report(
+                storage,
+                report,
+                candidate_change_id=candidate_change_id,
+                run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
+                model_id="structured_eval/harness",
+            )
+            result = report
+        elif kind == "full_eval":
+            runner = ExperimentRunner(storage, model_adapter)
+            experiment_result = await runner.run_full_eval_gate(
+                payload["candidate_change_id"],
+                api_url=payload.get("api_url", "http://127.0.0.1:8000"),
+                baseline_change_id=payload.get("baseline_change_id", "baseline"),
+                suite_name=payload.get("suite_name", "bootstrap_mcq_v1"),
+                run_count=max(1, int(payload.get("run_count", 1) or 1)),
+                eval_harness_config_override=payload.get("eval_harness_config_override"),
+                proposal_metadata=payload.get("proposal_metadata"),
+                source_task_id=task.task_id,
+                spawned_task_ids=payload.get("spawned_task_ids"),
+                associated_task_ids=payload.get("associated_task_ids"),
+            )
+            result = experiment_result.model_dump()
+        elif kind == "benchmark_gate":
+            runner = ExperimentRunner(storage, model_adapter)
+            experiment_result = await runner.run_benchmark_gate(
+                payload["candidate_change_id"],
+                api_url=payload.get("api_url", "http://127.0.0.1:8000"),
+                baseline_change_id=payload.get("baseline_change_id", "baseline"),
+                run_count=max(1, int(payload.get("run_count", 1) or 1)),
+                eval_harness_config_override=payload.get("eval_harness_config_override"),
+                proposal_metadata=payload.get("proposal_metadata"),
+                source_task_id=task.task_id,
+                spawned_task_ids=payload.get("spawned_task_ids"),
+                associated_task_ids=payload.get("associated_task_ids"),
+            )
+            result = experiment_result.model_dump()
+        elif kind == "eval_matrix":
+            report = await run_eval_matrix(
+                suite_name=payload.get("suite_name", "mmlu_mini_v1"),
+                include_context=bool(payload.get("include_context", True)),
+                include_strong=bool(payload.get("include_strong", True)),
+                include_weak=bool(payload.get("include_weak", True)),
+                profiles=payload.get("profiles"),
+                sample_size=int(payload["sample_size"]) if payload.get("sample_size") is not None else None,
+                random_seed=int(payload["random_seed"]) if payload.get("random_seed") is not None else None,
+            )
+            metric_name_prefix = "eval_sample_tick" if payload.get("sampled") else "eval_matrix"
+            task_type = "EVAL_SAMPLE_TICK" if payload.get("sampled") else "EVAL_MATRIX"
+            for variant in report.get("variants", []):
+                details = {
+                    "suite_name": report.get("suite_name"),
+                    "variant_id": variant.get("variant_id"),
+                    "mode": variant.get("mode"),
+                    "profile": variant.get("profile"),
+                    "include_context": report.get("include_context"),
+                    "case_count": report.get("case_count"),
+                    "sampled": bool(payload.get("sampled", False)),
+                    "task_id": task.task_id,
+                }
+                for metric_name, value in (
+                    (f"{metric_name_prefix}_accuracy", float(variant.get("accuracy", 0.0) or 0.0)),
+                    (f"{metric_name_prefix}_latency_s", float(variant.get("avg_latency_s", 0.0) or 0.0)),
+                    (f"{metric_name_prefix}_total_tokens", float(variant.get("total_tokens", 0.0) or 0.0)),
+                ):
+                    record_metric(
+                        storage,
+                        metric_name=metric_name,
+                        value=value,
+                        model_id=variant.get("variant_id"),
+                        task_type=task_type,
+                        run_mode="eval_sample_tick" if payload.get("sampled") else "eval_matrix",
+                        execution_context=variant.get("mode"),
+                        task_id=task.task_id,
+                        details=details,
+                    )
+            result = report
+        elif kind == "tool_cycle":
+            tool_name = str(payload.get("tool_name") or "").strip()
+            if not tool_name:
+                raise ValueError("tool_cycle requires tool_name")
+            proposer_tier = str(payload.get("proposer_tier") or "weak")
+            from strata.api.main import _generate_tool_candidate_from_tier
+            proposal = await _generate_tool_candidate_from_tier(
+                proposer_tier,
+                tool_name=tool_name,
+                task_description=str(payload.get("task_description") or "Create a safe dynamic tool."),
+            )
+            os.makedirs("strata/tools", exist_ok=True)
+            os.makedirs("strata/tools/manifests", exist_ok=True)
+            os.makedirs("strata/tools/tests", exist_ok=True)
+            experimental_path = os.path.join("strata/tools", f"{proposal['tool_name']}.experimental.py")
+            manifest_path = os.path.join("strata/tools", "manifests", f"{proposal['tool_name']}.json")
+            smoke_path = os.path.join("strata/tools", "tests", f"test_{proposal['tool_name']}_smoke.py")
+            with open(experimental_path, "w", encoding="utf-8") as handle:
+                handle.write(proposal["source"])
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "validator": (proposal["manifest"] or {}).get("validator", "python_import_only"),
+                        "smoke_test": (proposal["manifest"] or {}).get("smoke_test", smoke_path),
+                        "proposer_tier": proposal["proposer_tier"],
+                    },
+                    handle,
+                    indent=2,
+                )
+            with open(smoke_path, "w", encoding="utf-8") as handle:
+                handle.write(proposal["smoke_test"])
+            validation = await ToolsPromotionPipeline(storage).validate_and_promote(proposal["tool_name"])
+            experiment_result = ExperimentRunner(storage, model_adapter).record_tool_promotion_result(
+                candidate_change_id=proposal["candidate_change_id"],
+                validation_result=validation.model_dump(),
+                proposal_metadata={
+                    "proposer_tier": proposal["proposer_tier"],
+                    "tool_name": proposal["tool_name"],
+                    "rationale": proposal["rationale"],
+                    "expected_gain": proposal["expected_gain"],
+                    "source": "tool_cycle_queue",
+                },
+                source_task_id=task.task_id,
+                associated_task_ids=[task.task_id, *(payload.get("associated_task_ids") or [])],
+            )
+            result = {
+                "proposal": proposal,
+                "validation": validation.model_dump(),
+                "result": experiment_result.model_dump(),
+            }
+        else:
+            raise ValueError(f"Unsupported system eval job kind: {kind}")
+
+        duration_s = time.perf_counter() - started_at
+        attempt.outcome = AttemptOutcome.SUCCEEDED
+        attempt.ended_at = attempt.started_at
+        attempt.artifacts = {
+            "job_kind": kind,
+            "duration_s": duration_s,
+            "result_summary": _trim_result(result),
+        }
+        task.state = TaskState.COMPLETE
+        constraints = dict(task.constraints or {})
+        constraints["system_job_result"] = {
+            "status": "completed",
+            "kind": kind,
+            "completed_at": time.time(),
+            "result": _trim_result(result),
+        }
+        task.constraints = constraints
+        storage.commit()
+        return result
+    except Exception as exc:
+        attempt.outcome = AttemptOutcome.FAILED
+        attempt.reason = str(exc)
+        attempt.artifacts = {
+            "job_kind": kind,
+            "duration_s": time.perf_counter() - started_at,
+            "error": str(exc),
+        }
+        task.state = TaskState.BLOCKED
+        constraints = dict(task.constraints or {})
+        constraints["system_job_result"] = {
+            "status": "failed",
+            "kind": kind,
+            "error": str(exc),
+        }
+        task.constraints = constraints
+        storage.commit()
+        raise

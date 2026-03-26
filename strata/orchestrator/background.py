@@ -21,6 +21,7 @@ from strata.orchestrator.worker.attempt_runner import run_attempt
 from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
 from strata.orchestrator.worker.routing_policy import select_model_tier
+from strata.eval.job_runner import run_eval_job_task
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,11 @@ class BackgroundWorker:
         try:
             task = storage.session.query(TaskModel).filter_by(task_id=task_id).first()
             if not task or task.state in [TaskState.COMPLETE, TaskState.CANCELLED]:
+                return
+            if (task.constraints or {}).get("system_job"):
+                logger.info(f"Running queued system job for task {task_id}")
+                await run_eval_job_task(task, storage, self._model)
+                await self._notify(task_id, task.state.value)
                 return
 
             # --- ROUTING ---

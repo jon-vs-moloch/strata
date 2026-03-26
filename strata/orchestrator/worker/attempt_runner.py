@@ -9,6 +9,7 @@ from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.orchestrator.research import ResearchModule
 from strata.orchestrator.decomposition import DecompositionModule
 from strata.orchestrator.implementation import ImplementationModule
+from strata.eval.job_runner import run_eval_job_task
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             await _run_decomposition(task, storage, model_adapter, enqueue_fn)
         elif task.type == TaskType.IMPL:
             await _run_implementation(task, storage, model_adapter)
+        elif task.type == TaskType.JUDGE:
+            await _run_judge(task, storage, model_adapter)
         else:
             raise NotImplementedError(f"Unsupported task type {task.type}")
 
@@ -106,6 +109,19 @@ async def _run_implementation(task, storage, model_adapter):
         content=f"🛠️ **Implementation Staged**\nI've generated {len(candidate_ids)} candidates.",
         session_id=task.session_id or "default",
         task_id=task.task_id
+    )
+    task.state = TaskState.WORKING
+    storage.commit()
+
+
+async def _run_judge(task, storage, model_adapter):
+    payload = await run_eval_job_task(task, storage, model_adapter)
+    summary = payload.get("recommendation") or payload.get("suite_name") or payload.get("run_label") or "completed"
+    storage.messages.create(
+        role="assistant",
+        content=f"📏 **Eval Job Complete**\n{task.title}: {summary}",
+        session_id=task.session_id or "default",
+        task_id=task.task_id,
     )
     task.state = TaskState.WORKING
     storage.commit()

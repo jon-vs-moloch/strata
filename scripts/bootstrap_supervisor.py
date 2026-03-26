@@ -62,6 +62,7 @@ def run_no_context_eval_pass(cycle_number: int) -> dict:
     benchmark = post_json(
         "/admin/benchmark/run",
         {
+            "queue": True,
             "candidate_change_id": suffix,
             "run_count": 1,
             "eval_harness_config_override": NO_CONTEXT_OVERRIDE,
@@ -70,6 +71,7 @@ def run_no_context_eval_pass(cycle_number: int) -> dict:
     sampled_matrix = post_json(
         "/admin/evals/sample_tick",
         {
+            "queue": True,
             "suite_name": "mmlu_mini_v1",
             "include_context": False,
             "include_strong": True,
@@ -100,11 +102,10 @@ def main() -> None:
             if cycle_number % STANDARD_EVAL_EVERY == 0:
                 log(f"starting no-context standard eval pass after cycle {cycle_number}")
                 eval_result = run_no_context_eval_pass(cycle_number)
-                benchmark_count = len(eval_result["benchmark"].get("reports", []))
-                matrix_count = len((eval_result["sampled_matrix"].get("report") or {}).get("variants", []))
                 log(
                     "completed no-context standard eval pass "
-                    f"(benchmark_reports={benchmark_count}, matrix_variants={matrix_count})"
+                    f"(benchmark_task={eval_result['benchmark'].get('task_id')}, "
+                    f"matrix_task={eval_result['sampled_matrix'].get('task_id')})"
                 )
         except KeyboardInterrupt:
             log("supervisor interrupted; exiting")

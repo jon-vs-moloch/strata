@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from strata.knowledge.page_access import build_access_state, sanitize_for_audience
 from strata.storage.models import TaskState, TaskType
 
 
@@ -29,10 +30,6 @@ DEFAULT_VISIBILITY_BY_DOMAIN = {
     "project": "project_scoped",
     "world": "shareable",
 }
-USER_VISIBLE_POLICIES = {"shareable", "user_visible", "project_scoped"}
-AGENT_VISIBLE_POLICIES = {"shareable", "user_visible", "project_scoped", "agent_internal", "restricted"}
-TOOL_VISIBLE_POLICIES = {"shareable", "project_scoped", "agent_internal"}
-
 
 def _normalize_domain(raw: Optional[str]) -> str:
     cleaned = str(raw or DEFAULT_DOMAIN).strip().lower()
@@ -65,13 +62,6 @@ def _normalize_disclosure_rules(raw: Any, *, domain: str, visibility_policy: str
     )
     normalized["tool_access"] = str(normalized.get("tool_access") or base["tool_access"])
     return normalized
-
-
-def _normalize_audience(raw: Optional[str]) -> str:
-    cleaned = str(raw or "operator").strip().lower()
-    if cleaned in {"operator", "agent", "user", "tool"}:
-        return cleaned
-    return "operator"
 
 
 def slugify_page_title(raw: str) -> str:
@@ -242,114 +232,15 @@ class KnowledgePageStore:
             description="Metadata-first index of synthesized knowledge pages.",
         )
 
-    def _has_metadata_access(self, page: Dict[str, Any], *, audience: str) -> bool:
-        normalized_audience = _normalize_audience(audience)
-        if normalized_audience == "operator":
-            return True
-        visibility_policy = str(page.get("visibility_policy") or "")
-        disclosure_rules = page.get("disclosure_rules") or {}
-        allowed_audiences = {str(item).lower() for item in disclosure_rules.get("allowed_audiences") or []}
-        if normalized_audience == "agent":
-            return visibility_policy in AGENT_VISIBLE_POLICIES or "agent" in allowed_audiences
-        if normalized_audience == "tool":
-            return (
-                disclosure_rules.get("tool_access") == "allowed"
-                and (visibility_policy in TOOL_VISIBLE_POLICIES or "tool" in allowed_audiences)
-            )
-        return visibility_policy in USER_VISIBLE_POLICIES or "user" in allowed_audiences
-
-    def _sanitize_for_audience(
-        self,
-        page: Dict[str, Any],
-        *,
-        audience: str,
-        include_body: bool = False,
-        heading: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        if not page:
-            return {}
-        normalized_audience = _normalize_audience(audience)
-        if not self._has_metadata_access(page, audience=normalized_audience):
-            return {}
-        sanitized = dict(page)
-        disclosure_rules = sanitized.get("disclosure_rules") or {}
-        if not include_body:
-            sanitized.pop("body", None)
-            return sanitized
-        if normalized_audience in {"operator", "agent"} or disclosure_rules.get("can_quote", True):
-            return sanitized
-        if disclosure_rules.get("can_summarize", True):
-            restricted_body = sanitized.get("summary") or ""
-            if heading:
-                restricted_body = f"Summary only for section '{heading}': {restricted_body}"
-            sanitized["body"] = restricted_body
-            sanitized["content_redacted"] = True
-            return sanitized
-        return {}
-
-    def _build_access_state(
-        self,
-        *,
-        page: Dict[str, Any],
-        audience: str,
-        include_body: bool,
-        heading: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        if not page:
-            return {
-                "status": "missing",
-                "reason": "knowledge page not found",
-                "audience": _normalize_audience(audience),
-                "requires_consent": False,
-            }
-        normalized_audience = _normalize_audience(audience)
-        if not self._has_metadata_access(page, audience=normalized_audience):
-            visibility_policy = str(page.get("visibility_policy") or "")
-            disclosure_rules = page.get("disclosure_rules") or {}
-            return {
-                "status": "restricted",
-                "reason": f"page is not available to audience '{normalized_audience}' under visibility policy '{visibility_policy}'",
-                "audience": normalized_audience,
-                "requires_consent": visibility_policy in {"restricted", "agent_internal"},
-                "page_metadata": {
-                    "slug": page.get("slug"),
-                    "title": page.get("title"),
-                    "domain": page.get("domain"),
-                    "visibility_policy": visibility_policy,
-                    "summary": page.get("summary"),
-                    "disclosure_rules": {
-                        "can_quote": disclosure_rules.get("can_quote"),
-                        "can_summarize": disclosure_rules.get("can_summarize"),
-                        "tool_access": disclosure_rules.get("tool_access"),
-                    },
-                },
-            }
-        sanitized = self._sanitize_for_audience(page, audience=normalized_audience, include_body=include_body, heading=heading)
-        if not sanitized:
-            return {
-                "status": "restricted",
-                "reason": "page exists but cannot be disclosed in this form",
-                "audience": normalized_audience,
-                "requires_consent": True,
-            }
-        status = "redacted" if sanitized.get("content_redacted") else "ok"
-        return {
-            "status": status,
-            "reason": "content redacted to summary due to disclosure rules" if status == "redacted" else "",
-            "audience": normalized_audience,
-            "requires_consent": False,
-            "page": sanitized,
-        }
-
     def get_page_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
         payload = self.storage.parameters.peek_parameter(_page_key(slug), default_value={}) or {}
         page = normalize_page_payload(payload, slug=slug)
-        return self._build_access_state(page=page, audience=audience, include_body=True)
+        return build_access_state(page=page, audience=audience, include_body=True)
 
     def get_page_metadata_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
         payload = self.storage.parameters.peek_parameter(_page_key(slug), default_value={}) or {}
         page = normalize_page_payload(payload, slug=slug)
-        return self._build_access_state(page=page, audience=audience, include_body=False)
+        return build_access_state(page=page, audience=audience, include_body=False)
 
     def get_page_section_view(self, slug: str, heading: str, *, audience: str = "operator") -> Dict[str, Any]:
         view = self.get_page_view(slug, audience=audience)
@@ -405,7 +296,7 @@ class KnowledgePageStore:
                 continue
             if lowered_domain and str(page.get("domain") or "") != lowered_domain:
                 continue
-            sanitized = self._sanitize_for_audience(page, audience=audience, include_body=False)
+            sanitized = sanitize_for_audience(page, audience=audience, include_body=False)
             if sanitized:
                 filtered.append(sanitized)
         filtered.sort(key=lambda page: page.get("last_updated", ""), reverse=True)

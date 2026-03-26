@@ -1,0 +1,409 @@
+"""
+@module api.experiment_admin
+@purpose Register experiment comparison, promotion, and bootstrap-cycle routes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from typing import Any, Dict
+
+from fastapi import Depends, HTTPException
+
+from strata.eval.harness_eval import (
+    EVAL_HARNESS_CONFIG_DESCRIPTION,
+    EVAL_HARNESS_CONFIG_KEY,
+    default_eval_harness_config,
+    get_active_eval_harness_config,
+)
+from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
+from strata.storage.models import ParameterModel
+
+
+def register_experiment_routes(
+    app,
+    *,
+    get_storage,
+    model_adapter,
+    queue_eval_system_job,
+    apply_experiment_promotion,
+    generate_eval_candidate_from_tier,
+    generate_tool_candidate_from_tier,
+    eval_override_signature,
+) -> Dict[str, Any]:
+    exported: Dict[str, Any] = {}
+
+    @app.post("/admin/experiments/benchmark")
+    async def run_benchmark_experiment(payload: Dict[str, Any], storage=Depends(get_storage)):
+        candidate_change_id = payload.get("candidate_change_id")
+        if not candidate_change_id:
+            raise HTTPException(status_code=400, detail="candidate_change_id field required")
+        if payload.get("queue"):
+            queued = await queue_eval_system_job(
+                storage,
+                kind="benchmark_gate",
+                title=f"Benchmark Gate: {candidate_change_id}",
+                description=f"Queued benchmark gate for candidate '{candidate_change_id}'.",
+                payload=payload,
+                session_id=payload.get("session_id"),
+                dedupe_signature={"candidate_change_id": candidate_change_id},
+            )
+            return {"status": "ok", **queued}
+        runner = ExperimentRunner(storage, model_adapter)
+        result = await runner.run_benchmark_gate(
+            candidate_change_id,
+            api_url=payload.get("api_url", "http://127.0.0.1:8000"),
+            baseline_change_id=payload.get("baseline_change_id", "baseline"),
+            run_count=max(1, int(payload.get("run_count", 1) or 1)),
+            eval_harness_config_override=payload.get("eval_harness_config_override"),
+            proposal_metadata=payload.get("proposal_metadata"),
+            source_task_id=payload.get("source_task_id"),
+            spawned_task_ids=payload.get("spawned_task_ids"),
+            associated_task_ids=payload.get("associated_task_ids"),
+        )
+        return {"status": "ok", "result": result.model_dump()}
+
+    @app.post("/admin/experiments/full_eval")
+    async def run_full_eval_experiment(payload: Dict[str, Any], storage=Depends(get_storage)):
+        candidate_change_id = payload.get("candidate_change_id")
+        if not candidate_change_id:
+            raise HTTPException(status_code=400, detail="candidate_change_id field required")
+        if payload.get("queue"):
+            queued = await queue_eval_system_job(
+                storage,
+                kind="full_eval",
+                title=f"Full Eval Gate: {candidate_change_id}",
+                description=f"Queued full eval gate for candidate '{candidate_change_id}'.",
+                payload=payload,
+                session_id=payload.get("session_id"),
+                dedupe_signature={
+                    "candidate_change_id": candidate_change_id,
+                    "suite_name": payload.get("suite_name", "bootstrap_mcq_v1"),
+                },
+            )
+            return {"status": "ok", **queued}
+        runner = ExperimentRunner(storage, model_adapter)
+        result = await runner.run_full_eval_gate(
+            candidate_change_id,
+            api_url=payload.get("api_url", "http://127.0.0.1:8000"),
+            baseline_change_id=payload.get("baseline_change_id", "baseline"),
+            suite_name=payload.get("suite_name", "bootstrap_mcq_v1"),
+            run_count=max(1, int(payload.get("run_count", 1) or 1)),
+            eval_harness_config_override=payload.get("eval_harness_config_override"),
+            proposal_metadata=payload.get("proposal_metadata"),
+            source_task_id=payload.get("source_task_id"),
+            spawned_task_ids=payload.get("spawned_task_ids"),
+            associated_task_ids=payload.get("associated_task_ids"),
+        )
+        return {"status": "ok", "result": result.model_dump()}
+
+    @app.get("/admin/experiments/compare")
+    async def compare_experiment_metrics(candidate_change_id: str, baseline_change_id: str = "baseline", storage=Depends(get_storage)):
+        runner = ExperimentRunner(storage, model_adapter)
+        persisted_report = runner.get_persisted_experiment_report(candidate_change_id)
+        if persisted_report and persisted_report.get("baseline_change_id") == baseline_change_id:
+            return {"status": "ok", "source": "persisted_report", **persisted_report}
+        candidate_metrics = runner._gather_metrics(candidate_change_id)
+        baseline_metrics = runner._gather_metrics(baseline_change_id)
+        deltas = runner._calculate_deltas(baseline_metrics, candidate_metrics)
+        recommendation = runner._decide_benchmark_promotion(deltas)
+        return {
+            "status": "ok",
+            "source": "aggregate_metrics",
+            "candidate_change_id": candidate_change_id,
+            "baseline_change_id": baseline_change_id,
+            "baseline_metrics": baseline_metrics,
+            "candidate_metrics": candidate_metrics,
+            "deltas": deltas,
+            "recommendation": recommendation,
+        }
+
+    @app.get("/admin/experiments/report")
+    async def get_experiment_report(candidate_change_id: str, storage=Depends(get_storage)):
+        runner = ExperimentRunner(storage, model_adapter)
+        report = runner.get_persisted_experiment_report(candidate_change_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="No persisted experiment report found for candidate_change_id")
+        return {"status": "ok", "report": report}
+
+    @app.get("/admin/experiments/history")
+    async def get_experiment_history(limit: int = 25, storage=Depends(get_storage)):
+        safe_limit = max(1, min(limit, 100))
+        rows = (
+            storage.session.query(ParameterModel)
+            .filter(ParameterModel.key.like("experiment_report:%"))
+            .order_by(ParameterModel.updated_at.desc())
+            .limit(safe_limit)
+            .all()
+        )
+        history = []
+        for current in iter_experiment_reports(rows):
+            readiness = current.get("promotion_readiness") or {}
+            history.append(
+                {
+                    "candidate_change_id": current.get("candidate_change_id"),
+                    "evaluation_kind": current.get("evaluation_kind"),
+                    "recommendation": current.get("recommendation"),
+                    "recorded_at": current.get("recorded_at"),
+                    "proposal_metadata": current.get("proposal_metadata") or {},
+                    "promotion_readiness": readiness,
+                    "has_eval_harness_override": bool(current.get("eval_harness_config_override")),
+                    "has_code_validation": bool(current.get("code_validation")),
+                    "task_associations": current.get("task_associations") or {},
+                }
+            )
+        promoted_state = storage.parameters.peek_parameter(
+            "promoted_eval_candidates",
+            default_value={"current": None, "history": []},
+        ) or {"current": None, "history": []}
+        return {
+            "status": "ok",
+            "current_promoted_candidate": promoted_state.get("current"),
+            "promotion_history": promoted_state.get("history", []),
+            "reports": history,
+        }
+
+    @app.get("/admin/evals/config")
+    async def get_eval_harness_config(storage=Depends(get_storage)):
+        active_config = storage.parameters.peek_parameter(
+            EVAL_HARNESS_CONFIG_KEY,
+            default_value=default_eval_harness_config(),
+        ) or default_eval_harness_config()
+        return {"status": "ok", "config": active_config}
+
+    @app.post("/admin/evals/config")
+    async def set_eval_harness_config(payload: Dict[str, Any], storage=Depends(get_storage)):
+        system_prompt = payload.get("system_prompt")
+        context_files = payload.get("context_files")
+        current_config = get_active_eval_harness_config()
+        if system_prompt:
+            current_config["system_prompt"] = str(system_prompt)
+        if context_files:
+            current_config["context_files"] = [str(path) for path in context_files]
+        storage.parameters.set_parameter(
+            EVAL_HARNESS_CONFIG_KEY,
+            current_config,
+            description=EVAL_HARNESS_CONFIG_DESCRIPTION,
+        )
+        storage.commit()
+        return {"status": "ok", "config": current_config}
+
+    @app.post("/admin/experiments/promote")
+    async def promote_experiment_candidate(payload: Dict[str, Any], storage=Depends(get_storage)):
+        candidate_change_id = payload.get("candidate_change_id")
+        if not candidate_change_id:
+            raise HTTPException(status_code=400, detail="candidate_change_id field required")
+        force = bool(payload.get("force", False))
+        result = apply_experiment_promotion(storage, candidate_change_id, force=force)
+        return {"status": "ok", **result}
+
+    @app.post("/admin/experiments/bootstrap_cycle")
+    async def run_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
+        payload = payload or {}
+        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
+        proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+        if not proposer_tiers:
+            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+
+        auto_promote = bool(payload.get("auto_promote", True))
+        suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
+        run_count = max(1, int(payload.get("run_count", 2) or 2))
+        baseline_change_id = payload.get("baseline_change_id", "baseline")
+        current_config = get_active_eval_harness_config()
+        proposals = await asyncio.gather(*[generate_eval_candidate_from_tier(tier, current_config) for tier in proposer_tiers])
+
+        recent_reports = (
+            storage.session.query(ParameterModel)
+            .filter(ParameterModel.key.like("experiment_report:%"))
+            .order_by(ParameterModel.updated_at.desc())
+            .limit(50)
+            .all()
+        )
+        recent_signatures = {
+            eval_override_signature(report.get("eval_harness_config_override"))
+            for report in iter_experiment_reports(recent_reports)
+            if report.get("eval_harness_config_override")
+        }
+        current_signature = eval_override_signature(current_config)
+        seen_signatures = set()
+
+        runner = ExperimentRunner(storage, model_adapter)
+        evaluated = []
+        promoted = []
+        skipped = []
+
+        for proposal in proposals:
+            proposal_signature = eval_override_signature(proposal["eval_harness_config_override"])
+            if proposal_signature == current_signature:
+                skipped.append({"proposal": proposal, "reason": "matches_current_config"})
+                continue
+            if proposal_signature in recent_signatures:
+                skipped.append({"proposal": proposal, "reason": "recent_duplicate"})
+                continue
+            if proposal_signature in seen_signatures:
+                skipped.append({"proposal": proposal, "reason": "duplicate_in_cycle"})
+                continue
+            seen_signatures.add(proposal_signature)
+            result = await runner.run_full_eval_gate(
+                proposal["candidate_change_id"],
+                api_url="http://127.0.0.1:8000",
+                baseline_change_id=baseline_change_id,
+                suite_name=suite_name,
+                run_count=run_count,
+                eval_harness_config_override=proposal["eval_harness_config_override"],
+                proposal_metadata={
+                    "proposer_tier": proposal["proposer_tier"],
+                    "rationale": proposal["rationale"],
+                    "expected_gain": proposal["expected_gain"],
+                    "source": "bootstrap_cycle",
+                },
+                source_task_id=payload.get("source_task_id"),
+                associated_task_ids=payload.get("associated_task_ids"),
+            )
+            evaluated.append({"proposal": proposal, "result": result.model_dump()})
+            if auto_promote and result.recommendation == "promote":
+                promoted.append(apply_experiment_promotion(storage, proposal["candidate_change_id"], force=False))
+
+        return {
+            "status": "ok",
+            "current_eval_harness_config": current_config,
+            "evaluated": evaluated,
+            "promoted": promoted,
+            "skipped": skipped,
+            "auto_promote": auto_promote,
+        }
+
+    @app.post("/admin/experiments/tool_cycle")
+    async def run_tool_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
+        from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
+
+        payload = payload or {}
+        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak"])]
+        proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+        if not proposer_tiers:
+            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+        tool_name = payload.get("tool_name", "bootstrap_history_tool")
+        task_description = str(
+            payload.get(
+                "task_description",
+                "Create a read-only dynamic tool that helps operators inspect bootstrap history and promotion readiness.",
+            )
+        )
+        proposals = await asyncio.gather(
+            *[generate_tool_candidate_from_tier(tier, tool_name=tool_name, task_description=task_description) for tier in proposer_tiers]
+        )
+        pipeline = ToolsPromotionPipeline(storage)
+        evaluated = []
+        for proposal in proposals:
+            os.makedirs("strata/tools", exist_ok=True)
+            os.makedirs("strata/tools/manifests", exist_ok=True)
+            os.makedirs("strata/tools/tests", exist_ok=True)
+            experimental_path = os.path.join("strata/tools", f"{proposal['tool_name']}.experimental.py")
+            manifest_path = os.path.join("strata/tools/manifests", f"{proposal['tool_name']}.json")
+            smoke_path = os.path.join("strata/tools/tests", f"test_{proposal['tool_name']}_smoke.py")
+            with open(experimental_path, "w", encoding="utf-8") as handle:
+                handle.write(proposal["source"])
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "validator": (proposal["manifest"] or {}).get("validator", "python_import_only"),
+                        "smoke_test": (proposal["manifest"] or {}).get("smoke_test", smoke_path),
+                        "proposer_tier": proposal["proposer_tier"],
+                    },
+                    handle,
+                    indent=2,
+                )
+            with open(smoke_path, "w", encoding="utf-8") as handle:
+                handle.write(proposal["smoke_test"])
+            validation = await pipeline.validate_and_promote(proposal["tool_name"])
+            result = ExperimentRunner(storage, model_adapter).record_tool_promotion_result(
+                candidate_change_id=proposal["candidate_change_id"],
+                validation_result=validation.model_dump(),
+                proposal_metadata={
+                    "proposer_tier": proposal["proposer_tier"],
+                    "tool_name": proposal["tool_name"],
+                    "rationale": proposal["rationale"],
+                    "expected_gain": proposal["expected_gain"],
+                    "source": "tool_cycle",
+                },
+                source_task_id=payload.get("source_task_id"),
+                associated_task_ids=payload.get("associated_task_ids"),
+            )
+            evaluated.append({"proposal": proposal, "validation": validation.model_dump(), "result": result.model_dump()})
+        return {"status": "ok", "evaluated": evaluated}
+
+    @app.get("/admin/experiments/secondary_ignition")
+    async def get_secondary_ignition_status(storage=Depends(get_storage)):
+        promoted_state = storage.parameters.peek_parameter(
+            "promoted_eval_candidates",
+            default_value={"current": None, "history": []},
+        ) or {"current": None, "history": []}
+        current_candidate = promoted_state.get("current")
+        runner = ExperimentRunner(storage, model_adapter)
+        report_rows = (
+            storage.session.query(ParameterModel)
+            .filter(ParameterModel.key.like("experiment_report:%"))
+            .order_by(ParameterModel.updated_at.desc())
+            .all()
+        )
+        matching_report = None
+        for report in iter_experiment_reports(report_rows):
+            proposal_metadata = report.get("proposal_metadata") or {}
+            recommendation = report.get("recommendation")
+            weak_gain = report_has_weak_gain(report)
+            if proposal_metadata.get("proposer_tier") == "weak" and recommendation == "promote" and weak_gain:
+                matching_report = report
+                break
+
+        current_report = runner.get_persisted_experiment_report(current_candidate) if current_candidate else None
+        if matching_report:
+            return {
+                "status": "ok",
+                "detected": True,
+                "candidate_change_id": matching_report.get("candidate_change_id"),
+                "current_promoted_candidate": current_candidate,
+                "recommendation": matching_report.get("recommendation"),
+                "proposal_metadata": matching_report.get("proposal_metadata") or {},
+                "weak_gain_detected": True,
+                "reason": "Weak-originated candidate was promoted after improving weak-tier eval metrics.",
+            }
+        if not current_candidate:
+            return {"status": "ok", "detected": False, "reason": "No promoted eval candidate is currently active."}
+        if not current_report:
+            return {
+                "status": "ok",
+                "detected": False,
+                "candidate_change_id": current_candidate,
+                "reason": "No persisted experiment report found for the current promoted candidate.",
+            }
+        proposal_metadata = current_report.get("proposal_metadata") or {}
+        recommendation = current_report.get("recommendation")
+        weak_gain = report_has_weak_gain(current_report)
+        return {
+            "status": "ok",
+            "detected": False,
+            "candidate_change_id": current_candidate,
+            "recommendation": recommendation,
+            "proposal_metadata": proposal_metadata,
+            "weak_gain_detected": weak_gain,
+            "reason": "Secondary ignition has not been detected yet for the current promoted candidate.",
+        }
+
+    exported.update(
+        {
+            "run_benchmark_experiment": run_benchmark_experiment,
+            "run_full_eval_experiment": run_full_eval_experiment,
+            "compare_experiment_metrics": compare_experiment_metrics,
+            "get_experiment_report": get_experiment_report,
+            "get_experiment_history": get_experiment_history,
+            "get_eval_harness_config": get_eval_harness_config,
+            "set_eval_harness_config": set_eval_harness_config,
+            "promote_experiment_candidate": promote_experiment_candidate,
+            "run_bootstrap_cycle": run_bootstrap_cycle,
+            "run_tool_bootstrap_cycle": run_tool_bootstrap_cycle,
+            "get_secondary_ignition_status": get_secondary_ignition_status,
+        }
+    )
+    return exported
