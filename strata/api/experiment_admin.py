@@ -149,6 +149,12 @@ def register_experiment_routes(
                     "recorded_at": current.get("recorded_at"),
                     "proposal_metadata": current.get("proposal_metadata") or {},
                     "promotion_readiness": readiness,
+                    "diagnostic_review": {
+                        "status": (current.get("diagnostic_review") or {}).get("status"),
+                        "primary_failure_mode": (current.get("diagnostic_review") or {}).get("primary_failure_mode"),
+                        "recommended_fix": (current.get("diagnostic_review") or {}).get("recommended_fix"),
+                        "summary": (current.get("diagnostic_review") or {}).get("summary"),
+                    },
                     "has_eval_harness_override": bool(current.get("eval_harness_config_override")),
                     "has_code_validation": bool(current.get("code_validation")),
                     "task_associations": current.get("task_associations") or {},

@@ -10,6 +10,7 @@ from strata.experimental.experiment_runner import (
     normalize_experiment_report,
     report_has_weak_gain,
 )
+from strata.experimental.diagnostics import build_eval_trace_summary
 
 
 class FakeQuery:
@@ -84,6 +85,12 @@ def make_report(
         "recorded_at": "2026-03-26T00:00:00+00:00",
         "proposal_metadata": {"proposer_tier": proposer_tier},
         "promotion_readiness": {"ready_for_promotion": recommendation == "promote"},
+        "diagnostic_review": {
+            "status": "ok",
+            "primary_failure_mode": "tool_avoidance",
+            "recommended_fix": "Require a repo inspection step before declaring missing context.",
+            "summary": "The weak model is not inspecting the repo before giving up.",
+        },
         "deltas": {
             "benchmark_harness_score": benchmark_delta,
             "structured_eval_harness_accuracy": structured_delta,
@@ -230,9 +237,67 @@ def test_experiment_history_returns_real_candidate_ids():
     candidate_ids = [report["candidate_change_id"] for report in result["reports"]]
     assert candidate_ids == ["raw_candidate", "wrapped_candidate"]
     assert result["reports"][0]["promotion_readiness"]["ready_for_promotion"] is True
+    assert result["reports"][0]["diagnostic_review"]["primary_failure_mode"] == "tool_avoidance"
     assert result["current_promoted_candidate"] == "wrapped_candidate"
 
 
 def test_report_has_weak_gain_handles_missing_and_positive_deltas():
     assert report_has_weak_gain({}) is False
     assert report_has_weak_gain({"deltas": {"benchmark_harness_score": 0.1}}) is True
+
+
+def test_build_eval_trace_summary_preserves_sample_evidence():
+    summary = build_eval_trace_summary(
+        candidate_change_id="candidate_a",
+        baseline_change_id="baseline",
+        benchmark_reports=[
+            {
+                "run_label": "bench-1",
+                "baseline_wins": 1,
+                "harness_wins": 2,
+                "ties": 0,
+                "average_baseline_score": 5.0,
+                "average_harness_score": 7.0,
+                "samples": [
+                    {
+                        "prompt_id": "repo_orientation",
+                        "winner": "baseline",
+                        "baseline_score": 7,
+                        "harness_score": 4,
+                        "baseline_latency_s": 1.0,
+                        "harness_latency_s": 2.0,
+                        "rationale": "Harness refused instead of inspecting the repo.",
+                        "baseline_response": "Direct answer",
+                        "harness_response": "I need the codebase first",
+                    }
+                ],
+            }
+        ],
+        structured_reports=[
+            {
+                "run_label": "struct-1",
+                "suite_name": "bootstrap_mcq_v1",
+                "baseline_accuracy": 0.5,
+                "harness_accuracy": 0.75,
+                "baseline_avg_latency_s": 1.1,
+                "harness_avg_latency_s": 2.2,
+                "samples": [
+                    {
+                        "case_id": "secondary_ignition_condition",
+                        "baseline_correct": False,
+                        "harness_correct": True,
+                        "baseline_latency_s": 1.0,
+                        "harness_latency_s": 2.0,
+                        "baseline_response": "Wrong",
+                        "harness_response": "Right",
+                    }
+                ],
+            }
+        ],
+        suite_name="bootstrap_mcq_v1",
+    )
+
+    assert summary["candidate_change_id"] == "candidate_a"
+    assert summary["benchmark_samples"][0]["winner"] == "baseline"
+    assert "inspect" in summary["benchmark_samples"][0]["rationale"].lower()
+    assert summary["structured_samples"][0]["case_id"] == "secondary_ignition_condition"

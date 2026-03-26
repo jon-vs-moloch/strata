@@ -55,6 +55,7 @@ def persist_experiment_report(
     proposal_metadata: Optional[Dict[str, Any]] = None,
     promotion_readiness: Optional[Dict[str, Any]] = None,
     code_validation: Optional[Dict[str, Any]] = None,
+    diagnostic_review: Optional[Dict[str, Any]] = None,
     source_task_id: Optional[str] = None,
     spawned_task_ids: Optional[List[str]] = None,
     associated_task_ids: Optional[List[str]] = None,
@@ -83,6 +84,7 @@ def persist_experiment_report(
         "proposal_metadata": proposal_metadata or {},
         "promotion_readiness": promotion_readiness or {},
         "code_validation": code_validation or {},
+        "diagnostic_review": diagnostic_review or {},
         "task_associations": task_associations,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -22,6 +22,7 @@ from strata.experimental.report_store import (
     persist_experiment_report,
     report_parameter_key,
 )
+from strata.experimental.diagnostics import review_eval_trace
 from strata.experimental.report_utils import (
     ExperimentResult,
     iter_experiment_reports,
@@ -100,6 +101,12 @@ class ExperimentRunner:
             benchmark_reports=benchmark_reports,
         )
         recommendation = decide_benchmark_promotion(deltas, promotion_readiness)
+        diagnostic_review = await review_eval_trace(
+            self.model,
+            candidate_change_id=candidate_change_id,
+            baseline_change_id=baseline_change_id,
+            benchmark_reports=benchmark_reports,
+        )
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -120,6 +127,7 @@ class ExperimentRunner:
             eval_harness_config_override=eval_harness_config_override,
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
+            diagnostic_review=diagnostic_review,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
@@ -184,6 +192,14 @@ class ExperimentRunner:
             structured_reports=structured_reports,
         )
         recommendation = decide_benchmark_promotion(deltas, promotion_readiness)
+        diagnostic_review = await review_eval_trace(
+            self.model,
+            candidate_change_id=candidate_change_id,
+            baseline_change_id=baseline_change_id,
+            benchmark_reports=benchmark_reports,
+            structured_reports=structured_reports,
+            suite_name=suite_name,
+        )
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -206,6 +222,7 @@ class ExperimentRunner:
             eval_harness_config_override=eval_harness_config_override,
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
+            diagnostic_review=diagnostic_review,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
@@ -252,6 +269,7 @@ class ExperimentRunner:
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
             code_validation=validation_result,
+            diagnostic_review={},
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
