@@ -8,7 +8,7 @@ import {
   MessageSquare, Send, History, Cpu,
   Terminal, AlertCircle, X, Settings,
   Activity, Trash2, Database, LayoutDashboard,
-  Pause, Play, Square
+  Pause, Play, Square, ChevronDown, ChevronRight
 } from 'lucide-react';
 import TaskCard from './components/TaskCard';
 
@@ -42,6 +42,19 @@ const formatRelativeTime = (dateString) => {
 const formatAbsoluteTime = (dateString) => {
   if (!dateString) return '—';
   return new Date(dateString).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
+const formatMessageForDisplay = (content) => {
+  const raw = String(content || '');
+  const normalized = raw.replace(/([.!?])\s+\*?#\s+/g, '$1\n\n# ').replace(/\n\*?#\s+/g, '\n# ');
+  const headingIndex = normalized.search(/\n#\s+/);
+  if (headingIndex <= 0) {
+    return { lead: '', body: normalized };
+  }
+  return {
+    lead: normalized.slice(0, headingIndex).trim(),
+    body: normalized.slice(headingIndex + 1).trim(),
+  };
 };
 
 
@@ -627,6 +640,7 @@ function App() {
   const [providerTelemetry, setProviderTelemetry] = useState({});
   const [dashboard, setDashboard] = useState(null);
   const [loadedContext, setLoadedContext] = useState({ files: [], budget_tokens: 0 });
+  const [showFinishedTasks, setShowFinishedTasks] = useState(false);
   const API = 'http://localhost:8000';
 
   const [archivedTasks, setArchivedTasks] = useState(() => {
@@ -859,13 +873,7 @@ function App() {
       }
     });
 
-    // Sort roots for main display
-    roots.sort((a, b) => {
-      const wA = ['complete', 'abandoned', 'cancelled'].includes(a.status) ? 1 : ['working', 'blocked', 'pushed'].includes(a.status) ? 2 : 3;
-      const wB = ['complete', 'abandoned', 'cancelled'].includes(b.status) ? 1 : ['working', 'blocked', 'pushed'].includes(b.status) ? 2 : 3;
-      if (wA !== wB) return wA - wB;
-      return a.id.localeCompare(b.id);
-    });
+    roots.sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
 
     return roots;
   }, [tasks, archivedTasks]);
@@ -884,9 +892,9 @@ function App() {
     { id: 'dashboard', Icon: LayoutDashboard,label: 'Dashboard' },
   ];
 
-  const visibleTaskTree = activeNav === 'dashboard'
-    ? taskTree
-    : taskTree.filter(task => !['complete', 'abandoned', 'cancelled'].includes(task.status));
+  const finishedTaskTree = taskTree.filter(task => ['complete', 'abandoned', 'cancelled'].includes(task.status));
+  const activeTaskTree = taskTree.filter(task => !['complete', 'abandoned', 'cancelled'].includes(task.status));
+  const visibleTaskTree = activeNav === 'dashboard' ? taskTree : activeTaskTree;
 
   return (
     <div className="app-container" style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
@@ -1078,7 +1086,9 @@ function App() {
         ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <AnimatePresence initial={false}>
-            {messages.map((msg, i) => (
+            {messages.map((msg, i) => {
+              const display = formatMessageForDisplay(msg.content);
+              return (
               <MotionDiv
                 key={msg.id || i}
                 initial={{ opacity: 0, y: 12 }}
@@ -1105,13 +1115,18 @@ function App() {
                   </div>
                 )}
                 <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.65' }}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  {display.lead && (
+                    <div style={{ fontSize: '13px', color: msg.role === 'user' ? 'rgba(255,255,255,0.92)' : '#e8e9f2', fontWeight: 600, marginBottom: '10px' }}>
+                      {display.lead}
+                    </div>
+                  )}
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{display.body}</ReactMarkdown>
                 </div>
                 <div title={formatAbsoluteTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
                   {formatRelativeTime(msg.created_at)}
                 </div>
               </MotionDiv>
-            ))}
+            )})}
 
             {messages.length === 0 && !isSending && (
               <MotionDiv
@@ -1199,6 +1214,45 @@ function App() {
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          {activeNav !== 'dashboard' && finishedTaskTree.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <button
+                onClick={() => setShowFinishedTasks(!showFinishedTasks)}
+                style={{
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.05)',
+                  color: '#8f90a3',
+                  borderRadius: '10px',
+                  padding: '10px 12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  fontWeight: 800,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase'
+                }}
+              >
+                <span>Recent Finished · {finishedTaskTree.length}</span>
+                {showFinishedTasks ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </button>
+              <AnimatePresence>
+                {showFinishedTasks && (
+                  <MotionDiv
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}
+                  >
+                    {finishedTaskTree.map(task => (
+                      <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />
+                    ))}
+                  </MotionDiv>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
           <div style={{ background: '#101015', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>LOADED CONTEXT</div>
             <div style={{ fontSize: '11px', color: '#888' }}>
@@ -1214,7 +1268,7 @@ function App() {
             <TelemetryCell value={runningCount || '—'} label="WORKING" />
             <TelemetryCell value={blockedCount || '—'} label="BLOCKED" />
             <TelemetryCell value={specClarificationCount || '—'} label="SPEC ASK" />
-            <TelemetryCell value={visibleTaskTree.length || '—'} label="VISIBLE" />
+            <TelemetryCell value={activeTaskTree.length || '—'} label="ACTIVE" />
           </div>
           <AnimatePresence>
             {visibleTaskTree.map(task => (
@@ -1311,6 +1365,35 @@ const DashboardPanel = ({ title, children }) => (
   </div>
 );
 
+const Sparkline = ({ values, color = '#8257e5' }) => {
+  const points = Array.isArray(values) ? values : [];
+  if (points.length < 2) {
+    return <div style={{ fontSize: '11px', color: '#666' }}>—</div>;
+  }
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const width = 120;
+  const height = 28;
+  const polyline = points.map((value, index) => {
+    const x = (index / Math.max(1, points.length - 1)) * width;
+    const y = height - (((value - min) / span) * height);
+    return `${x},${y}`;
+  }).join(' ');
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: 'visible' }}>
+      <polyline
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        points={polyline}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+};
+
 const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers }) => (
   <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
     <DashboardPanel title="SYSTEM STATUS">
@@ -1335,6 +1418,36 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
           {dashboard?.current_promoted_candidate || '—'}
         </div>
       </div>
+    </DashboardPanel>
+
+    <DashboardPanel title="EVAL SNAPSHOTS">
+      {(dashboard?.eval_profiles?.variants?.length ? dashboard.eval_profiles.variants : []).slice(0, 8).map((variant) => {
+        const accuracySeries = variant?.metrics?.eval_sample_tick_accuracy?.values || variant?.metrics?.eval_matrix_accuracy?.values || [];
+        const accuracyLatest = variant?.metrics?.eval_sample_tick_accuracy?.latest ?? variant?.metrics?.eval_matrix_accuracy?.latest ?? 0;
+        const accuracyDelta = variant?.metrics?.eval_sample_tick_accuracy?.delta ?? variant?.metrics?.eval_matrix_accuracy?.delta ?? 0;
+        return (
+          <div key={variant.variant_id} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 1.2fr) 100px 100px 130px', gap: '12px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+              <span style={{ color: '#e7e8ef', fontSize: '12px', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {variant.variant_id}
+              </span>
+              <span style={{ color: '#77798b', fontSize: '11px' }}>
+                {variant.suite_name || 'suite'} · {variant.include_context ? 'context' : 'no-context'}
+              </span>
+            </div>
+            <div style={{ fontSize: '12px', color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+              {Math.round(accuracyLatest * 100)}% {accuracyDelta ? `(${accuracyDelta > 0 ? '+' : ''}${Math.round(accuracyDelta * 100)}pt)` : ''}
+            </div>
+            <div style={{ fontSize: '12px', color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+              {variant.latest_latency_s ? `${variant.latest_latency_s}s` : '—'}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Sparkline values={accuracySeries} color={variant.mode === 'strong' ? '#00f294' : '#8257e5'} />
+            </div>
+          </div>
+        );
+      })}
+      {!(dashboard?.eval_profiles?.variants?.length) && <div style={{ fontSize: '12px', color: '#666' }}>No eval snapshot data yet.</div>}
     </DashboardPanel>
 
     <DashboardPanel title="RECENT PROMOTIONS">
@@ -1364,15 +1477,21 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
 
     <DashboardPanel title="CONTEXT">
       <div style={{ fontSize: '12px', color: '#a9aaba' }}>
-        Loaded files: {loadedContext?.files?.length || 0} · budget {loadedContext?.budget_tokens || 0} tokens
+        Loaded files: {loadedContext?.files?.length || 0} · budget {loadedContext?.budget_tokens || 0} tokens · recent load volume {dashboard?.context_pressure?.recent_estimated_tokens || 0}t
       </div>
       {(dashboard?.context_pressure?.top_artifacts?.slice(0, 6) || []).map((artifact) => (
-        <div key={`${artifact.artifact_type}-${artifact.identifier}`} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' }}>
+        <div key={`${artifact.artifact_type}-${artifact.identifier}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 1.2fr) 100px 110px 90px', gap: '12px', fontSize: '12px', alignItems: 'center' }}>
           <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {artifact.artifact_type} · {artifact.identifier}
           </span>
           <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
-            {artifact.load_count}x · {artifact.max_estimated_tokens}t
+            {artifact.token_share_pct}% total
+          </span>
+          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+            {artifact.recent_token_share_pct}% recent
+          </span>
+          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+            {artifact.peak_sigma ? `${artifact.peak_sigma}σ` : '—'}
           </span>
         </div>
       ))}

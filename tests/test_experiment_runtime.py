@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 
-from strata.api.experiment_runtime import extract_json_object, generate_eval_candidate_from_tier
+from strata.api.experiment_runtime import (
+    extract_json_object,
+    generate_eval_candidate_from_tier,
+    summarize_eval_variant_metrics,
+)
 
 
 class DummyAdapter:
@@ -31,3 +36,30 @@ def test_generate_eval_candidate_from_tier_falls_back_on_malformed_json():
         assert result["raw_proposal"]["parse_error"] == "not json at all"
 
     asyncio.run(run())
+
+
+def test_summarize_eval_variant_metrics_groups_latest_and_series():
+    now = datetime.utcnow()
+
+    class Row:
+        def __init__(self, metric_name, value, seconds, details):
+            self.metric_name = metric_name
+            self.value = value
+            self.timestamp = now + timedelta(seconds=seconds)
+            self.details = details
+            self.model_id = details.get("variant_id")
+
+    rows = [
+        Row("eval_sample_tick_accuracy", 0.4, 1, {"variant_id": "weak_raw_model", "mode": "weak", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_accuracy", 0.6, 2, {"variant_id": "weak_raw_model", "mode": "weak", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_latency_s", 12.0, 2, {"variant_id": "weak_raw_model", "mode": "weak", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_accuracy", 0.8, 3, {"variant_id": "weak_harness_no_capes", "mode": "weak", "profile": "harness_no_capes", "suite_name": "mmlu_mini_v1", "include_context": False}),
+    ]
+
+    summary = summarize_eval_variant_metrics(rows, series_limit=5)
+
+    assert summary["variant_count"] == 2
+    raw = next(item for item in summary["variants"] if item["variant_id"] == "weak_raw_model")
+    assert raw["latest_accuracy"] == 0.6
+    assert raw["metrics"]["eval_sample_tick_accuracy"]["delta"] == 0.2
+    assert raw["latest_latency_s"] == 12.0

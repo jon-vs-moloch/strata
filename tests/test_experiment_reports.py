@@ -5,6 +5,7 @@ import pytest
 
 from strata.api import main as api_main
 from strata.api import experiment_runtime as experiment_runtime
+from strata.experimental.calibration import JUDGE_TRUST_KEY
 from strata.experimental.experiment_runner import (
     ExperimentRunner,
     normalize_experiment_report,
@@ -90,6 +91,23 @@ def make_report(
             "primary_failure_mode": "tool_avoidance",
             "recommended_fix": "Require a repo inspection step before declaring missing context.",
             "summary": "The weak model is not inspecting the repo before giving up.",
+        },
+        "prediction_record": {
+            "predicted_outcome": "improve",
+            "confidence": 0.78,
+            "domains_affected": ["eval", "bootstrap"],
+        },
+        "prediction_outcome": {
+            "actual_delta": {
+                "benchmark_harness_score": benchmark_delta,
+                "structured_eval_harness_accuracy": structured_delta,
+            },
+            "promotion_result": recommendation,
+        },
+        "calibration_record": {
+            "actual_outcome": "improve" if benchmark_delta > 0 or structured_delta > 0 else "neutral",
+            "direction_correct": 1.0 if benchmark_delta > 0 or structured_delta > 0 else 0.0,
+            "calibration_score": 0.91 if benchmark_delta > 0 or structured_delta > 0 else 0.4,
         },
         "deltas": {
             "benchmark_harness_score": benchmark_delta,
@@ -238,6 +256,8 @@ def test_experiment_history_returns_real_candidate_ids():
     assert candidate_ids == ["raw_candidate", "wrapped_candidate"]
     assert result["reports"][0]["promotion_readiness"]["ready_for_promotion"] is True
     assert result["reports"][0]["diagnostic_review"]["primary_failure_mode"] == "tool_avoidance"
+    assert result["reports"][0]["prediction_record"]["predicted_outcome"] == "improve"
+    assert result["reports"][0]["calibration_record"]["calibration_score"] == 0.4
     assert result["current_promoted_candidate"] == "wrapped_candidate"
 
 
@@ -301,3 +321,32 @@ def test_build_eval_trace_summary_preserves_sample_evidence():
     assert summary["benchmark_samples"][0]["winner"] == "baseline"
     assert "inspect" in summary["benchmark_samples"][0]["rationale"].lower()
     assert summary["structured_samples"][0]["case_id"] == "secondary_ignition_condition"
+
+
+def test_prediction_history_and_calibration_endpoints_surface_persisted_records():
+    rows = [
+        make_row("experiment_report:raw_candidate", make_report("raw_candidate", benchmark_delta=1.0)),
+        make_row(
+            "experiment_report:wrapped_candidate",
+            {"current": make_report("wrapped_candidate", benchmark_delta=0.0), "history": []},
+        ),
+    ]
+    storage = FakeStorage(
+        rows,
+        {
+            "promoted_eval_candidates": {"current": "raw_candidate", "history": []},
+            JUDGE_TRUST_KEY: {
+                "by_tier": {"strong": {"trust": 0.88, "count": 3}},
+                "by_domain": {"strong:eval": {"trust": 0.82, "count": 2}},
+                "by_failure_family": {},
+            },
+        },
+    )
+
+    history = asyncio.run(api_main.get_prediction_history(limit=10, storage=storage))
+    calibration = asyncio.run(api_main.get_prediction_calibration(limit=10, storage=storage))
+    trust = asyncio.run(api_main.get_prediction_trust(storage=storage))
+
+    assert history["history"][0]["prediction_record"]["predicted_outcome"] == "improve"
+    assert calibration["average_calibration_score"] > 0.0
+    assert trust["trust"]["by_tier"]["strong"]["trust"] == 0.88

@@ -11,6 +11,7 @@ from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import TaskModel, MetricModel
 from strata.eval.benchmark import run_benchmark, persist_benchmark_report
 from strata.eval.structured_eval import run_structured_eval, persist_structured_eval_report
+from strata.experimental.calibration import normalize_prediction, score_prediction_against_outcome, update_judge_trust
 from strata.experimental.promotion_policy import (
     build_promotion_readiness,
     calculate_deltas,
@@ -107,6 +108,30 @@ class ExperimentRunner:
             baseline_change_id=baseline_change_id,
             benchmark_reports=benchmark_reports,
         )
+        prediction_record = normalize_prediction(diagnostic_review)
+        prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "strong")
+        prediction_record["failure_family"] = str(diagnostic_review.get("failure_family") or "")
+        prediction_outcome = {
+            "candidate_change_id": candidate_change_id,
+            "actual_metrics": candidate_metrics,
+            "actual_delta": deltas,
+            "promotion_result": recommendation,
+            "run_count": safe_runs,
+            "observed_domains": ["benchmark", "eval"],
+        }
+        calibration_record = score_prediction_against_outcome(
+            prediction_record,
+            actual_delta=deltas,
+            promotion_result=recommendation,
+            observed_domains=prediction_outcome["observed_domains"],
+            run_count=safe_runs,
+        )
+        judge_trust_snapshot = update_judge_trust(
+            self.storage,
+            judge_tier=prediction_record["judge_tier"],
+            prediction=prediction_record,
+            calibration_record=calibration_record,
+        )
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -128,6 +153,10 @@ class ExperimentRunner:
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
             diagnostic_review=diagnostic_review,
+            prediction_record=prediction_record,
+            prediction_outcome=prediction_outcome,
+            calibration_record=calibration_record,
+            judge_trust_snapshot=judge_trust_snapshot,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
@@ -200,6 +229,30 @@ class ExperimentRunner:
             structured_reports=structured_reports,
             suite_name=suite_name,
         )
+        prediction_record = normalize_prediction(diagnostic_review)
+        prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "strong")
+        prediction_record["failure_family"] = str(diagnostic_review.get("failure_family") or "")
+        prediction_outcome = {
+            "candidate_change_id": candidate_change_id,
+            "actual_metrics": candidate_metrics,
+            "actual_delta": deltas,
+            "promotion_result": recommendation,
+            "run_count": safe_runs,
+            "observed_domains": ["benchmark", "structured_eval", suite_name],
+        }
+        calibration_record = score_prediction_against_outcome(
+            prediction_record,
+            actual_delta=deltas,
+            promotion_result=recommendation,
+            observed_domains=prediction_outcome["observed_domains"],
+            run_count=safe_runs,
+        )
+        judge_trust_snapshot = update_judge_trust(
+            self.storage,
+            judge_tier=prediction_record["judge_tier"],
+            prediction=prediction_record,
+            calibration_record=calibration_record,
+        )
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -223,6 +276,10 @@ class ExperimentRunner:
             proposal_metadata=proposal_metadata,
             promotion_readiness=promotion_readiness,
             diagnostic_review=diagnostic_review,
+            prediction_record=prediction_record,
+            prediction_outcome=prediction_outcome,
+            calibration_record=calibration_record,
+            judge_trust_snapshot=judge_trust_snapshot,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,

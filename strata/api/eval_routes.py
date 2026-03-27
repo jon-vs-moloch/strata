@@ -10,6 +10,8 @@ inspect the eval surface without also loading the self-improvement control loop.
 from __future__ import annotations
 
 import time
+import json
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import Depends, HTTPException
@@ -29,6 +31,26 @@ def register_eval_routes(
     get_provider_telemetry_snapshot,
 ) -> Dict[str, Any]:
     exported: Dict[str, Any] = {}
+    suites_dir = Path("strata/eval/suites")
+
+    def _list_eval_suites() -> list[Dict[str, Any]]:
+        suites = []
+        for path in sorted(suites_dir.glob("*.jsonl")):
+            try:
+                lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            except Exception:
+                continue
+            first = json.loads(lines[0]) if lines else {}
+            suites.append(
+                {
+                    "suite_name": path.stem,
+                    "case_count": len(lines),
+                    "grading": first.get("grading", "unknown"),
+                    "benchmark": first.get("benchmark"),
+                    "source_dataset": first.get("source_dataset"),
+                }
+            )
+        return suites
 
     @app.get("/admin/telemetry")
     async def get_telemetry(limit: int = 25, storage=Depends(get_storage)):
@@ -60,6 +82,10 @@ def register_eval_routes(
             description="Last persisted provider transport telemetry snapshot.",
         ) or {}
         return {"status": "ok", "providers": persisted, "source": "persisted"}
+
+    @app.get("/admin/evals/suites")
+    async def list_eval_suites():
+        return {"status": "ok", "suites": _list_eval_suites()}
 
     @app.post("/admin/benchmark/run")
     async def run_benchmark_suite(payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
@@ -300,6 +326,7 @@ def register_eval_routes(
             "get_telemetry": get_telemetry,
             "get_dashboard": get_dashboard,
             "get_provider_telemetry": get_provider_telemetry,
+            "list_eval_suites": list_eval_suites,
             "run_benchmark_suite": run_benchmark_suite,
             "run_structured_eval_suite": run_structured_eval_suite,
             "run_eval_matrix_suite": run_eval_matrix_suite,

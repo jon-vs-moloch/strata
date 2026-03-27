@@ -41,6 +41,9 @@ def test_record_context_load_tracks_artifact_usage():
     assert stats["load_count"] == 1
     assert stats["last_source"] == "test"
     assert stats["avg_estimated_tokens"] >= 4
+    assert stats["token_share_pct"] == 100.0
+    assert stats["recent_token_share_pct"] == 100.0
+    assert "estimated_token_stddev" in stats
 
 
 def test_context_pressure_scan_flags_large_files(tmp_path):

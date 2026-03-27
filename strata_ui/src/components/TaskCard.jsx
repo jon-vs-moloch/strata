@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock, Signal } from 'lucide-react';
 
 const MotionDiv = motion.div;
 
@@ -43,6 +43,19 @@ function formatRelative(dateString) {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+function formatElapsed(startedAt, endedAt = null) {
+  if (!startedAt) return 'unknown';
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  const totalSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 1) return `${seconds}s`;
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
@@ -269,7 +282,7 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>ATTEMPTS</div>
                 {task.attempts.map((attempt, idx) => (
-                  <AttemptRow key={attempt.id} attempt={attempt} index={idx + 1} />
+                  <AttemptRow key={attempt.id} attempt={attempt} index={idx + 1} taskUpdatedAt={task.updated_at} />
                 ))}
                </div>
             )}
@@ -285,45 +298,114 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
   );
 };
 
-const AttemptRow = ({ attempt, index }) => {
+const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  React.useEffect(() => {
+    if (attempt.ended_at || attempt.outcome) return undefined;
+    const interval = window.setInterval(() => setNowMs(Date.now()), 15000);
+    return () => window.clearInterval(interval);
+  }, [attempt.ended_at, attempt.outcome]);
   const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
+  const isActive = !attempt.ended_at && !attempt.outcome;
+  const lastActivityAt = taskUpdatedAt || attempt.started_at;
+  const recentlyActive = lastActivityAt ? (nowMs - new Date(lastActivityAt).getTime()) < 90000 : false;
+  const artifacts = attempt.artifacts && typeof attempt.artifacts === 'object' ? attempt.artifacts : null;
+  const summaryBits = [];
+  if (artifacts?.job_kind) summaryBits.push(`job ${artifacts.job_kind}`);
+  if (artifacts?.duration_s) summaryBits.push(`${Number(artifacts.duration_s).toFixed(1)}s`);
+  if (attempt.resolution) summaryBits.push(`resolution ${attempt.resolution.replace(/_/g, ' ')}`);
   return (
-    <div style={{ 
-      background: 'rgba(255,255,255,0.02)', 
-      border: '1px solid rgba(255,255,255,0.05)', 
-      borderRadius: '8px', 
-      padding: '10px 14px',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '10px',
-      marginLeft: '12px',
-      borderLeft: `2px solid ${outcome.color}66`
-    }}>
-      <div style={{ fontSize: '10px', fontWeight: 800, color: '#444', fontFamily: "'JetBrains Mono', monospace" }}>
-        A{index}
-      </div>
-      <outcome.Icon size={12} color={outcome.color} />
-      <div style={{ flex: 1 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: '11px', color: '#888', fontWeight: 600, textTransform: 'uppercase' }}>
-            Attempt {attempt.outcome || 'Pending'}
-          </div>
-          <div style={{ fontSize: '9px', color: '#444' }}>
-            {formatAbsolute(attempt.started_at)}
-          </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginLeft: '12px' }}>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        style={{ 
+          background: isActive ? 'rgba(0,217,255,0.08)' : 'rgba(255,255,255,0.02)', 
+          border: isActive ? '1px solid rgba(0,217,255,0.2)' : '1px solid rgba(255,255,255,0.05)', 
+          borderRadius: '10px', 
+          padding: '12px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          borderLeft: `3px solid ${isActive ? '#00d9ff' : `${outcome.color}66`}`,
+          textAlign: 'left',
+          width: '100%',
+          cursor: 'pointer'
+        }}
+      >
+        <div style={{ fontSize: '10px', fontWeight: 800, color: '#666', fontFamily: "'JetBrains Mono', monospace", minWidth: '24px' }}>
+          A{index}
         </div>
-        <div style={{ fontSize: '9px', color: '#555', marginTop: '2px' }}>
-          {attempt.ended_at ? `Ended ${formatRelative(attempt.ended_at)}` : `Started ${formatRelative(attempt.started_at)}`}
-        </div>
-        {attempt.reason && (
-          <div style={{ fontSize: '11px', color: '#555', marginTop: '2px' }}>{attempt.reason}</div>
-        )}
-        {attempt.resolution && (
-          <div style={{ fontSize: '9px', color: outcome.color, marginTop: '4px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Resolution: {attempt.resolution.replace(/_/g, ' ')}
+        {isActive ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '28px' }}>
+            <MotionDiv
+              animate={{ opacity: [0.4, 1, 0.4], scale: [0.96, 1.08, 0.96] }}
+              transition={{ duration: 1.4, repeat: Infinity }}
+              style={{ width: '8px', height: '8px', borderRadius: '999px', background: recentlyActive ? '#00f294' : '#ffb84d', boxShadow: `0 0 10px ${recentlyActive ? '#00f29455' : '#ffb84d55'}` }}
+            />
+            <Signal size={12} color={recentlyActive ? '#00f294' : '#ffb84d'} />
           </div>
+        ) : (
+          <outcome.Icon size={12} color={outcome.color} />
         )}
-      </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+            <div style={{ fontSize: '11px', color: isActive ? '#d8f8ff' : '#888', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {isActive ? 'Attempt Active' : `Attempt ${attempt.outcome || 'Pending'}`}
+            </div>
+            <div style={{ fontSize: '9px', color: '#555' }}>
+              {formatAbsolute(attempt.started_at)}
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginTop: '3px', flexWrap: 'wrap' }}>
+            <div style={{ fontSize: '10px', color: isActive ? '#86dfff' : '#666' }}>
+              {isActive ? `Running for ${formatElapsed(attempt.started_at)}` : `Ran for ${formatElapsed(attempt.started_at, attempt.ended_at)}`}
+            </div>
+            <div style={{ fontSize: '10px', color: recentlyActive ? '#00f294' : '#777' }}>
+              {isActive ? (recentlyActive ? 'actively updating' : 'no recent heartbeat') : `ended ${formatRelative(attempt.ended_at)}`}
+            </div>
+          </div>
+          {summaryBits.length > 0 && (
+            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {summaryBits.join(' · ')}
+            </div>
+          )}
+        </div>
+        {expanded ? <ChevronDown size={13} color="#777" /> : <ChevronRight size={13} color="#777" />}
+      </button>
+      <AnimatePresence>
+        {expanded && (
+          <MotionDiv
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            style={{ overflow: 'hidden' }}
+          >
+            <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '10px', color: '#777' }}>
+                <span title={formatAbsolute(attempt.started_at)}>Started {formatRelative(attempt.started_at)}</span>
+                <span title={formatAbsolute(lastActivityAt)}>Last task update {formatRelative(lastActivityAt)}</span>
+                {attempt.ended_at && <span title={formatAbsolute(attempt.ended_at)}>Ended {formatRelative(attempt.ended_at)}</span>}
+              </div>
+              {attempt.reason && (
+                <div style={{ fontSize: '11px', color: '#a8a8b5', lineHeight: 1.45 }}>
+                  {attempt.reason}
+                </div>
+              )}
+              {artifacts && (
+                <div style={{ fontSize: '10px', color: '#8b8d9e', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {JSON.stringify(artifacts, null, 2)}
+                </div>
+              )}
+              {!attempt.reason && !artifacts && (
+                <div style={{ fontSize: '10px', color: '#666' }}>
+                  No detailed trace captured yet.
+                </div>
+              )}
+            </div>
+          </MotionDiv>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

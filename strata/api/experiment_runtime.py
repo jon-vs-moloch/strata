@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -19,9 +20,105 @@ from fastapi import HTTPException
 from strata.eval.harness_eval import EVAL_HARNESS_CONFIG_DESCRIPTION, EVAL_HARNESS_CONFIG_KEY
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
 from strata.specs.bootstrap import list_spec_proposals
+from strata.storage.models import MetricModel
 
 
 MAX_PROMOTION_HISTORY = 200
+EVAL_SERIES_LIMIT = 12
+
+
+def summarize_eval_variant_metrics(metric_rows, *, series_limit: int = EVAL_SERIES_LIMIT) -> Dict[str, Any]:
+    variants: Dict[str, Dict[str, Any]] = {}
+    grouped: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+
+    for row in metric_rows:
+        details = dict(getattr(row, "details", None) or {})
+        variant_id = str(details.get("variant_id") or getattr(row, "model_id", "") or "").strip()
+        if not variant_id:
+            continue
+        metric_name = str(getattr(row, "metric_name", "") or "")
+        grouped[variant_id][metric_name].append(row)
+        current = variants.setdefault(
+            variant_id,
+            {
+                "variant_id": variant_id,
+                "mode": details.get("mode"),
+                "profile": details.get("profile"),
+                "include_context": details.get("include_context"),
+                "suite_name": details.get("suite_name"),
+                "sampled": bool(details.get("sampled", False)),
+            },
+        )
+        current["mode"] = current.get("mode") or details.get("mode")
+        current["profile"] = current.get("profile") or details.get("profile")
+        current["include_context"] = (
+            details.get("include_context")
+            if details.get("include_context") is not None
+            else current.get("include_context")
+        )
+        current["suite_name"] = current.get("suite_name") or details.get("suite_name")
+        current["sampled"] = bool(current.get("sampled") or details.get("sampled", False))
+
+    snapshots = []
+    for variant_id, metrics_by_name in grouped.items():
+        current = variants[variant_id]
+        metric_payloads: Dict[str, Any] = {}
+        latest_timestamp = None
+        for metric_name, rows in metrics_by_name.items():
+            ordered = sorted(
+                rows,
+                key=lambda item: getattr(item, "timestamp", datetime.min.replace(tzinfo=None)),
+            )
+            series_rows = ordered[-series_limit:]
+            values = [round(float(getattr(item, "value", 0.0) or 0.0), 4) for item in series_rows]
+            timestamps = [
+                item.timestamp.isoformat() if getattr(item, "timestamp", None) is not None else None
+                for item in series_rows
+            ]
+            latest = series_rows[-1] if series_rows else None
+            latest_value = round(float(getattr(latest, "value", 0.0) or 0.0), 4) if latest else 0.0
+            window_avg = round(sum(values) / len(values), 4) if values else 0.0
+            delta = round(values[-1] - values[0], 4) if len(values) >= 2 else 0.0
+            metric_payloads[metric_name] = {
+                "latest": latest_value,
+                "window_avg": window_avg,
+                "delta": delta,
+                "values": values,
+                "timestamps": timestamps,
+            }
+            if latest is not None and (latest_timestamp is None or latest.timestamp > latest_timestamp):
+                latest_timestamp = latest.timestamp
+        current["metrics"] = metric_payloads
+        current["last_seen"] = latest_timestamp.isoformat() if latest_timestamp is not None else None
+        current["latest_accuracy"] = (
+            metric_payloads.get("eval_sample_tick_accuracy", {}).get("latest")
+            or metric_payloads.get("eval_matrix_accuracy", {}).get("latest")
+            or 0.0
+        )
+        current["latest_latency_s"] = (
+            metric_payloads.get("eval_sample_tick_latency_s", {}).get("latest")
+            or metric_payloads.get("eval_matrix_latency_s", {}).get("latest")
+            or 0.0
+        )
+        current["latest_total_tokens"] = (
+            metric_payloads.get("eval_sample_tick_total_tokens", {}).get("latest")
+            or metric_payloads.get("eval_matrix_total_tokens", {}).get("latest")
+            or 0.0
+        )
+        snapshots.append(current)
+
+    snapshots.sort(
+        key=lambda item: (
+            item.get("mode") != "weak",
+            item.get("profile") != "raw_model",
+            item.get("profile") != "harness_no_capes",
+            item.get("variant_id") or "",
+        )
+    )
+    return {
+        "variant_count": len(snapshots),
+        "variants": snapshots,
+    }
 
 
 def slugify_candidate_suffix(raw: str) -> str:
@@ -307,12 +404,28 @@ def build_dashboard_snapshot(
     top_context_artifacts = sorted(
         list((context_telemetry.get("stats", {}).get("artifacts") or {}).values()),
         key=lambda item: (
-            int(item.get("load_count", 0) or 0),
+            float(item.get("recent_token_share_pct", 0.0) or 0.0),
+            float(item.get("token_share_pct", 0.0) or 0.0),
             int(item.get("total_estimated_tokens", 0) or 0),
         ),
         reverse=True,
     )[:5]
     recent_spec_proposals = list_spec_proposals(storage, limit=5)
+    eval_metric_rows = (
+        storage.session.query(MetricModel)
+        .filter(MetricModel.metric_name.in_([
+            "eval_matrix_accuracy",
+            "eval_matrix_latency_s",
+            "eval_matrix_total_tokens",
+            "eval_sample_tick_accuracy",
+            "eval_sample_tick_latency_s",
+            "eval_sample_tick_total_tokens",
+        ]))
+        .order_by(MetricModel.timestamp.desc())
+        .limit(400)
+        .all()
+    )
+    eval_profiles = summarize_eval_variant_metrics(eval_metric_rows)
     return {
         "generated_at": telemetry.get("generated_at"),
         "overview": telemetry.get("overview", {}),
@@ -331,9 +444,12 @@ def build_dashboard_snapshot(
         "context_pressure": {
             "warning_count": len(context_telemetry.get("warnings", [])),
             "recent_load_count": len(context_telemetry.get("recent", [])),
+            "recent_estimated_tokens": int(context_telemetry.get("stats", {}).get("totals", {}).get("recent_estimated_tokens", 0) or 0),
+            "all_time_estimated_tokens": int(context_telemetry.get("stats", {}).get("totals", {}).get("all_time_estimated_tokens", 0) or 0),
             "top_artifacts": top_context_artifacts,
             "file_scan": context_telemetry.get("file_scan", {}),
         },
+        "eval_profiles": eval_profiles,
         "spec_governance": {
             "recent_proposals": recent_spec_proposals,
             "pending_count": sum(1 for row in recent_spec_proposals if str(row.get("status") or "") == "pending_review"),

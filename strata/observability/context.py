@@ -14,6 +14,7 @@ import logging
 import re
 from pathlib import Path
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, Iterable, Optional
 
 from strata.storage.services.main import StorageManager
@@ -95,10 +96,58 @@ def get_context_load_telemetry(storage) -> Dict[str, Any]:
     recent = storage.parameters.peek_parameter(CONTEXT_LOAD_RECENT_KEY, default_value=[]) or []
     warnings = storage.parameters.peek_parameter(CONTEXT_LOAD_WARNINGS_KEY, default_value=[]) or []
     file_scan = storage.parameters.peek_parameter(CONTEXT_FILE_SCAN_KEY, default_value={}) or {}
+    artifacts = dict(stats.get("artifacts") or {}) if isinstance(stats, dict) else {}
+    total_loads = sum(int(item.get("load_count", 0) or 0) for item in artifacts.values())
+    total_tokens = sum(int(item.get("total_estimated_tokens", 0) or 0) for item in artifacts.values())
+
+    recent_events = recent if isinstance(recent, list) else []
+    recent_total_loads = len(recent_events)
+    recent_total_tokens = sum(int(item.get("estimated_tokens", 0) or 0) for item in recent_events)
+    recent_counts: Dict[str, int] = {}
+    recent_tokens: Dict[str, int] = {}
+    for event in recent_events:
+        artifact_key = f"{event.get('artifact_type')}:{event.get('identifier')}"
+        recent_counts[artifact_key] = recent_counts.get(artifact_key, 0) + 1
+        recent_tokens[artifact_key] = recent_tokens.get(artifact_key, 0) + int(event.get("estimated_tokens", 0) or 0)
+
+    enriched_artifacts: Dict[str, Any] = {}
+    for key, item in artifacts.items():
+        enriched = dict(item or {})
+        load_count = int(enriched.get("load_count", 0) or 0)
+        total_estimated_tokens = int(enriched.get("total_estimated_tokens", 0) or 0)
+        total_estimated_tokens_sq = float(enriched.get("total_estimated_tokens_sq", 0.0) or 0.0)
+        avg_estimated_tokens = float(enriched.get("avg_estimated_tokens", 0.0) or 0.0)
+        variance = 0.0
+        if load_count > 0:
+            variance = max(0.0, (total_estimated_tokens_sq / load_count) - (avg_estimated_tokens ** 2))
+        stddev = math.sqrt(variance)
+        max_estimated_tokens = int(enriched.get("max_estimated_tokens", 0) or 0)
+        peak_sigma = 0.0
+        if stddev > 0:
+            peak_sigma = round((max_estimated_tokens - avg_estimated_tokens) / stddev, 2)
+
+        recent_count = recent_counts.get(key, 0)
+        recent_token_total = recent_tokens.get(key, 0)
+        enriched["load_share_pct"] = round((load_count / total_loads) * 100, 2) if total_loads else 0.0
+        enriched["token_share_pct"] = round((total_estimated_tokens / total_tokens) * 100, 2) if total_tokens else 0.0
+        enriched["recent_load_share_pct"] = round((recent_count / recent_total_loads) * 100, 2) if recent_total_loads else 0.0
+        enriched["recent_token_share_pct"] = round((recent_token_total / recent_total_tokens) * 100, 2) if recent_total_tokens else 0.0
+        enriched["estimated_token_stddev"] = round(stddev, 2)
+        enriched["peak_sigma"] = peak_sigma
+        enriched["recent_load_count"] = recent_count
+        enriched["recent_total_estimated_tokens"] = recent_token_total
+        enriched_artifacts[key] = enriched
+
+    totals = {
+        "all_time_load_count": total_loads,
+        "all_time_estimated_tokens": total_tokens,
+        "recent_load_count": recent_total_loads,
+        "recent_estimated_tokens": recent_total_tokens,
+    }
     return {
         "policy": get_context_load_policy(storage),
-        "stats": stats if isinstance(stats, dict) else {"artifacts": {}},
-        "recent": recent if isinstance(recent, list) else [],
+        "stats": {"artifacts": enriched_artifacts, "totals": totals},
+        "recent": recent_events,
         "warnings": warnings if isinstance(warnings, list) else [],
         "file_scan": file_scan if isinstance(file_scan, dict) else {},
     }
@@ -191,6 +240,7 @@ def _record_context_load_with_storage(
     current["last_loaded_at"] = now
     current["last_source"] = source
     current["total_estimated_tokens"] = int(current.get("total_estimated_tokens", 0)) + estimated_tokens
+    current["total_estimated_tokens_sq"] = float(current.get("total_estimated_tokens_sq", 0.0)) + float(estimated_tokens * estimated_tokens)
     current["max_estimated_tokens"] = max(int(current.get("max_estimated_tokens", 0)), estimated_tokens)
     current["avg_estimated_tokens"] = round(current["total_estimated_tokens"] / max(1, current["load_count"]), 2)
     current["last_metadata"] = dict(metadata or {})

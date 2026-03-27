@@ -14,6 +14,11 @@ from strata.eval.benchmark import persist_benchmark_report, run_benchmark
 from strata.eval.matrix import run_eval_matrix
 from strata.eval.structured_eval import persist_structured_eval_report, run_structured_eval
 from strata.experimental.experiment_runner import ExperimentRunner
+from strata.experimental.trace_review import (
+    append_trace_review_to_task,
+    build_trace_summary,
+    review_trace,
+)
 from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import AttemptOutcome, TaskState
@@ -201,6 +206,42 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 "proposal": proposal,
                 "validation": validation.model_dump(),
                 "result": experiment_result.model_dump(),
+            }
+        elif kind == "trace_review":
+            trace_kind = str(payload.get("trace_kind") or "generic_trace")
+            trace_summary = build_trace_summary(
+                trace_kind=trace_kind,
+                storage=storage,
+                trace_payload=payload.get("trace_payload"),
+                task_id=payload.get("task_id"),
+                session_id=payload.get("session_id"),
+                candidate_change_id=payload.get("candidate_change_id"),
+                baseline_change_id=payload.get("baseline_change_id"),
+                benchmark_reports=payload.get("benchmark_reports"),
+                structured_reports=payload.get("structured_reports"),
+                suite_name=payload.get("suite_name"),
+                include_session_messages=bool(payload.get("include_session_messages", True)),
+            )
+            review = await review_trace(
+                model_adapter,
+                trace_kind=trace_kind,
+                trace_summary=trace_summary,
+                reviewer_tier=str(payload.get("reviewer_tier") or "strong"),
+                candidate_change_id=payload.get("candidate_change_id"),
+            )
+            target_task_ids = []
+            if payload.get("persist_to_task", True):
+                for candidate in [payload.get("task_id"), *(payload.get("associated_task_ids") or [])]:
+                    task_id = str(candidate or "").strip()
+                    if task_id and task_id not in target_task_ids:
+                        target_task_ids.append(task_id)
+                for task_id in target_task_ids:
+                    append_trace_review_to_task(storage, task_id=task_id, review=review)
+            result = {
+                "trace_kind": trace_kind,
+                "reviewer_tier": review.get("reviewer_tier"),
+                "review": review,
+                "associated_task_ids": target_task_ids,
             }
         else:
             raise ValueError(f"Unsupported system eval job kind: {kind}")
