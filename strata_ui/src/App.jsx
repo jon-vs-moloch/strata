@@ -626,6 +626,7 @@ function App() {
   const [tasks, setTasks]             = useState([]);
   const [inputText, setInputText]     = useState('');
   const [isSending, setIsSending]     = useState(false);
+  const [sendError, setSendError]     = useState('');
   const [sessionId, setSessionId]     = useState('default');
   const [sessionList, setSessionList] = useState([]);
   const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'history' | 'dashboard'
@@ -640,6 +641,7 @@ function App() {
   const [providerTelemetry, setProviderTelemetry] = useState({});
   const [dashboard, setDashboard] = useState(null);
   const [loadedContext, setLoadedContext] = useState({ files: [], budget_tokens: 0 });
+  const [routingSummary, setRoutingSummary] = useState(null);
   const [showFinishedTasks, setShowFinishedTasks] = useState(false);
   const API = 'http://localhost:8000';
 
@@ -731,14 +733,15 @@ function App() {
     const gen = ++fetchGenRef.current;
 
     try {
-      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes] = await Promise.all([
+      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes] = await Promise.all([
         axios.get(`${API}/tasks`),
         axios.get(`${API}/messages?session_id=${sessionId}`),
         axios.get(`${API}/sessions`),
         axios.get(`${API}/admin/telemetry?limit=8`),
         axios.get(`${API}/admin/providers/telemetry`),
         axios.get(`${API}/admin/dashboard?limit=6`),
-        axios.get(`${API}/admin/context/loaded`)
+        axios.get(`${API}/admin/context/loaded`),
+        axios.get(`${API}/admin/routing`)
       ]);
 
       // If a newer fetch was launched while we were awaiting, discard this result
@@ -763,6 +766,7 @@ function App() {
       setProviderTelemetry(providerTelemetryRes.data.providers || {});
       setDashboard(dashboardRes.data.dashboard || null);
       setLoadedContext(loadedContextRes.data.loaded || { files: [], budget_tokens: 0 });
+      setRoutingSummary(routingRes.data.routing || null);
       setApiStatus('ok');
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
@@ -800,18 +804,25 @@ function App() {
   const handleSendMessage = async () => {
     if (!inputText.trim() || isSending) return;
     const text = inputText;
+    const tempId = `temp-${Date.now()}`;
     setInputText('');
+    setSendError('');
     setIsSending(true);
     isSendingRef.current = true;
     // Optimistic update: show the user's message immediately
-    setMessages(prev => [...prev, { id: `temp-${Date.now()}`, role: 'user', content: text }]);
+    setMessages(prev => [...prev, { id: tempId, role: 'user', content: text, pending: true }]);
     try {
       await axios.post(`${API}/chat`, { role: 'user', content: text, session_id: sessionId });
+      await fetchData(true);
     } catch (err) {
       console.error('Failed to send message.', err);
+      const detail = err?.response?.data?.detail;
+      const message = typeof detail === 'string' ? detail : 'Message failed to send. Please retry.';
+      setSendError(message);
+      setMessages(prev => prev.map(msg => (
+        msg.id === tempId ? { ...msg, pending: false, failed: true } : msg
+      )));
     }
-    // Force-fetch BEFORE clearing the sending lock, so no poll can sneak in
-    await fetchData(true);
     setIsSending(false);
     isSendingRef.current = false;
   };
@@ -1007,6 +1018,25 @@ function App() {
               {activeNav === 'dashboard' ? 'Operator Dashboard' : 'Orchestrator Chat'}
             </h1>
             <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>{sessionLabel}</p>
+            {routingSummary && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
+                <RoutePill
+                  label="CHAT"
+                  value={routingSummary?.chat?.error ? routingSummary.chat.error : `${routingSummary?.chat?.mode || '—'} · ${routingSummary?.chat?.provider || '—'} · ${routingSummary?.chat?.selected_model || routingSummary?.chat?.model || '—'}`}
+                  tone={routingSummary?.chat?.status === 'error' ? 'danger' : 'neutral'}
+                />
+                <RoutePill
+                  label="WEAK"
+                  value={routingSummary?.weak?.error ? routingSummary.weak.error : `${routingSummary?.weak?.transport || '—'} · ${routingSummary?.weak?.provider || '—'} · ${routingSummary?.weak?.selected_model || routingSummary?.weak?.model || '—'}`}
+                  tone={routingSummary?.weak?.status === 'ok' ? 'success' : 'warning'}
+                />
+                <RoutePill
+                  label="LOOP"
+                  value={routingSummary?.supervision?.active_jobs?.length ? `${routingSummary.supervision.active_jobs.length} queued bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}` : 'idle'}
+                  tone={routingSummary?.supervision?.active_jobs?.length ? 'success' : 'neutral'}
+                />
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {/* Control Buttons */}
@@ -1082,6 +1112,7 @@ function App() {
             providerTelemetry={providerTelemetry}
             loadedContext={loadedContext}
             tiers={tiers}
+            routingSummary={routingSummary}
           />
         ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -1122,6 +1153,11 @@ function App() {
                   )}
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{display.body}</ReactMarkdown>
                 </div>
+                {(msg.pending || msg.failed) && (
+                  <div style={{ marginTop: '8px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.06em', color: msg.failed ? 'rgba(255,230,230,0.92)' : 'rgba(255,255,255,0.78)' }}>
+                    {msg.failed ? 'SEND FAILED' : 'SENDING'}
+                  </div>
+                )}
                 <div title={formatAbsoluteTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
                   {formatRelativeTime(msg.created_at)}
                 </div>
@@ -1167,6 +1203,11 @@ function App() {
         {/* Input bar */}
         {activeNav !== 'dashboard' && (
         <div style={{ padding: '20px 28px', borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
+          {sendError && (
+            <div style={{ marginBottom: '10px', background: 'rgba(255,92,92,0.08)', border: '1px solid rgba(255,92,92,0.22)', borderRadius: '10px', padding: '10px 12px', color: '#ffb3b3', fontSize: '12px' }}>
+              {sendError}
+            </div>
+          )}
           <div style={{ background: '#141418', borderRadius: '12px', padding: '8px 8px 8px 16px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s' }}>
             <input
               type="text"
@@ -1365,6 +1406,22 @@ const DashboardPanel = ({ title, children }) => (
   </div>
 );
 
+const RoutePill = ({ label, value, tone = 'neutral' }) => {
+  const tones = {
+    neutral: { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.08)', text: '#c7c8d6' },
+    success: { bg: 'rgba(0,242,148,0.08)', border: 'rgba(0,242,148,0.18)', text: '#9df7d0' },
+    warning: { bg: 'rgba(255,184,77,0.08)', border: 'rgba(255,184,77,0.18)', text: '#ffd39b' },
+    danger: { bg: 'rgba(255,92,92,0.08)', border: 'rgba(255,92,92,0.18)', text: '#ffb3b3' },
+  };
+  const theme = tones[tone] || tones.neutral;
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '6px 10px', borderRadius: '999px', background: theme.bg, border: `1px solid ${theme.border}`, minWidth: 0 }}>
+      <span style={{ fontSize: '10px', letterSpacing: '0.08em', color: '#6f7183', fontWeight: 800 }}>{label}</span>
+      <span style={{ fontSize: '11px', color: theme.text, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</span>
+    </div>
+  );
+};
+
 const Sparkline = ({ values, color = '#8257e5' }) => {
   const points = Array.isArray(values) ? values : [];
   if (points.length < 2) {
@@ -1394,7 +1451,7 @@ const Sparkline = ({ values, color = '#8257e5' }) => {
   );
 };
 
-const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers }) => (
+const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers, routingSummary }) => (
   <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
     <DashboardPanel title="SYSTEM STATUS">
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
@@ -1473,6 +1530,29 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
           </span>
         </div>
       ))}
+    </DashboardPanel>
+
+    <DashboardPanel title="ROUTING">
+      <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '10px', fontSize: '12px', alignItems: 'start' }}>
+        <span style={{ color: '#8d8ea1' }}>Chat default</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {routingSummary?.chat?.error ? routingSummary.chat.error : `${routingSummary?.chat?.mode || '—'} · ${routingSummary?.chat?.provider || '—'} · ${routingSummary?.chat?.selected_model || routingSummary?.chat?.model || '—'}`}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Strong tier</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {routingSummary?.strong?.error ? routingSummary.strong.error : `${routingSummary?.strong?.transport || '—'} · ${routingSummary?.strong?.provider || '—'} · ${routingSummary?.strong?.selected_model || routingSummary?.strong?.model || '—'} (${routingSummary?.strong?.status || 'unknown'})`}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Weak tier</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {routingSummary?.weak?.error ? routingSummary.weak.error : `${routingSummary?.weak?.transport || '—'} · ${routingSummary?.weak?.provider || '—'} · ${routingSummary?.weak?.selected_model || routingSummary?.weak?.model || '—'} (${routingSummary?.weak?.status || 'unknown'})`}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Supervision</span>
+        <span style={{ color: '#e7e8ef' }}>
+          {routingSummary?.supervision?.active_jobs?.length
+            ? `${routingSummary.supervision.active_jobs.length} queued bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
+            : 'No bootstrap jobs queued'}
+        </span>
+      </div>
     </DashboardPanel>
 
     <DashboardPanel title="CONTEXT">

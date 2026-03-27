@@ -8,12 +8,15 @@ from __future__ import annotations
 import time
 import os
 import json
+import asyncio
 from typing import Any, Dict
 
+from strata.api.experiment_runtime import eval_override_signature
 from strata.eval.benchmark import persist_benchmark_report, run_benchmark
 from strata.eval.matrix import run_eval_matrix
+from strata.eval.harness_eval import get_active_eval_harness_config
 from strata.eval.structured_eval import persist_structured_eval_report, run_structured_eval
-from strata.experimental.experiment_runner import ExperimentRunner
+from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports
 from strata.experimental.trace_review import (
     append_trace_review_to_task,
     build_trace_summary,
@@ -117,6 +120,83 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 associated_task_ids=payload.get("associated_task_ids"),
             )
             result = experiment_result.model_dump()
+        elif kind == "bootstrap_cycle":
+            from strata.api.main import _apply_experiment_promotion, _generate_eval_candidate_from_tier
+            from strata.storage.models import ParameterModel
+
+            proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
+            proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+            if not proposer_tiers:
+                raise ValueError("bootstrap_cycle requires at least one proposer tier")
+
+            auto_promote = bool(payload.get("auto_promote", True))
+            suite_name = str(payload.get("suite_name") or "bootstrap_mcq_v1")
+            run_count = max(1, int(payload.get("run_count", 2) or 2))
+            baseline_change_id = str(payload.get("baseline_change_id") or "baseline")
+            current_config = get_active_eval_harness_config()
+            proposals = await asyncio.gather(
+                *[_generate_eval_candidate_from_tier(tier, current_config) for tier in proposer_tiers]
+            )
+
+            recent_reports = (
+                storage.session.query(ParameterModel)
+                .filter(ParameterModel.key.like("experiment_report:%"))
+                .order_by(ParameterModel.updated_at.desc())
+                .limit(50)
+                .all()
+            )
+            recent_signatures = {
+                eval_override_signature(report.get("eval_harness_config_override"))
+                for report in iter_experiment_reports(recent_reports)
+                if report.get("eval_harness_config_override")
+            }
+            current_signature = eval_override_signature(current_config)
+            seen_signatures = set()
+
+            runner = ExperimentRunner(storage, model_adapter)
+            evaluated = []
+            promoted = []
+            skipped = []
+
+            for proposal in proposals:
+                proposal_signature = eval_override_signature(proposal["eval_harness_config_override"])
+                if proposal_signature == current_signature:
+                    skipped.append({"proposal": proposal, "reason": "matches_current_config"})
+                    continue
+                if proposal_signature in recent_signatures:
+                    skipped.append({"proposal": proposal, "reason": "recent_duplicate"})
+                    continue
+                if proposal_signature in seen_signatures:
+                    skipped.append({"proposal": proposal, "reason": "duplicate_in_cycle"})
+                    continue
+                seen_signatures.add(proposal_signature)
+                experiment_result = await runner.run_full_eval_gate(
+                    proposal["candidate_change_id"],
+                    api_url=str(payload.get("api_url") or "http://127.0.0.1:8000"),
+                    baseline_change_id=baseline_change_id,
+                    suite_name=suite_name,
+                    run_count=run_count,
+                    eval_harness_config_override=proposal["eval_harness_config_override"],
+                    proposal_metadata={
+                        "proposer_tier": proposal["proposer_tier"],
+                        "rationale": proposal["rationale"],
+                        "expected_gain": proposal["expected_gain"],
+                        "source": "bootstrap_cycle_queue",
+                    },
+                    source_task_id=task.task_id,
+                    associated_task_ids=[task.task_id, *(payload.get("associated_task_ids") or [])],
+                )
+                evaluated.append({"proposal": proposal, "result": experiment_result.model_dump()})
+                if auto_promote and experiment_result.recommendation == "promote":
+                    promoted.append(_apply_experiment_promotion(storage, proposal["candidate_change_id"], force=False))
+
+            result = {
+                "current_eval_harness_config": current_config,
+                "evaluated": evaluated,
+                "promoted": promoted,
+                "skipped": skipped,
+                "auto_promote": auto_promote,
+            }
         elif kind == "eval_matrix":
             report = await run_eval_matrix(
                 suite_name=payload.get("suite_name", "mmlu_mini_v1"),

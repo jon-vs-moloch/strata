@@ -19,6 +19,7 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
+from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 
 
 def register_runtime_admin_routes(
@@ -130,6 +131,78 @@ def register_runtime_admin_routes(
             return {"status": "degraded", "error": str(exc)}
         finally:
             storage.close()
+
+    @app.get("/admin/routing")
+    async def get_routing_summary(storage=Depends(get_storage)):
+        from strata.storage.models import TaskModel, TaskState, TaskType
+
+        def resolve_route(label: str, context):
+            try:
+                preferred_model = model_adapter._selected_models.get(context.mode)
+                endpoint = model_adapter.registry.resolve_endpoint_for_context(
+                    context,
+                    preferred_model=preferred_model,
+                )
+                return {
+                    "label": label,
+                    "mode": context.mode,
+                    "provider": endpoint.provider,
+                    "model": endpoint.model,
+                    "transport": endpoint.transport,
+                    "endpoint_url": endpoint.endpoint_url,
+                    "selected_model": preferred_model or endpoint.model,
+                    "allow_cloud": context.allow_cloud,
+                    "allow_local": context.allow_local,
+                    "status": worker.status.get("tiers", {}).get(label, "unknown"),
+                }
+            except Exception as exc:
+                return {
+                    "label": label,
+                    "mode": context.mode,
+                    "status": "error",
+                    "error": str(exc),
+                }
+
+        active_bootstrap_jobs = (
+            storage.session.query(TaskModel)
+            .filter(TaskModel.type == TaskType.JUDGE)
+            .all()
+        )
+        supervision_jobs = []
+        for task in active_bootstrap_jobs:
+            if task.state in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
+                continue
+            system_job = dict((task.constraints or {}).get("system_job") or {})
+            if str(system_job.get("kind") or "") != "bootstrap_cycle":
+                continue
+            supervision_jobs.append(
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "state": task.state.value.lower(),
+                    "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+                }
+            )
+
+        chat_route = resolve_route("Strong", StrongExecutionContext(run_id="admin-chat-routing"))
+        weak_route = resolve_route("Weak", WeakExecutionContext(run_id="admin-weak-routing"))
+
+        return {
+            "status": "ok",
+            "routing": {
+                "chat": {
+                    **chat_route,
+                    "description": "Chat requests currently use the strong tier by default.",
+                },
+                "strong": chat_route,
+                "weak": weak_route,
+                "supervision": {
+                    "launcher_default_enabled": False,
+                    "active_jobs": supervision_jobs,
+                    "description": "Continuous bootstrap cycles are healthiest when queued onto the background worker.",
+                },
+            },
+        }
 
     @app.get("/admin/context/telemetry")
     async def get_context_telemetry(storage=Depends(get_storage)):
@@ -259,6 +332,7 @@ def register_runtime_admin_routes(
             "get_registry_presets": get_registry_presets,
             "update_registry": update_registry,
             "health_check": health_check,
+            "get_routing_summary": get_routing_summary,
             "get_context_telemetry": get_context_telemetry,
             "rescan_context_pressure": rescan_context_pressure,
             "get_logs": get_logs,

@@ -1,5 +1,6 @@
 import os
 from typing import Optional
+from threading import Lock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import event
@@ -17,6 +18,7 @@ if _DB_URL.startswith("sqlite"):
         "check_same_thread": False,
     }
 _engine = create_engine(_DB_URL, **_engine_kwargs)
+_sqlite_commit_lock = Lock() if _DB_URL.startswith("sqlite") else None
 
 # SQLite-specific performance tuning: Enable Write-Ahead Logging (WAL)
 if _DB_URL.startswith("sqlite"):
@@ -25,6 +27,7 @@ if _DB_URL.startswith("sqlite"):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
 
 _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
@@ -67,6 +70,10 @@ class StorageManager:
         @summary Permanently persist current session changes.
         @inputs none
         """
+        if _sqlite_commit_lock is not None:
+            with _sqlite_commit_lock:
+                self.session.commit()
+            return
         self.session.commit()
 
     def rollback(self):

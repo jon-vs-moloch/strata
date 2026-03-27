@@ -10,21 +10,26 @@ Continuous bootstrap supervisor for live improvement runs.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 
 
 API_URL = "http://127.0.0.1:8000"
+SUPERVISOR_MODE = os.getenv("SUPERVISOR_MODE", "telemetry_safe").strip().lower()
 STANDARD_EVAL_EVERY = 4
 ERROR_BACKOFF_SECONDS = 15
-NO_CONTEXT_OVERRIDE = {
-    "system_prompt": (
-        "You are Strata in evaluation mode. "
-        "Answer directly and concisely without relying on repository documents or saved context."
-    ),
-    "context_files": [],
-}
+POLL_INTERVAL_SECONDS = 5
+JOB_TIMEOUT_SECONDS = 60 * 60
+TELEMETRY_PROFILES = [
+    "raw_model",
+    "harness_no_capes",
+    "harness_tools_no_web",
+    "harness_web_no_tools",
+    "harness_tools_web",
+]
 
 
 def log(message: str) -> None:
@@ -44,6 +49,26 @@ def post_json(path: str, payload: dict, timeout: int = 900) -> dict:
         return json.loads(response.read().decode())
 
 
+def get_json(path: str, timeout: int = 30) -> dict:
+    request = urllib.request.Request(f"{API_URL}{path}", method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode())
+
+
+def wait_for_job(task_id: str, timeout: int = JOB_TIMEOUT_SECONDS) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        payload = get_json(f"/admin/evals/jobs/{task_id}")
+        task = payload.get("task") or {}
+        state = str(task.get("state") or "").lower()
+        if state in {"complete", "cancelled", "abandoned"}:
+            return task
+        if state == "blocked":
+            raise RuntimeError(f"queued job {task_id} blocked: {task.get('system_job_result')}")
+        time.sleep(POLL_INTERVAL_SECONDS)
+    raise TimeoutError(f"queued job {task_id} did not finish within {timeout}s")
+
+
 def run_bootstrap_cycle() -> dict:
     return post_json(
         "/admin/experiments/bootstrap_cycle",
@@ -53,40 +78,36 @@ def run_bootstrap_cycle() -> dict:
             "suite_name": "bootstrap_mcq_v1",
             "run_count": 2,
             "baseline_change_id": "baseline",
-        },
-    )
-
-
-def run_no_context_eval_pass(cycle_number: int) -> dict:
-    suffix = f"sanity_nocontext_{cycle_number}_{int(time.time())}"
-    benchmark = post_json(
-        "/admin/benchmark/run",
-        {
             "queue": True,
-            "candidate_change_id": suffix,
-            "run_count": 1,
-            "eval_harness_config_override": NO_CONTEXT_OVERRIDE,
         },
     )
-    sampled_matrix = post_json(
+
+
+def run_sample_tick(*, include_context: bool, sample_size: int = 2) -> dict:
+    return post_json(
         "/admin/evals/sample_tick",
         {
             "queue": True,
             "suite_name": "mmlu_mini_v1",
-            "include_context": False,
+            "include_context": include_context,
             "include_strong": True,
             "include_weak": True,
-            "sample_size": 2,
-            "profiles": [
-                "raw_model",
-                "harness_no_capes",
-                "harness_tools_no_web",
-                "harness_web_no_tools",
-                "harness_tools_web",
-            ],
+            "sample_size": sample_size,
+            "profiles": TELEMETRY_PROFILES,
         },
     )
-    return {"benchmark": benchmark, "sampled_matrix": sampled_matrix}
+
+
+def run_telemetry_cycle(cycle_number: int) -> dict:
+    sampled_matrix = run_sample_tick(include_context=False, sample_size=2)
+    return {
+        "sampled_matrix": wait_for_job(str(sampled_matrix.get("task_id"))),
+    }
+
+
+def run_context_snapshot(cycle_number: int) -> dict:
+    queued = run_sample_tick(include_context=True, sample_size=2)
+    return {"sampled_matrix": wait_for_job(str(queued.get("task_id")))}
 
 
 def main() -> None:
@@ -94,23 +115,36 @@ def main() -> None:
     while True:
         cycle_number += 1
         try:
-            log(f"starting bootstrap cycle {cycle_number}")
-            bootstrap_result = run_bootstrap_cycle()
-            promoted = len(bootstrap_result.get("promoted", []))
-            log(f"completed bootstrap cycle {cycle_number}; promoted={promoted}")
-
-            if cycle_number % STANDARD_EVAL_EVERY == 0:
-                log(f"starting no-context standard eval pass after cycle {cycle_number}")
-                eval_result = run_no_context_eval_pass(cycle_number)
+            if SUPERVISOR_MODE == "bootstrap":
+                log(f"starting bootstrap cycle {cycle_number}")
+                queued = run_bootstrap_cycle()
+                bootstrap_task = wait_for_job(str(queued.get("task_id")))
+                bootstrap_result = ((bootstrap_task.get("system_job_result") or {}).get("result") or {})
+                promoted = len(bootstrap_result.get("promoted", []))
+                log(f"completed bootstrap cycle {cycle_number}; promoted={promoted}")
+            else:
+                log(f"starting telemetry supervision cycle {cycle_number}")
+                eval_result = run_telemetry_cycle(cycle_number)
+                matrix_task = eval_result["sampled_matrix"]
+                matrix_summary = ((matrix_task.get("system_job_result") or {}).get("result") or {}).get("summary") or {}
                 log(
-                    "completed no-context standard eval pass "
-                    f"(benchmark_task={eval_result['benchmark'].get('task_id')}, "
-                    f"matrix_task={eval_result['sampled_matrix'].get('task_id')})"
+                    "completed telemetry supervision cycle "
+                    f"{cycle_number} (task={matrix_task.get('task_id')}, variants={matrix_summary.get('variant_count', '—')})"
                 )
+
+                if cycle_number % STANDARD_EVAL_EVERY == 0:
+                    log(f"starting context-on snapshot after cycle {cycle_number}")
+                    context_result = run_context_snapshot(cycle_number)
+                    context_task = context_result["sampled_matrix"]
+                    context_summary = ((context_task.get("system_job_result") or {}).get("result") or {}).get("summary") or {}
+                    log(
+                        "completed context-on snapshot "
+                        f"(task={context_task.get('task_id')}, variants={context_summary.get('variant_count', '—')})"
+                    )
         except KeyboardInterrupt:
             log("supervisor interrupted; exiting")
             raise
-        except Exception as exc:
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError, KeyError, ValueError) as exc:
             log(f"supervisor error: {exc}; backing off for {ERROR_BACKOFF_SECONDS}s")
             time.sleep(ERROR_BACKOFF_SECONDS)
             continue

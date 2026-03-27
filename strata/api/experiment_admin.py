@@ -243,6 +243,21 @@ def register_experiment_routes(
     @app.post("/admin/experiments/bootstrap_cycle")
     async def run_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
         payload = payload or {}
+        if payload.get("queue"):
+            queued = await queue_eval_system_job(
+                storage,
+                kind="bootstrap_cycle",
+                title="Bootstrap Cycle",
+                description="Queued strong/weak bootstrap cycle.",
+                payload=payload,
+                session_id=payload.get("session_id"),
+                dedupe_signature={
+                    "suite_name": payload.get("suite_name", "bootstrap_mcq_v1"),
+                    "run_count": max(1, int(payload.get("run_count", 2) or 2)),
+                    "proposer_tiers": [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])],
+                },
+            )
+            return {"status": "ok", **queued}
         proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
         proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
         if not proposer_tiers:

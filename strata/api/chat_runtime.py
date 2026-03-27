@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 from strata.observability.context import record_context_load
 from strata.api.chat_tool_executor import ChatToolExecutor
 from strata.context.loaded_files import build_loaded_context_block
+from strata.models.adapter import ModelAdapter
+from strata.schemas.execution import StrongExecutionContext
 
 class ChatRuntime:
     def __init__(self, **deps: Any):
@@ -252,6 +254,8 @@ Available Tools:
         return messages, active_tools, knowledge_pages, pending_question
 
     async def run_chat_tool_loop(self, storage, *, session_id: str, content: str):
+        chat_adapter = ModelAdapter(context=StrongExecutionContext(run_id=f"chat:{session_id}"))
+        chat_adapter._selected_models = dict(getattr(self.deps["model_adapter"], "_selected_models", {}))
         pending_question = self.deps["get_active_question"](storage, session_id)
         messages, active_tools, knowledge_pages, pending_question = self.build_chat_messages(
             storage, session_id=session_id, content=content, pending_question=pending_question
@@ -262,7 +266,7 @@ Available Tools:
         iteration = 0
 
         while iteration < max_iters:
-            model_response = await self.deps["model_adapter"].chat(messages, tools=active_tools)
+            model_response = await chat_adapter.chat(messages, tools=active_tools)
             tool_calls = model_response.get("tool_calls")
             content_val = model_response.get("content")
             chain_of_thought = str(content_val) if content_val else ""
@@ -319,7 +323,7 @@ Available Tools:
                 "content": "You have reached the tool call limit. You MUST synthesize the data gathered so far and reply to the user immediately. Do not attempt further tool calls.",
             }
         )
-        final_response = await self.deps["model_adapter"].chat(messages)
+        final_response = await chat_adapter.chat(messages)
         reply = final_response.get("content", "I hit the maximum iteration limit for synchronous tool usage without reaching a conclusion.")
         if not reply or not reply.strip():
             reply = "I couldn't synthesize the final results."

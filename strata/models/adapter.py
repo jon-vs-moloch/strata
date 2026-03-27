@@ -69,7 +69,7 @@ class ModelAdapter:
             # Log for auditability
             print(f"DEBUG [Context: {self.context.mode}] Routing to {provider.provider_id}/{provider.model_id} (Transport: {'local' if provider.__class__.__name__ == 'LocalProvider' else 'cloud'})")
 
-            response: ModelResponse = await provider.complete(messages, timeout=kwargs.get("timeout"), **kwargs)
+            response: ModelResponse = await provider.complete(messages, **kwargs)
             self.last_response = response
 
             # Post-call validation: if weak-eval but used cloud provider, mark as invalid

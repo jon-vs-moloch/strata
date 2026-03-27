@@ -12,6 +12,8 @@ fi
 
 mkdir -p strata/runtime
 HEALTH_URL="http://127.0.0.1:8000/admin/health"
+START_BOOTSTRAP_SUPERVISOR="${START_BOOTSTRAP_SUPERVISOR:-0}"
+SUPERVISOR_MODE="${SUPERVISOR_MODE:-telemetry_safe}"
 
 start_api() {
   if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
@@ -41,15 +43,22 @@ start_supervisor() {
     echo "Bootstrap supervisor already running"
     return
   fi
-  echo "Starting bootstrap supervisor..."
-  nohup env PYTHONPATH=. ./venv/bin/python scripts/bootstrap_supervisor.py \
+  echo "Starting bootstrap supervisor in ${SUPERVISOR_MODE} mode..."
+  nohup env PYTHONPATH=. SUPERVISOR_MODE="$SUPERVISOR_MODE" ./venv/bin/python scripts/bootstrap_supervisor.py \
     > strata/runtime/bootstrap_supervisor.log 2>&1 &
 }
 
 start_api
 wait_for_api
-start_supervisor
+
+if [ "$START_BOOTSTRAP_SUPERVISOR" = "1" ]; then
+  start_supervisor
+else
+  echo "Bootstrap supervisor disabled by default (set START_BOOTSTRAP_SUPERVISOR=1 to enable)"
+fi
 
 echo "System launch requested. Logs:"
 echo "  API: strata/runtime/api.log"
-echo "  Supervisor: strata/runtime/bootstrap_supervisor.log"
+if [ "$START_BOOTSTRAP_SUPERVISOR" = "1" ]; then
+  echo "  Supervisor: strata/runtime/bootstrap_supervisor.log"
+fi

@@ -265,6 +265,8 @@ async def _queue_eval_system_job(
         for task in tasks:
             if not _task_is_active(task):
                 continue
+            if task.state == TaskState.BLOCKED:
+                continue
             system_job = dict((task.constraints or {}).get("system_job") or {})
             if str(system_job.get("kind") or "") != kind:
                 continue
