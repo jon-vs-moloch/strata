@@ -15,7 +15,7 @@ from strata.observability.context import record_context_load
 from strata.api.chat_tool_executor import ChatToolExecutor
 from strata.context.loaded_files import build_loaded_context_block
 from strata.models.adapter import ModelAdapter
-from strata.schemas.execution import StrongExecutionContext
+from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 
 class ChatRuntime:
     def __init__(self, **deps: Any):
@@ -256,6 +256,10 @@ Available Tools:
     async def run_chat_tool_loop(self, storage, *, session_id: str, content: str):
         chat_adapter = ModelAdapter(context=StrongExecutionContext(run_id=f"chat:{session_id}"))
         chat_adapter._selected_models = dict(getattr(self.deps["model_adapter"], "_selected_models", {}))
+        weak_fallback_adapter = ModelAdapter(context=WeakExecutionContext(run_id=f"chat-weak:{session_id}"))
+        weak_fallback_adapter._selected_models = dict(chat_adapter._selected_models)
+        active_adapter = chat_adapter
+        downgraded_to_weak = False
         pending_question = self.deps["get_active_question"](storage, session_id)
         messages, active_tools, knowledge_pages, pending_question = self.build_chat_messages(
             storage, session_id=session_id, content=content, pending_question=pending_question
@@ -266,7 +270,7 @@ Available Tools:
         iteration = 0
 
         while iteration < max_iters:
-            model_response = await chat_adapter.chat(messages, tools=active_tools)
+            model_response = await active_adapter.chat(messages, tools=active_tools)
             if model_response.get("status") == "error":
                 error_message = str(model_response.get("message") or model_response.get("content") or "").strip()
                 if active_tools and "Function calling is not enabled" in error_message:
@@ -277,6 +281,27 @@ Available Tools:
                             "content": (
                                 "The selected strong-tier model rejected tool calling for this request. "
                                 "Answer directly without tools."
+                            ),
+                        }
+                    )
+                    continue
+                if (
+                    not downgraded_to_weak
+                    and active_adapter is chat_adapter
+                    and (
+                        "Developer instruction is not enabled" in error_message
+                        or "Function calling is not enabled" in error_message
+                    )
+                ):
+                    downgraded_to_weak = True
+                    active_adapter = weak_fallback_adapter
+                    active_tools = []
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "The configured strong-tier chat route rejected the current instruction/tool format. "
+                                "Continue this reply on the weak tier without tools, and keep the answer concise."
                             ),
                         }
                     )
@@ -341,7 +366,7 @@ Available Tools:
                 "content": "You have reached the tool call limit. You MUST synthesize the data gathered so far and reply to the user immediately. Do not attempt further tool calls.",
             }
         )
-        final_response = await chat_adapter.chat(messages)
+        final_response = await active_adapter.chat(messages)
         reply = final_response.get("content", "I hit the maximum iteration limit for synchronous tool usage without reaching a conclusion.")
         if not reply or not reply.strip():
             reply = "I couldn't synthesize the final results."

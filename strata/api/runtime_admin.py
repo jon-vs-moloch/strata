@@ -192,7 +192,7 @@ def register_runtime_admin_routes(
             "routing": {
                 "chat": {
                     **chat_route,
-                    "description": "Chat requests currently use the strong tier by default.",
+                    "description": "Chat requests use the strong tier by default and fall back to weak if the cloud endpoint rejects the instruction/tool format.",
                 },
                 "strong": chat_route,
                 "weak": weak_route,
