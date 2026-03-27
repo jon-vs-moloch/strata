@@ -2,13 +2,23 @@ node_modules/
 venv/
 *.db
 *.sqlite
+*.sqlite3
 *.pyc
 __pycache__/
 .DS_Store
 shotgun_ui/node_modules/
 *.log
 strata/runtime/
+memory/vector_db/
 strata/experimental/candidates/
 strata/attic/
 .venv/
 .env.local
+
+# Generated research dumps are noisy and task-specific.
+# Keep durable knowledge surfaces trackable.
+.knowledge/*
+!.knowledge/specs/
+!.knowledge/specs/*.md
+!.knowledge/model_performance_intel.md
+!.knowledge/provenance_index.json
