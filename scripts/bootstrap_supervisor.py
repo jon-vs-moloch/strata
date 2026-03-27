@@ -78,14 +78,21 @@ def wait_for_job(task_id: str, timeout: int = JOB_TIMEOUT_SECONDS) -> dict:
     raise TimeoutError(f"queued job {task_id} did not finish within {timeout}s")
 
 
-def run_bootstrap_cycle() -> dict:
+def run_bootstrap_cycle(*, cycle_number: int | None = None, lean: bool = False) -> dict:
+    proposer_tiers = ["weak", "strong"]
+    run_count = 2
+    if lean:
+        # Keep the continuous loop moving by evaluating one proposer tier at a time.
+        tier_index = 0 if cycle_number is None else (max(1, int(cycle_number)) - 1) % len(proposer_tiers)
+        proposer_tiers = [proposer_tiers[tier_index]]
+        run_count = 1
     return post_json(
         "/admin/experiments/bootstrap_cycle",
         {
-            "proposer_tiers": ["weak", "strong"],
+            "proposer_tiers": proposer_tiers,
             "auto_promote": True,
             "suite_name": "bootstrap_mcq_v1",
-            "run_count": 2,
+            "run_count": run_count,
             "baseline_change_id": "baseline",
             "queue": True,
         },
@@ -147,7 +154,7 @@ def main() -> None:
         try:
             if SUPERVISOR_MODE == "bootstrap":
                 log(f"starting bootstrap cycle {cycle_number}")
-                queued = run_bootstrap_cycle()
+                queued = run_bootstrap_cycle(cycle_number=cycle_number, lean=False)
                 bootstrap_task = wait_for_job(str(queued.get("task_id")))
                 bootstrap_result = ((bootstrap_task.get("system_job_result") or {}).get("result") or {})
                 promoted = len(bootstrap_result.get("promoted", []))
@@ -165,7 +172,7 @@ def main() -> None:
                     _log_matrix_result("completed context-on snapshot", context_task)
             else:
                 log(f"starting continuous self-improvement cycle {cycle_number}")
-                queued = run_bootstrap_cycle()
+                queued = run_bootstrap_cycle(cycle_number=cycle_number, lean=True)
                 bootstrap_task = wait_for_job(str(queued.get("task_id")))
                 bootstrap_result = ((bootstrap_task.get("system_job_result") or {}).get("result") or {})
                 promoted = len(bootstrap_result.get("promoted", []))
