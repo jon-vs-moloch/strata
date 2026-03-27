@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from strata.eval.harness_eval import EVAL_HARNESS_CONFIG_DESCRIPTION, EVAL_HARNESS_CONFIG_KEY
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
+from strata.experimental.variants import get_variant_rating_snapshot
 from strata.specs.bootstrap import list_spec_proposals
 from strata.storage.models import MetricModel
 
@@ -426,6 +427,7 @@ def build_dashboard_snapshot(
         .all()
     )
     eval_profiles = summarize_eval_variant_metrics(eval_metric_rows)
+    variant_registry = get_variant_rating_snapshot(storage)
     return {
         "generated_at": telemetry.get("generated_at"),
         "overview": telemetry.get("overview", {}),
@@ -450,6 +452,12 @@ def build_dashboard_snapshot(
             "file_scan": context_telemetry.get("file_scan", {}),
         },
         "eval_profiles": eval_profiles,
+        "variant_registry": {
+            "index_size": int(variant_registry.get("index_size", 0) or 0),
+            "top_variants": (variant_registry.get("variants") or [])[-5:],
+            "ratings": variant_registry.get("ratings", {}),
+            "recent_matchups": (variant_registry.get("recent_matchups") or [])[-10:],
+        },
         "spec_governance": {
             "recent_proposals": recent_spec_proposals,
             "pending_count": sum(1 for row in recent_spec_proposals if str(row.get("status") or "") == "pending_review"),

@@ -145,11 +145,13 @@ def persist_structured_eval_report(
     candidate_change_id: Optional[str],
     run_mode: str,
     model_id: str,
+    variant_assignment: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     @summary Persist structured eval metrics.
     """
     case_count = max(1, int(report.get("case_count", 0) or 0))
+    variant_assignment = dict(variant_assignment or {})
     aggregate_metrics = [
         ("structured_eval_baseline_accuracy", float(report.get("baseline_accuracy", 0.0) or 0.0)),
         ("structured_eval_harness_accuracy", float(report.get("harness_accuracy", 0.0) or 0.0)),
@@ -174,6 +176,7 @@ def persist_structured_eval_report(
                 "case_count": case_count,
                 "suite_name": report.get("suite_name", "inline"),
                 "run_label": report.get("run_label"),
+                "variant_assignment": variant_assignment,
             },
         )
 
@@ -193,6 +196,7 @@ def persist_structured_eval_report(
                 "baseline_correct": sample.get("baseline_correct"),
                 "harness_correct": sample.get("harness_correct"),
                 "suite_name": report.get("suite_name", "inline"),
+                "variant_assignment": variant_assignment,
             },
         )
 

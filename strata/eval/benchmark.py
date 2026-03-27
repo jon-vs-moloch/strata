@@ -230,6 +230,7 @@ def persist_benchmark_report(
     candidate_change_id: Optional[str],
     run_mode: str,
     model_id: str,
+    variant_assignment: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     @summary Persist benchmark aggregates and per-sample scores as structured metrics.
@@ -252,6 +253,7 @@ def persist_benchmark_report(
         ("benchmark_tie_rate", ties / prompt_count, {"scope": "aggregate", "ties": ties}),
         ("benchmark_score_delta", avg_harness - avg_baseline, {"scope": "aggregate"}),
     ]
+    variant_assignment = dict(variant_assignment or {})
 
     for metric_name, value, details in aggregate_metrics:
         record_metric(
@@ -263,7 +265,7 @@ def persist_benchmark_report(
             run_mode=run_mode,
             execution_context="weak",
             candidate_change_id=candidate_change_id,
-            details=details,
+            details={**details, "variant_assignment": variant_assignment},
         )
 
     for sample in report.get("samples", []):
@@ -276,6 +278,7 @@ def persist_benchmark_report(
             "baseline_latency_s": sample.get("baseline_latency_s"),
             "harness_latency_s": sample.get("harness_latency_s"),
             "rationale": sample.get("rationale", ""),
+            "variant_assignment": variant_assignment,
         }
         record_metric(
             storage,

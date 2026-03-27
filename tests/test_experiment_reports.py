@@ -109,6 +109,16 @@ def make_report(
             "direction_correct": 1.0 if benchmark_delta > 0 or structured_delta > 0 else 0.0,
             "calibration_score": 0.91 if benchmark_delta > 0 or structured_delta > 0 else 0.4,
         },
+        "variant_assignment": {
+            "family": "eval_harness",
+            "baseline_variant_id": "eval_harness_bundle_baseline",
+            "candidate_variant_id": f"eval_harness_bundle_{candidate_change_id}",
+        },
+        "variant_rating_snapshot": {
+            "domain": "eval_harness_full_eval:bootstrap_mcq_v1",
+            "left": {"variant_id": f"eval_harness_bundle_{candidate_change_id}", "rating": 1512.0},
+            "right": {"variant_id": "eval_harness_bundle_baseline", "rating": 1488.0},
+        },
         "deltas": {
             "benchmark_harness_score": benchmark_delta,
             "structured_eval_harness_accuracy": structured_delta,
@@ -258,6 +268,8 @@ def test_experiment_history_returns_real_candidate_ids():
     assert result["reports"][0]["diagnostic_review"]["primary_failure_mode"] == "tool_avoidance"
     assert result["reports"][0]["prediction_record"]["predicted_outcome"] == "improve"
     assert result["reports"][0]["calibration_record"]["calibration_score"] == 0.4
+    assert result["reports"][0]["variant_assignment"]["family"] == "eval_harness"
+    assert result["reports"][0]["variant_rating_snapshot"]["left"]["rating"] == 1512.0
     assert result["current_promoted_candidate"] == "wrapped_candidate"
 
 

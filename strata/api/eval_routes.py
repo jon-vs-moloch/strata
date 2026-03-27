@@ -18,7 +18,10 @@ from fastapi import Depends, HTTPException
 
 from strata.eval.benchmark import persist_benchmark_report, run_benchmark
 from strata.eval.structured_eval import persist_structured_eval_report, run_structured_eval
+from strata.eval.harness_eval import get_active_eval_harness_config
 from strata.eval.matrix import run_eval_matrix
+from strata.experimental.promotion_policy import get_promotion_policy
+from strata.experimental.variants import ensure_variant
 from strata.orchestrator.worker.telemetry import record_metric
 
 
@@ -32,6 +35,31 @@ def register_eval_routes(
 ) -> Dict[str, Any]:
     exported: Dict[str, Any] = {}
     suites_dir = Path("strata/eval/suites")
+
+    def _resolve_runtime_variant_assignment(storage, *, candidate_change_id: str, eval_harness_config_override: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        eval_harness_payload = dict(eval_harness_config_override or get_active_eval_harness_config())
+        promotion_policy_payload = get_promotion_policy(storage)
+        eval_harness_variant = ensure_variant(
+            storage,
+            kind="eval_harness_bundle",
+            payload=eval_harness_payload,
+            label=candidate_change_id,
+            family="eval_harness",
+            metadata={"source": "eval_routes"},
+        )
+        promotion_policy_variant = ensure_variant(
+            storage,
+            kind="promotion_policy_bundle",
+            payload=promotion_policy_payload,
+            label=f"{candidate_change_id}_promotion_policy",
+            family="promotion_policy",
+            metadata={"source": "eval_routes"},
+        )
+        return {
+            "candidate_variant_id": eval_harness_variant.get("variant_id"),
+            "candidate_promotion_policy_variant_id": promotion_policy_variant.get("variant_id"),
+            "candidate_promotion_policy_payload": promotion_policy_payload,
+        }
 
     def _list_eval_suites() -> list[Dict[str, Any]]:
         suites = []
@@ -105,6 +133,11 @@ def register_eval_routes(
         api_url = payload.get("api_url", "http://127.0.0.1:8000")
         run_count = max(1, int(payload.get("run_count", 1) or 1))
         eval_harness_config_override = payload.get("eval_harness_config_override")
+        variant_assignment = _resolve_runtime_variant_assignment(
+            storage,
+            candidate_change_id=candidate_change_id,
+            eval_harness_config_override=eval_harness_config_override,
+        )
         reports = []
         for run_index in range(run_count):
             report = await run_benchmark(
@@ -118,6 +151,7 @@ def register_eval_routes(
                 candidate_change_id=candidate_change_id,
                 run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
                 model_id="benchmark/harness",
+                variant_assignment=variant_assignment,
             )
             reports.append(report)
         return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
@@ -145,6 +179,11 @@ def register_eval_routes(
         cases = payload.get("cases")
         run_count = max(1, int(payload.get("run_count", 1) or 1))
         eval_harness_config_override = payload.get("eval_harness_config_override")
+        variant_assignment = _resolve_runtime_variant_assignment(
+            storage,
+            candidate_change_id=candidate_change_id,
+            eval_harness_config_override=eval_harness_config_override,
+        )
         reports = []
         for run_index in range(run_count):
             report = await run_structured_eval(
@@ -160,6 +199,7 @@ def register_eval_routes(
                 candidate_change_id=candidate_change_id,
                 run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
                 model_id="structured_eval/harness",
+                variant_assignment=variant_assignment,
             )
             reports.append(report)
         return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
@@ -199,6 +239,11 @@ def register_eval_routes(
             sample_size=int(sample_size) if sample_size is not None else None,
             random_seed=int(random_seed) if random_seed is not None else None,
         )
+        current_eval_variant = _resolve_runtime_variant_assignment(
+            storage,
+            candidate_change_id=f"matrix_{suite_name}",
+            eval_harness_config_override=None,
+        )
         for variant in report.get("variants", []):
             details = {
                 "suite_name": suite_name,
@@ -207,6 +252,7 @@ def register_eval_routes(
                 "profile": variant.get("profile"),
                 "include_context": include_context,
                 "case_count": report.get("case_count"),
+                "variant_assignment": current_eval_variant if str(variant.get("profile")) != "raw_model" else {},
             }
             for metric_name, value in (
                 ("eval_matrix_accuracy", float(variant.get("accuracy", 0.0) or 0.0)),
@@ -258,6 +304,11 @@ def register_eval_routes(
             sample_size=sample_size,
             random_seed=int(time.time()),
         )
+        current_eval_variant = _resolve_runtime_variant_assignment(
+            storage,
+            candidate_change_id=f"sample_tick_{suite_name}",
+            eval_harness_config_override=None,
+        )
         for variant in report.get("variants", []):
             details = {
                 "suite_name": suite_name,
@@ -267,6 +318,7 @@ def register_eval_routes(
                 "include_context": include_context,
                 "case_count": report.get("case_count"),
                 "sampled": True,
+                "variant_assignment": current_eval_variant if str(variant.get("profile")) != "raw_model" else {},
             }
             record_metric(
                 storage,
