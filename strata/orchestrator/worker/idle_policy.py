@@ -10,8 +10,6 @@ from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.specs.bootstrap import load_specs, spec_is_bootstrap_placeholder
 
 logger = logging.getLogger(__name__)
-
-
 def _build_repo_snapshot() -> str:
     root = Path(__file__).resolve().parents[3]
     interesting = [
