@@ -13,7 +13,7 @@ import os
 import json
 import httpx
 from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
-from strata.experimental.variants import build_stage_scope, classify_pool_pruning, list_variants_for_scope
+from strata.experimental.variants import build_stage_scope, build_variant_execution_plan, classify_pool_pruning
 
 IMPLEMENTATION_META_TOOLS = [
     {
@@ -97,16 +97,26 @@ class ImplementationModule:
             constraints.get("variant_scope")
             or build_stage_scope(component="implementation", process=str(task.type.value).lower(), step="default")
         )
-        limit = int(constraints.get("pass_at") or constraints.get("candidate_count") or 1)
-        variants = list_variants_for_scope(
+        execution_plan = build_variant_execution_plan(
             self.storage,
             family="implementation_prompt",
             stage_scope=stage_scope,
             domain=f"ops:{stage_scope}",
-            limit=limit,
+            safe_mode=bool(constraints.get("safe_mode", False)),
         )
-        if variants:
-            return variants
+        selected = list(execution_plan.get("selected_variants") or [])
+        if selected:
+            task_constraints = dict(task.constraints or {})
+            task_constraints["variant_execution_plan"] = {
+                "mode": execution_plan.get("mode"),
+                "stage_scope": stage_scope,
+                "default_variant_id": (execution_plan.get("default") or {}).get("variant_id"),
+                "exploit_variant_ids": [item.get("variant_id") for item in (execution_plan.get("exploit_pool") or [])],
+                "explore_variant_ids": [item.get("variant_id") for item in (execution_plan.get("explore_pair") or [])],
+            }
+            task.constraints = task_constraints
+            self.storage.commit()
+            return selected
         return [
             {
                 "variant_id": "implementation_prompt.generic",

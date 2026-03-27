@@ -27,6 +27,9 @@ DEFAULT_OPERATIONAL_VARIANT_POLICY = {
     "keep_top_k": 3,
     "max_synthesis_variants": 2,
     "max_stage_variants": 3,
+    "exploit_top_n": 3,
+    "exploit_sample_count": 2,
+    "explore_pair_count": 2,
 }
 
 
@@ -105,6 +108,22 @@ def get_operational_variant_policy(storage) -> Dict[str, int]:
     return merged
 
 
+def _metadata_status(payload: Dict[str, Any]) -> str:
+    metadata = dict(payload.get("metadata") or {})
+    return str(metadata.get("status") or "").strip().lower()
+
+
+def variant_is_downstream_validated(payload: Dict[str, Any]) -> bool:
+    metadata = dict(payload.get("metadata") or {})
+    if bool(metadata.get("downstream_validated")):
+        return True
+    return _metadata_status(payload) in {"validated", "active", "favored", "default"}
+
+
+def variant_is_retired(payload: Dict[str, Any]) -> bool:
+    return _metadata_status(payload) in {"retired", "frozen", "rejected"}
+
+
 def classify_pool_pruning(storage, *, pool_size: int) -> Dict[str, int]:
     policy = get_operational_variant_policy(storage)
     safe_pool_size = max(0, int(pool_size or 0))
@@ -162,17 +181,143 @@ def list_variants_for_scope(
         payload["scope_match"] = scope_match
         payload["domain_rating"] = float(rating_entry.get("rating", DEFAULT_RATING) or DEFAULT_RATING)
         payload["domain_matches"] = int(rating_entry.get("matches", 0) or 0)
+        payload["downstream_validated"] = variant_is_downstream_validated(payload)
+        payload["retired"] = variant_is_retired(payload)
         candidates.append(payload)
+    candidates = [item for item in candidates if not item.get("retired")]
     candidates.sort(
         key=lambda item: (
             0 if item.get("scope_match") == "exact" else 1,
             -float(item.get("domain_rating", DEFAULT_RATING) or DEFAULT_RATING),
+            0 if item.get("downstream_validated") else 1,
             -int(item.get("use_count", 0) or 0),
             str(item.get("created_at") or ""),
         )
     )
     hard_limit = int(limit or get_operational_variant_policy(storage).get("max_stage_variants", 3) or 3)
     return candidates[: max(1, hard_limit)] if candidates else []
+
+
+def _weight_from_rating(rating: float, baseline: float) -> float:
+    centered = max(-200.0, min(200.0, float(rating or DEFAULT_RATING) - float(baseline or DEFAULT_RATING)))
+    return max(0.05, 1.0 + centered / 400.0)
+
+
+def _select_exploit_pool(
+    variants: list[Dict[str, Any]],
+    *,
+    default_variant_id: str,
+    top_n: int,
+    sample_count: int,
+) -> list[Dict[str, Any]]:
+    validated = [
+        item for item in variants
+        if item.get("downstream_validated") and str(item.get("variant_id") or "") != default_variant_id
+    ]
+    validated.sort(key=lambda item: -float(item.get("domain_rating", DEFAULT_RATING) or DEFAULT_RATING))
+    pool = validated[: max(0, int(top_n or 0))]
+    if not pool:
+        return []
+    default_rating = float(pool[0].get("domain_rating", DEFAULT_RATING) or DEFAULT_RATING)
+    pool.sort(
+        key=lambda item: (
+            -_weight_from_rating(float(item.get("domain_rating", DEFAULT_RATING) or DEFAULT_RATING), default_rating),
+            int(item.get("domain_matches", 0) or 0),
+        )
+    )
+    return pool[: max(0, int(sample_count or 0))]
+
+
+def _pair_information_score(left: Dict[str, Any], right: Dict[str, Any], *, default_variant_id: str) -> float:
+    left_rating = float(left.get("domain_rating", DEFAULT_RATING) or DEFAULT_RATING)
+    right_rating = float(right.get("domain_rating", DEFAULT_RATING) or DEFAULT_RATING)
+    closeness = 1.0 / (1.0 + abs(left_rating - right_rating) / 50.0)
+    coverage = 1.0 / (1.0 + int(left.get("domain_matches", 0) or 0) + int(right.get("domain_matches", 0) or 0))
+    default_pressure = 0.5 if default_variant_id in {str(left.get("variant_id") or ""), str(right.get("variant_id") or "")} else 0.0
+    novelty = 0.25 if (not left.get("downstream_validated") or not right.get("downstream_validated")) else 0.0
+    return closeness + coverage + default_pressure + novelty
+
+
+def _select_explore_pair(
+    variants: list[Dict[str, Any]],
+    *,
+    default_variant_id: str,
+) -> list[Dict[str, Any]]:
+    if len(variants) < 2:
+        return []
+    best_pair: list[Dict[str, Any]] = []
+    best_score = -1.0
+    for idx, left in enumerate(variants):
+        for right in variants[idx + 1:]:
+            score = _pair_information_score(left, right, default_variant_id=default_variant_id)
+            if score > best_score:
+                best_score = score
+                best_pair = [left, right]
+    return best_pair
+
+
+def build_variant_execution_plan(
+    storage,
+    *,
+    family: str,
+    stage_scope: str,
+    domain: str,
+    safe_mode: bool = False,
+    include_generic: bool = True,
+) -> Dict[str, Any]:
+    policy = get_operational_variant_policy(storage)
+    variants = list_variants_for_scope(
+        storage,
+        family=family,
+        stage_scope=stage_scope,
+        domain=domain,
+        include_generic=include_generic,
+        limit=max(
+            int(policy.get("max_stage_variants", 3) or 3),
+            int(policy.get("exploit_top_n", 3) or 3) + 2,
+        ),
+    )
+    validated = [item for item in variants if item.get("downstream_validated")]
+    default_variant = validated[0] if validated else (variants[0] if variants else None)
+    if not default_variant:
+        return {
+            "mode": "safe" if safe_mode else "adaptive",
+            "default": None,
+            "exploit_pool": [],
+            "explore_pair": [],
+            "selected_variants": [],
+        }
+    default_variant_id = str(default_variant.get("variant_id") or "")
+    if safe_mode:
+        return {
+            "mode": "safe",
+            "default": default_variant,
+            "exploit_pool": [],
+            "explore_pair": [],
+            "selected_variants": [default_variant],
+        }
+    exploit_pool = _select_exploit_pool(
+        variants,
+        default_variant_id=default_variant_id,
+        top_n=int(policy.get("exploit_top_n", 3) or 3),
+        sample_count=int(policy.get("exploit_sample_count", 2) or 2),
+    )
+    explore_pair = _select_explore_pair(variants, default_variant_id=default_variant_id)
+    selected: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [default_variant, *exploit_pool, *explore_pair]:
+        variant_id = str((item or {}).get("variant_id") or "")
+        if not variant_id or variant_id in seen:
+            continue
+        selected.append(item)
+        seen.add(variant_id)
+    return {
+        "mode": "adaptive",
+        "default": default_variant,
+        "exploit_pool": exploit_pool,
+        "explore_pair": explore_pair,
+        "selected_variants": selected,
+    }
 
 
 def record_ranked_variant_matchups(

@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 
 from strata.experimental.variants import (
     build_stage_scope,
+    build_variant_execution_plan,
     classify_pool_pruning,
     ensure_variant,
     get_variant_rating_snapshot,
@@ -100,6 +101,92 @@ def test_pool_pruning_waits_for_larger_pass_pool():
 
     assert classify_pool_pruning(storage, pool_size=3)["drop_count"] == 0
     assert classify_pool_pruning(storage, pool_size=5)["drop_count"] == 1
+
+
+def test_execution_plan_prefers_validated_default_and_builds_lanes():
+    storage = make_storage()
+    stage_scope = build_stage_scope(component="implementation", process="impl", step="default")
+    strong = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "strong"},
+        family="implementation_prompt",
+        label="strong",
+        metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "validated"},
+    )
+    challenger = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "challenger"},
+        family="implementation_prompt",
+        label="challenger",
+        metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "validated"},
+    )
+    newcomer = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "newcomer"},
+        family="implementation_prompt",
+        label="newcomer",
+        metadata={"stage_scope": stage_scope, "status": "experimental"},
+    )
+    storage.parameters.set_parameter(
+        "variant_registry_ratings",
+        {
+            "by_domain": {
+                f"ops:{stage_scope}": {
+                    strong["variant_id"]: {"rating": 1540.0, "matches": 8},
+                    challenger["variant_id"]: {"rating": 1520.0, "matches": 5},
+                    newcomer["variant_id"]: {"rating": 1495.0, "matches": 0},
+                }
+            }
+        },
+    )
+
+    plan = build_variant_execution_plan(
+        storage,
+        family="implementation_prompt",
+        stage_scope=stage_scope,
+        domain=f"ops:{stage_scope}",
+        safe_mode=False,
+    )
+
+    assert plan["default"]["variant_id"] == strong["variant_id"]
+    assert challenger["variant_id"] in {item["variant_id"] for item in plan["exploit_pool"]}
+    assert len(plan["explore_pair"]) == 2
+    assert newcomer["variant_id"] in {item["variant_id"] for item in plan["selected_variants"]}
+
+
+def test_safe_mode_returns_only_validated_default():
+    storage = make_storage()
+    stage_scope = build_stage_scope(component="implementation", process="impl", step="default")
+    validated = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "validated"},
+        family="implementation_prompt",
+        label="validated",
+        metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "default"},
+    )
+    ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "experimental"},
+        family="implementation_prompt",
+        label="experimental",
+        metadata={"stage_scope": stage_scope, "status": "experimental"},
+    )
+
+    plan = build_variant_execution_plan(
+        storage,
+        family="implementation_prompt",
+        stage_scope=stage_scope,
+        domain=f"ops:{stage_scope}",
+        safe_mode=True,
+    )
+
+    assert plan["mode"] == "safe"
+    assert [item["variant_id"] for item in plan["selected_variants"]] == [validated["variant_id"]]
 
 
 def test_implementation_module_generates_candidates_for_scoped_variants():

@@ -9,7 +9,7 @@
 
 from typing import List, Dict, Any
 from strata.schemas.core import TaskDecomposition
-from strata.experimental.variants import build_stage_scope, list_variants_for_scope, record_ranked_variant_matchups
+from strata.experimental.variants import build_stage_scope, build_variant_execution_plan, record_ranked_variant_matchups
 
 class SynthesisModule:
     """
@@ -63,12 +63,14 @@ class SynthesisModule:
         """
         # 3. Construct a prompt array for the model.chat() method
         stage_scope = build_stage_scope(component="synthesis", process="subtasks", step="default")
-        variants = list_variants_for_scope(
+        execution_plan = build_variant_execution_plan(
             self.storage,
             family="synthesis_prompt",
             stage_scope=stage_scope,
             domain=f"ops:{stage_scope}",
-        ) or [
+            safe_mode=False,
+        )
+        variants = list(execution_plan.get("selected_variants") or []) or [
             {
                 "variant_id": "synthesis_prompt.generic",
                 "payload": {},
