@@ -58,7 +58,16 @@ def get_json(path: str, timeout: int = 30) -> dict:
 def wait_for_job(task_id: str, timeout: int = JOB_TIMEOUT_SECONDS) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        payload = get_json(f"/admin/evals/jobs/{task_id}")
+        try:
+            payload = get_json(f"/admin/evals/jobs/{task_id}")
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            remaining = max(0, int(deadline - time.time()))
+            log(
+                f"job poll for {task_id} hit transient error ({exc}); "
+                f"retrying in {POLL_INTERVAL_SECONDS}s with {remaining}s remaining"
+            )
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
         task = payload.get("task") or {}
         state = str(task.get("state") or "").lower()
         if state in {"complete", "cancelled", "abandoned"}:
