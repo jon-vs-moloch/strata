@@ -173,7 +173,7 @@ Return only JSON with this schema:
 {{
   "candidate_suffix": "short_slug_like_name",
   "system_prompt": "full replacement system prompt",
-  "context_files": [".knowledge/specs/project_spec.md", "docs/spec/eval-brief.md"],
+  "context_files": [".knowledge/specs/project_spec.md", ".knowledge/specs/constitution.md", "docs/spec/eval-brief.md"],
   "rationale": "short explanation of why this should improve weak-model self-improvement",
   "expected_gain": "what telemetry should improve"
 }}

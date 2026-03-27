@@ -1,6 +1,4 @@
-# Global Spec
-
-Legacy alias for the Strata constitution.
+# Constitution
 
 This file stores persistent, cross-project instructions and preferences for Strata.
 

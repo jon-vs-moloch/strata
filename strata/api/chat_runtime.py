@@ -80,7 +80,11 @@ class ChatRuntime:
         )
         current_specs = self.deps["load_specs"]()
         scope = updated_proposal.get("scope", "project")
-        current_spec = current_specs.get("global_spec" if scope == "global" else "project_spec", "")
+        current_spec = (
+            current_specs.get("constitution") or current_specs.get("global_spec", "")
+            if scope == "global"
+            else current_specs.get("project_spec", "")
+        )
         task = storage.tasks.create(
             title=f"Spec Clarification Review ({scope.title()}): {updated_proposal.get('proposal_id')}",
             description=(

@@ -23,6 +23,7 @@ The system should:
 
 ## Operational Guidance
 
+- the durable cross-project constitution lives in `.knowledge/specs/constitution.md`
 - the durable project intent lives in `.knowledge/specs/project_spec.md`
 - the broader design rationale lives in `docs/spec/project-philosophy.md`
 - the repo map lives in `docs/spec/codemap.md`

@@ -14,7 +14,7 @@ from strata.schemas.core import ResearchReport
 
 DEFAULT_REPO_ANCHORS = [
     "README.md",
-    ".knowledge/specs/global_spec.md",
+    ".knowledge/specs/constitution.md",
     ".knowledge/specs/project_spec.md",
     "docs/spec/project-philosophy.md",
     "docs/spec/codemap.md",

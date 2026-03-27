@@ -46,14 +46,14 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
     logger.info("System is idle. Triggering Constitutional Alignment Task.")
     storage = storage_factory()
     try:
-        # 1. Read the user specifications from a guaranteed bootstrap location
+        # 1. Read the constitution and project spec from guaranteed bootstrap locations
         specs = load_specs(storage=storage)
-        global_spec = specs.get("global_spec", "None.")
+        constitution = specs.get("constitution") or specs.get("global_spec", "None.")
         project_spec = specs.get("project_spec", "None.")
 
         has_usable_specs = any(
             spec.strip() and spec.strip().lower() != "none."
-            for spec in [global_spec, project_spec]
+            for spec in [constitution, project_spec]
         )
         if not has_usable_specs:
             logger.info("Idle alignment skipped because no usable specs are present.")
@@ -95,16 +95,16 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             return
 
         spec_paths = [
-            ".knowledge/specs/global_spec.md",
+            ".knowledge/specs/constitution.md",
             ".knowledge/specs/project_spec.md",
             "docs/spec/project-philosophy.md",
             "docs/spec/codemap.md",
         ]
         repo_snapshot = _build_repo_snapshot()
         project_spec_is_thin = spec_is_bootstrap_placeholder(project_spec)
-        global_spec_is_thin = spec_is_bootstrap_placeholder(global_spec)
+        constitution_is_thin = spec_is_bootstrap_placeholder(constitution)
 
-        if project_spec_is_thin and global_spec_is_thin:
+        if project_spec_is_thin and constitution_is_thin:
             task_desc = (
                 "Review docs/spec/project-philosophy.md, README.md, and .knowledge/specs/project_spec.md, "
                 "then prepare a reviewed spec proposal that turns the current project vision into durable spec language."
@@ -118,7 +118,7 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
 The system is currently IDLE. Your job is to identify ONE concrete alignment gap between the durable spec and the current repo, then propose exactly one bounded task.
 
 Canonical spec paths:
-- .knowledge/specs/global_spec.md
+- .knowledge/specs/constitution.md
 - .knowledge/specs/project_spec.md
 
 Supporting references you may assume exist:
@@ -129,8 +129,8 @@ Supporting references you may assume exist:
 Observed repository snapshot:
 {repo_snapshot}
 
-Current global spec:
-{global_spec}
+Current constitution:
+{constitution}
 
 Current project spec:
 {project_spec}
@@ -158,7 +158,7 @@ Rules:
                 "spec_paths": spec_paths,
                 "repo_snapshot": repo_snapshot,
                 "alignment_source": "idle_policy",
-                "spec_bootstrap_fallback": project_spec_is_thin and global_spec_is_thin,
+                "spec_bootstrap_fallback": project_spec_is_thin and constitution_is_thin,
             }
         )
         task.type = TaskType.RESEARCH

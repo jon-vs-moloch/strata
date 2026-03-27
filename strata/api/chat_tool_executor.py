@@ -163,8 +163,8 @@ class ChatToolExecutor:
         elif func_name == "read_spec":
             scope = str(args.get("scope") or "project")
             specs = load_specs(storage=storage)
-            path = ".knowledge/specs/global_spec.md" if scope == "global" else ".knowledge/specs/project_spec.md"
-            body = specs.get("global_spec", "") if scope == "global" else specs.get("project_spec", "")
+            path = ".knowledge/specs/constitution.md" if scope == "global" else ".knowledge/specs/project_spec.md"
+            body = (specs.get("constitution") or specs.get("global_spec", "")) if scope == "global" else specs.get("project_spec", "")
             tool_content = f"Source: {path}\n\n{body}"
             tool_outputs_generated = True
         elif func_name == "list_loaded_context_files":
@@ -216,7 +216,11 @@ class ChatToolExecutor:
             ).strip()
             proposal_kind = str(args.get("proposal_kind") or "clarification").strip()
             current_specs = load_specs(storage=storage)
-            current_spec = current_specs.get("global_spec" if scope == "global" else "project_spec", "")
+            current_spec = (
+                current_specs.get("constitution") or current_specs.get("global_spec", "")
+                if scope == "global"
+                else current_specs.get("project_spec", "")
+            )
             title = f"Spec Review ({scope.title()}): {proposed_change[:48] or rationale[:48] or 'pending proposal'}"
             review_prompt = (
                 f"Review a proposed {scope} spec update.\n\n"

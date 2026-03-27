@@ -19,7 +19,8 @@ from strata.experimental.audit_registry import audit_stored_artifact
 
 ROOT = Path(__file__).resolve().parents[2]
 SPECS_DIR = ROOT / ".knowledge" / "specs"
-GLOBAL_SPEC_PATH = SPECS_DIR / "global_spec.md"
+CONSTITUTION_PATH = SPECS_DIR / "constitution.md"
+LEGACY_GLOBAL_SPEC_PATH = SPECS_DIR / "global_spec.md"
 PROJECT_SPEC_PATH = SPECS_DIR / "project_spec.md"
 SPEC_PROPOSALS_INDEX_KEY = "spec_proposals:index"
 SPEC_PROPOSAL_KEY_PREFIX = "spec_proposal:"
@@ -34,11 +35,11 @@ DEFAULT_ALLOWED_MUTATION_CLASSES = [
     "metric_priority_restatement",
 ]
 
-DEFAULT_GLOBAL_SPEC = """# Global Spec
+DEFAULT_CONSTITUTION = """# Constitution
 
 This file stores persistent, cross-project instructions and preferences for Strata.
 
-Canonical location: `.knowledge/specs/global_spec.md`
+Canonical location: `.knowledge/specs/constitution.md`
 
 Current durable guidance:
 - prefer explicit evaluation over vague hope; if we want an outcome, we should measure it
@@ -46,7 +47,7 @@ Current durable guidance:
 - prefer modest resource use and gentle local-hardware defaults unless the operator asks otherwise
 - preserve provenance for spec changes, knowledge synthesis, and promotions so decisions stay explainable
 
-If there are no durable global preferences yet, leave this file in place and update it as they become clear.
+If there are no durable constitutional preferences yet, leave this file in place and update it as they become clear.
 """
 
 DEFAULT_PROJECT_SPEC = """# Project Spec
@@ -73,27 +74,31 @@ This file should exist even when it is sparse, because alignment and maintenance
 
 def ensure_spec_files() -> Dict[str, str]:
     SPECS_DIR.mkdir(parents=True, exist_ok=True)
-    if not GLOBAL_SPEC_PATH.exists():
-        GLOBAL_SPEC_PATH.write_text(DEFAULT_GLOBAL_SPEC.strip() + "\n", encoding="utf-8")
+    if not CONSTITUTION_PATH.exists():
+        if LEGACY_GLOBAL_SPEC_PATH.exists():
+            CONSTITUTION_PATH.write_text(LEGACY_GLOBAL_SPEC_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            CONSTITUTION_PATH.write_text(DEFAULT_CONSTITUTION.strip() + "\n", encoding="utf-8")
     if not PROJECT_SPEC_PATH.exists():
         PROJECT_SPEC_PATH.write_text(DEFAULT_PROJECT_SPEC.strip() + "\n", encoding="utf-8")
     return {
         "specs_dir": str(SPECS_DIR),
-        "global_spec_path": str(GLOBAL_SPEC_PATH),
+        "constitution_path": str(CONSTITUTION_PATH),
+        "global_spec_path": str(CONSTITUTION_PATH),
         "project_spec_path": str(PROJECT_SPEC_PATH),
     }
 
 
 def load_specs(*, storage=None) -> Dict[str, str]:
     ensure_spec_files()
-    global_spec = GLOBAL_SPEC_PATH.read_text(encoding="utf-8")
+    constitution = CONSTITUTION_PATH.read_text(encoding="utf-8")
     project_spec = PROJECT_SPEC_PATH.read_text(encoding="utf-8")
     record_context_load(
         artifact_type="spec",
-        identifier="global_spec",
-        content=global_spec,
+        identifier="constitution",
+        content=constitution,
         source="specs.bootstrap.load_specs",
-        metadata={"path": str(GLOBAL_SPEC_PATH)},
+        metadata={"path": str(CONSTITUTION_PATH)},
         storage=storage,
     )
     record_context_load(
@@ -105,7 +110,8 @@ def load_specs(*, storage=None) -> Dict[str, str]:
         storage=storage,
     )
     return {
-        "global_spec": global_spec,
+        "constitution": constitution,
+        "global_spec": constitution,
         "project_spec": project_spec,
     }
 
@@ -116,7 +122,7 @@ def spec_is_bootstrap_placeholder(spec_text: str) -> bool:
         return True
     markers = [
         "Suggested contents:",
-        "If there are no durable global preferences yet",
+        "If there are no durable constitutional preferences yet",
         "This file should exist even when it is sparse",
     ]
     return any(marker in normalized for marker in markers)
@@ -174,7 +180,7 @@ def _archive_old_resolved_proposals(storage) -> None:
 
 
 def _spec_path_for_scope(scope: str) -> Path:
-    return GLOBAL_SPEC_PATH if str(scope).strip().lower() == "global" else PROJECT_SPEC_PATH
+    return CONSTITUTION_PATH if str(scope).strip().lower() == "global" else PROJECT_SPEC_PATH
 
 
 def _content_hash(value: str) -> str:

@@ -41,6 +41,7 @@ LEGACY_DEFAULT_CONTEXT_FILES = [
 
 DEFAULT_CONTEXT_FILES = [
     ".knowledge/specs/project_spec.md",
+    ".knowledge/specs/constitution.md",
     "docs/spec/eval-brief.md",
     "docs/spec/project-philosophy.md",
 ]

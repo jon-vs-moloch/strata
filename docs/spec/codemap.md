@@ -132,7 +132,7 @@ Important worker submodules:
 
 - [bootstrap.py](/Users/jon/Projects/strata/strata/specs/bootstrap.py)
   Durable spec bootstrap, proposal persistence, and resolution flow.
-- [.knowledge/specs/global_spec.md](/Users/jon/Projects/strata/.knowledge/specs/global_spec.md)
+- [.knowledge/specs/constitution.md](/Users/jon/Projects/strata/.knowledge/specs/constitution.md)
   Global durable intent.
 - [.knowledge/specs/project_spec.md](/Users/jon/Projects/strata/.knowledge/specs/project_spec.md)
   Project-specific durable intent.
