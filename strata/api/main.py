@@ -195,7 +195,7 @@ def _find_pending_spec_clarification(storage: StorageManager, session_id: str) -
 
 
 def _task_is_active(task: TaskModel) -> bool:
-    return task.state not in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}
+    return task.state in {TaskState.PENDING, TaskState.WORKING}
 
 
 def _find_existing_eval_job(storage: StorageManager, job_kind: str, signature: Dict[str, Any]) -> Optional[TaskModel]:

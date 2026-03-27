@@ -267,6 +267,24 @@ Available Tools:
 
         while iteration < max_iters:
             model_response = await chat_adapter.chat(messages, tools=active_tools)
+            if model_response.get("status") == "error":
+                error_message = str(model_response.get("message") or model_response.get("content") or "").strip()
+                if active_tools and "Function calling is not enabled" in error_message:
+                    active_tools = []
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "The selected strong-tier model rejected tool calling for this request. "
+                                "Answer directly without tools."
+                            ),
+                        }
+                    )
+                    continue
+                final_reply = error_message or "I encountered an error processing that."
+                storage.messages.create(role="assistant", content=final_reply, session_id=session_id)
+                storage.commit()
+                return {"status": "ok", "reply": final_reply}
             tool_calls = model_response.get("tool_calls")
             content_val = model_response.get("content")
             chain_of_thought = str(content_val) if content_val else ""
