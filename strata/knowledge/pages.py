@@ -135,7 +135,7 @@ class KnowledgePageStore:
         pages = self._load_index()
         lowered_query = (query or "").strip().lower()
         lowered_tag = (tag or "").strip().lower()
-        lowered_domain = _normalize_domain(domain) if domain else ""
+        lowered_domain = normalize_domain(domain) if domain else ""
         filtered: List[Dict[str, Any]] = []
         for page in pages:
             if lowered_query:

@@ -170,7 +170,7 @@ def register_runtime_admin_routes(
         )
         supervision_jobs = []
         for task in active_bootstrap_jobs:
-            if task.state in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
+            if task.state not in {TaskState.PENDING, TaskState.WORKING}:
                 continue
             system_job = dict((task.constraints or {}).get("system_job") or {})
             if str(system_job.get("kind") or "") != "bootstrap_cycle":

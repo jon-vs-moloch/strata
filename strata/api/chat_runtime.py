@@ -253,13 +253,19 @@ Available Tools:
             messages.append({"role": message.role, "content": message.content})
         return messages, active_tools, knowledge_pages, pending_question
 
-    async def run_chat_tool_loop(self, storage, *, session_id: str, content: str):
-        chat_adapter = ModelAdapter(context=StrongExecutionContext(run_id=f"chat:{session_id}"))
+    async def run_chat_tool_loop(self, storage, *, session_id: str, content: str, preferred_tier: str = "strong"):
+        preferred_tier = str(preferred_tier or "strong").lower()
+        chat_context = (
+            WeakExecutionContext(run_id=f"chat:{session_id}")
+            if preferred_tier == "weak"
+            else StrongExecutionContext(run_id=f"chat:{session_id}")
+        )
+        chat_adapter = ModelAdapter(context=chat_context)
         chat_adapter._selected_models = dict(getattr(self.deps["model_adapter"], "_selected_models", {}))
         weak_fallback_adapter = ModelAdapter(context=WeakExecutionContext(run_id=f"chat-weak:{session_id}"))
         weak_fallback_adapter._selected_models = dict(chat_adapter._selected_models)
         active_adapter = chat_adapter
-        downgraded_to_weak = False
+        downgraded_to_weak = preferred_tier == "weak"
         pending_question = self.deps["get_active_question"](storage, session_id)
         messages, active_tools, knowledge_pages, pending_question = self.build_chat_messages(
             storage, session_id=session_id, content=content, pending_question=pending_question
@@ -323,10 +329,6 @@ Available Tools:
             if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
                 tool_outputs_generated = False
                 async_task_ids: List[str] = []
-                if chain_of_thought and chain_of_thought.strip():
-                    storage.messages.create(role="assistant", content=chain_of_thought.strip(), session_id=session_id)
-                    storage.commit()
-
                 messages.append({"role": "assistant", "content": chain_of_thought or None, "tool_calls": tool_calls})
                 invocation_updates: List[str] = []
                 for call in tool_calls:
@@ -342,17 +344,22 @@ Available Tools:
                     tool_outputs_generated = tool_outputs_generated or result["tool_outputs_generated"]
                     if result["async_task_id"]:
                         async_task_ids.append(result["async_task_id"])
+                summary = ""
                 if invocation_updates:
                     summary = " ".join(
                         sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
                         for sentence in invocation_updates[:3]
                     )
-                    storage.messages.create(role="assistant", content=summary, session_id=session_id)
-                    storage.commit()
                 if tool_outputs_generated:
+                    if summary:
+                        storage.messages.create(role="assistant", content=summary, session_id=session_id)
+                        storage.commit()
                     iteration += 1
                     continue
-                reply = chain_of_thought.strip() or (" ".join(invocation_updates[:3]).strip() if invocation_updates else "I’ve kicked off the relevant system work.")
+                reply = chain_of_thought.strip() or summary or (" ".join(invocation_updates[:3]).strip() if invocation_updates else "I’ve kicked off the relevant system work.")
+                if reply:
+                    storage.messages.create(role="assistant", content=reply, session_id=session_id)
+                    storage.commit()
                 return {"status": "ok", "reply": reply, "task_ids": async_task_ids}
 
             final_reply = model_response.get("content", "I encountered an error processing that.")

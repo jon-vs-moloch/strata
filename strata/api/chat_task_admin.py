@@ -99,6 +99,9 @@ def register_chat_task_routes(
     async def post_chat(payload: Dict[str, Any], storage=Depends(get_storage)):
         session_id = payload.get("session_id", "default")
         content = payload.get("content", "")
+        preferred_tier = str(payload.get("preferred_tier") or "strong").strip().lower()
+        if preferred_tier not in {"strong", "weak"}:
+            preferred_tier = "strong"
 
         storage.messages.create(role=payload["role"], content=content, session_id=session_id)
         storage.commit()
@@ -111,7 +114,12 @@ def register_chat_task_routes(
         if task_reply:
             return task_reply
 
-        return await runtime.run_chat_tool_loop(storage, session_id=session_id, content=content)
+        return await runtime.run_chat_tool_loop(
+            storage,
+            session_id=session_id,
+            content=content,
+            preferred_tier=preferred_tier,
+        )
 
     @app.post("/tasks")
     async def create_task(task_data: Dict[str, Any], storage=Depends(get_storage)):

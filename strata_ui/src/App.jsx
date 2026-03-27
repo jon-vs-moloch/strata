@@ -27,6 +27,24 @@ const PROVIDER_SETUP_LINKS = [
   { label: 'OpenRouter Keys', href: 'https://openrouter.ai/settings/keys' },
 ];
 
+const CHAT_LANES = ['strong', 'weak'];
+
+const defaultSessionIdForLane = (lane) => `${lane}:default`;
+
+const laneForSessionId = (sessionId) => {
+  if (typeof sessionId !== 'string') return 'strong';
+  if (sessionId.startsWith('weak:')) return 'weak';
+  if (sessionId.startsWith('strong:')) return 'strong';
+  return 'strong';
+};
+
+const displaySessionId = (sessionId) => {
+  if (typeof sessionId !== 'string') return 'default';
+  if (sessionId.startsWith('weak:')) return sessionId.slice('weak:'.length);
+  if (sessionId.startsWith('strong:')) return sessionId.slice('strong:'.length);
+  return sessionId;
+};
+
 const formatRelativeTime = (dateString) => {
   if (!dateString) return 'never';
   const deltaMs = Date.now() - new Date(dateString).getTime();
@@ -573,7 +591,7 @@ const HistoryPane = ({ sessionList, sessionId, setSessionId, deleteSession }) =>
 
 const SessionRow = ({ session, active, onClick, onDelete }) => {
   const [hovered, setHovered] = useState(false);
-  const s = session.session_id;
+  const s = displaySessionId(session.session_id);
   const label = s === 'default' ? 'Genesis Session' : (() => {
     const ts = parseInt(s.replace('session-', ''), 10);
     if (isNaN(ts)) return s;
@@ -627,7 +645,11 @@ function App() {
   const [inputText, setInputText]     = useState('');
   const [isSending, setIsSending]     = useState(false);
   const [sendError, setSendError]     = useState('');
-  const [sessionId, setSessionId]     = useState('default');
+  const [chatLane, setChatLane]       = useState('strong');
+  const [laneSessionIds, setLaneSessionIds] = useState({
+    strong: defaultSessionIdForLane('strong'),
+    weak: defaultSessionIdForLane('weak'),
+  });
   const [sessionList, setSessionList] = useState([]);
   const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'history' | 'dashboard'
   const [showSettings, setShowSettings] = useState(false);
@@ -659,6 +681,7 @@ function App() {
 
   const [tiers, setTiers] = useState({ Strong: 'unknown', Weak: 'unknown' });
   const [showCloudModal, setShowCloudModal] = useState(false);
+  const sessionId = laneSessionIds[chatLane] || defaultSessionIdForLane(chatLane);
 
   const fetchWorkerStatus = useCallback(async () => {
     try {
@@ -749,7 +772,8 @@ function App() {
 
       setTasks(tasksRes.data);
       setMessages(msgsRes.data);
-      const sessions = Array.isArray(sessionsRes.data) ? sessionsRes.data.slice() : [];
+      const sessions = (Array.isArray(sessionsRes.data) ? sessionsRes.data.slice() : [])
+        .filter((session) => laneForSessionId(session.session_id) === chatLane);
       if (!sessions.some((s) => s.session_id === sessionId)) {
         sessions.push({
           session_id: sessionId,
@@ -773,7 +797,7 @@ function App() {
       console.error('Fetch failed', err);
       setApiStatus('error');
     }
-  }, [sessionId]);
+  }, [chatLane, sessionId]);
 
   useEffect(() => {
     fetchData(true);
@@ -812,7 +836,12 @@ function App() {
     // Optimistic update: show the user's message immediately
     setMessages(prev => [...prev, { id: tempId, role: 'user', content: text, pending: true }]);
     try {
-      await axios.post(`${API}/chat`, { role: 'user', content: text, session_id: sessionId });
+      await axios.post(`${API}/chat`, {
+        role: 'user',
+        content: text,
+        session_id: sessionId,
+        preferred_tier: chatLane,
+      });
       await fetchData(true);
     } catch (err) {
       console.error('Failed to send message.', err);
@@ -828,18 +857,19 @@ function App() {
   };
 
   const startNewChat = () => {
-    const newId = `session-${Date.now()}`;
-    setSessionId(newId);
+    const newId = `${chatLane}:session-${Date.now()}`;
+    setLaneSessionIds(prev => ({ ...prev, [chatLane]: newId }));
     setMessages([]);
     setInputText('');
+    setSendError('');
   };
 
   const deleteSession = async (idToDelete) => {
     try {
       await axios.delete(`${API}/sessions/${idToDelete}`);
-      setSessionList(prev => prev.filter(s => s !== idToDelete));
+      setSessionList(prev => prev.filter((session) => session.session_id !== idToDelete));
       if (sessionId === idToDelete) {
-        setSessionId('default');
+        setLaneSessionIds(prev => ({ ...prev, [chatLane]: defaultSessionIdForLane(chatLane) }));
         setMessages([]);
       }
     } catch (err) {
@@ -850,7 +880,10 @@ function App() {
   const handleResetDatabase = async () => {
     await axios.post(`${API}/admin/reset`);
     setSessionList([]);
-    setSessionId('default');
+    setLaneSessionIds({
+      strong: defaultSessionIdForLane('strong'),
+      weak: defaultSessionIdForLane('weak'),
+    });
     setMessages([]);
     setTasks([]);
   };
@@ -889,11 +922,12 @@ function App() {
     return roots;
   }, [tasks, archivedTasks]);
 
-  const sessionLabel = sessionId === 'default'
+  const visibleSessionId = displaySessionId(sessionId);
+  const sessionLabel = visibleSessionId === 'default'
     ? 'Genesis Session'
     : (() => {
-        const ts = parseInt(sessionId.replace('session-', ''), 10);
-        return isNaN(ts) ? sessionId : new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const ts = parseInt(visibleSessionId.replace('session-', ''), 10);
+        return isNaN(ts) ? visibleSessionId : new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
       })();
 
   // ── Icon Nav items ───────────────────────────────────────────────────────────
@@ -988,23 +1022,41 @@ function App() {
       {/* ── COLUMN 2: SESSION / HISTORY PANEL ──────────────────────────────── */}
       <div style={{ width: '240px', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', background: '#0c0c0e' }}>
         <header style={{ padding: '20px 16px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ fontSize: '11px', fontWeight: 700, color: '#555', letterSpacing: '0.12em' }}>
-            {activeNav === 'history' ? 'ALL SESSIONS' : 'SESSIONS'}
-          </h2>
-          <button
-            onClick={startNewChat}
-            title="New Chat"
-            style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', borderRadius: '6px', color: '#8257e5', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 10px', fontSize: '12px', fontWeight: 600 }}
-          >
-            <Plus size={13} /> New
-          </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={{ fontSize: '11px', fontWeight: 700, color: '#555', letterSpacing: '0.12em' }}>
+                {activeNav === 'history' ? 'ALL SESSIONS' : 'SESSIONS'}
+              </h2>
+              <button
+                onClick={startNewChat}
+                title="New Chat"
+                style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', borderRadius: '6px', color: '#8257e5', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 10px', fontSize: '12px', fontWeight: 600 }}
+              >
+                <Plus size={13} /> New
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {CHAT_LANES.map((lane) => (
+                <LaneToggle
+                  key={lane}
+                  lane={lane}
+                  active={chatLane === lane}
+                  onClick={() => {
+                    setChatLane(lane);
+                    setMessages([]);
+                    setSendError('');
+                  }}
+                />
+              ))}
+            </div>
+          </div>
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
           <HistoryPane
             sessionList={sessionList}
             sessionId={sessionId}
-            setSessionId={setSessionId}
+            setSessionId={(nextSessionId) => setLaneSessionIds(prev => ({ ...prev, [chatLane]: nextSessionId }))}
             deleteSession={deleteSession}
           />
         </div>
@@ -1015,7 +1067,7 @@ function App() {
         <header style={{ padding: '20px 28px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
           <div>
             <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
-              {activeNav === 'dashboard' ? 'Operator Dashboard' : 'Orchestrator Chat'}
+              {activeNav === 'dashboard' ? 'Operator Dashboard' : `Orchestrator Chat · ${chatLane.toUpperCase()}`}
             </h1>
             <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>{sessionLabel}</p>
             {routingSummary && (
@@ -1421,6 +1473,26 @@ const RoutePill = ({ label, value, tone = 'neutral' }) => {
     </div>
   );
 };
+
+const LaneToggle = ({ lane, active, onClick }) => (
+  <button
+    onClick={onClick}
+    style={{
+      background: active ? 'rgba(130,87,229,0.18)' : 'rgba(255,255,255,0.03)',
+      border: active ? '1px solid rgba(130,87,229,0.4)' : '1px solid rgba(255,255,255,0.08)',
+      color: active ? '#f2ecff' : '#9a9cad',
+      borderRadius: '999px',
+      padding: '6px 12px',
+      fontSize: '11px',
+      fontWeight: 700,
+      letterSpacing: '0.08em',
+      cursor: 'pointer',
+      textTransform: 'uppercase',
+    }}
+  >
+    {lane}
+  </button>
+);
 
 const Sparkline = ({ values, color = '#8257e5' }) => {
   const points = Array.isArray(values) ? values : [];
