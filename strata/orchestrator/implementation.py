@@ -13,6 +13,7 @@ import os
 import json
 import httpx
 from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
+from strata.experimental.variants import build_stage_scope, classify_pool_pruning, list_variants_for_scope
 
 IMPLEMENTATION_META_TOOLS = [
     {
@@ -90,6 +91,31 @@ class ImplementationModule:
         from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
         self.tools_pipeline = ToolsPromotionPipeline(self.storage)
 
+    def _resolve_generation_variants(self, task: TaskModel) -> List[Dict[str, Any]]:
+        constraints = dict(task.constraints or {})
+        stage_scope = str(
+            constraints.get("variant_scope")
+            or build_stage_scope(component="implementation", process=str(task.type.value).lower(), step="default")
+        )
+        limit = int(constraints.get("pass_at") or constraints.get("candidate_count") or 1)
+        variants = list_variants_for_scope(
+            self.storage,
+            family="implementation_prompt",
+            stage_scope=stage_scope,
+            domain=f"ops:{stage_scope}",
+            limit=limit,
+        )
+        if variants:
+            return variants
+        return [
+            {
+                "variant_id": "implementation_prompt.generic",
+                "label": "implementation_prompt.generic",
+                "payload": {},
+                "metadata": {"stage_scope": stage_scope},
+            }
+        ]
+
     async def implement_task(self, task_id: str, global_research: Optional[ResearchReport] = None) -> List[str]:
         """
         @summary Execute a coding task with a two-pass research strategy.
@@ -146,97 +172,113 @@ class ImplementationModule:
         """
         
         messages = [{"role": "system", "content": system_prompt}]
-        iteration = 0
-        max_iters = 5
-        
-        while iteration < max_iters:
-            response = await self.model.chat(messages, tools=IMPLEMENTATION_META_TOOLS)
-            content = response.get("content", "")
-            tool_calls = response.get("tool_calls", None)
-            
-            if not tool_calls:
-                # If no tool calls, this is our final implementation output
-                break
-                
-            messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-            
-            for call in tool_calls:
-                func_name = call["function"]["name"]
-                args = json.loads(call["function"]["arguments"])
-                tool_result = ""
-                
-                try:
-                    if func_name == "list_active_tools":
-                        # We hit the API endpoint or just list files
-                        tools_dir = "strata/tools"
-                        os.makedirs(tools_dir, exist_ok=True)
-                        files = [f for f in os.listdir(tools_dir) if f.endswith(".py") or f.endswith(".experimental.py")]
-                        tool_result = f"Dynamic files in tools/: {files}"
-                        
-                    elif func_name == "read_tool_source":
-                        name = args["tool_name"]
-                        path = f"strata/tools/{name}.py"
-                        if not os.path.exists(path):
-                            path = f"strata/tools/{name}.experimental.py"
-                        
-                        if os.path.exists(path):
-                            with open(path, "r") as f:
-                                tool_result = f.read()
-                        else:
-                            tool_result = f"Tool {name} not found."
-                            
-                    elif func_name == "upsert_tool_source":
-                        name = args["tool_name"]
-                        source = args["source"]
-                        os.makedirs("strata/tools", exist_ok=True)
-                        path = f"strata/tools/{name}.experimental.py"
-                        with open(path, "w") as f:
-                            f.write(source)
-                        tool_result = f"Successfully wrote to {path}. You must call trigger_tool_promotion to make it live."
-                        
-                    elif func_name == "trigger_tool_promotion":
-                        name = args["tool_name"]
-                        # Use the gated pipeline for promotion
-                        success, message = await self.tools_pipeline.validate_and_promote(name)
-                        tool_result = message
-                            
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "name": func_name,
-                        "content": tool_result
-                    })
-                except Exception as e:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "name": func_name,
-                        "content": f"Error: {str(e)}"
-                    })
-            iteration += 1
-
-        # Create a candidate record
-        from uuid import uuid4
-        candidate_id = str(uuid4())
-        
-        candidate = CandidateModel(
-            candidate_id=candidate_id,
-            task_id=task_id,
-            stage="impl",
-            prompt_version="v1",
-            model=f"{response.get('provider')}/{response.get('model')}",
-            artifact_type="python_file",
-            content_path=f"strata/experimental/candidates/{candidate_id}.py",
-            summary=f"Implementation for {task.title}",
-            proposed_files=task.constraints.get("target_files", [])
-        )
-        self.storage.session.add(candidate)
-        self.storage.commit()
-        
-        # Write the actual file artifact
+        stage_variants = self._resolve_generation_variants(task)
+        candidate_ids: List[str] = []
         os.makedirs("strata/experimental/candidates", exist_ok=True)
-        with open(candidate.content_path, "w", encoding="utf-8") as f:
-            f.write(content)
-            
-        return [candidate_id]
 
+        for variant in stage_variants:
+            variant_payload = dict(variant.get("payload") or {})
+            variant_messages = list(messages)
+            instruction = str(variant_payload.get("instruction_suffix") or "").strip()
+            if instruction:
+                variant_messages[0] = {
+                    "role": "system",
+                    "content": f"{system_prompt}\n\nVariant Instruction:\n{instruction}",
+                }
+            iteration = 0
+            max_iters = 5
+            content = ""
+            response = {}
+            while iteration < max_iters:
+                response = await self.model.chat(variant_messages, tools=IMPLEMENTATION_META_TOOLS)
+                content = response.get("content", "")
+                tool_calls = response.get("tool_calls", None)
+                
+                if not tool_calls:
+                    break
+                    
+                variant_messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+                
+                for call in tool_calls:
+                    func_name = call["function"]["name"]
+                    args = json.loads(call["function"]["arguments"])
+                    tool_result = ""
+                    
+                    try:
+                        if func_name == "list_active_tools":
+                            tools_dir = "strata/tools"
+                            os.makedirs(tools_dir, exist_ok=True)
+                            files = [f for f in os.listdir(tools_dir) if f.endswith(".py") or f.endswith(".experimental.py")]
+                            tool_result = f"Dynamic files in tools/: {files}"
+                            
+                        elif func_name == "read_tool_source":
+                            name = args["tool_name"]
+                            path = f"strata/tools/{name}.py"
+                            if not os.path.exists(path):
+                                path = f"strata/tools/{name}.experimental.py"
+                            
+                            if os.path.exists(path):
+                                with open(path, "r") as f:
+                                    tool_result = f.read()
+                            else:
+                                tool_result = f"Tool {name} not found."
+                                
+                        elif func_name == "upsert_tool_source":
+                            name = args["tool_name"]
+                            source = args["source"]
+                            os.makedirs("strata/tools", exist_ok=True)
+                            path = f"strata/tools/{name}.experimental.py"
+                            with open(path, "w") as f:
+                                f.write(source)
+                            tool_result = f"Successfully wrote to {path}. You must call trigger_tool_promotion to make it live."
+                            
+                        elif func_name == "trigger_tool_promotion":
+                            name = args["tool_name"]
+                            success, message = await self.tools_pipeline.validate_and_promote(name)
+                            tool_result = message
+                                
+                        variant_messages.append({
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "name": func_name,
+                            "content": tool_result
+                        })
+                    except Exception as e:
+                        variant_messages.append({
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "name": func_name,
+                            "content": f"Error: {str(e)}"
+                        })
+                iteration += 1
+
+            from uuid import uuid4
+            candidate_id = str(uuid4())
+            candidate = CandidateModel(
+                candidate_id=candidate_id,
+                task_id=task_id,
+                stage="impl",
+                prompt_version=str(variant.get("variant_id") or "v1"),
+                model=f"{response.get('provider')}/{response.get('model')}",
+                artifact_type="python_file",
+                content_path=f"strata/experimental/candidates/{candidate_id}.py",
+                summary=f"Implementation for {task.title}",
+                proposed_files=task.constraints.get("target_files", [])
+            )
+            self.storage.session.add(candidate)
+            self.storage.commit()
+            with open(candidate.content_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            candidate_ids.append(candidate_id)
+
+        pruning = classify_pool_pruning(self.storage, pool_size=len(candidate_ids))
+        task_constraints = dict(task.constraints or {})
+        task_constraints["candidate_generation"] = {
+            "stage_scope": str(stage_variants[0].get("metadata", {}).get("stage_scope") or ""),
+            "generated_count": len(candidate_ids),
+            "pruning_policy": pruning,
+            "variant_ids": [str(item.get("variant_id") or "") for item in stage_variants],
+        }
+        task.constraints = task_constraints
+        self.storage.commit()
+        return candidate_ids

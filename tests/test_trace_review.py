@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from strata.api import main as api_main
 from strata.eval.job_runner import run_eval_job_task
+from strata.experimental.audit_registry import get_audit_artifact, get_timeline_artifact
 from strata.experimental.trace_review import build_task_trace_summary, review_trace
 from strata.storage.models import Base, AttemptOutcome, TaskState, TaskType
 from strata.storage.services.main import StorageManager
@@ -186,4 +187,60 @@ def test_review_task_trace_endpoint_persists_inline_review():
     reloaded_target = storage.tasks.get_by_id(target.task_id)
     assert result["status"] == "ok"
     assert result["review"]["reviewer_tier"] == "weak"
+    assert result["review"]["timeline_artifact_id"]
+    assert result["review"]["audit_artifact_id"]
+    assert get_timeline_artifact(storage, result["review"]["timeline_artifact_id"])["artifact_type"] == "timeline_artifact"
+    assert get_audit_artifact(storage, result["review"]["audit_artifact_id"])["artifact_type"] == "audit_artifact"
     assert reloaded_target.constraints["trace_reviews"][0]["overall_assessment"] == "needs_intervention"
+
+
+def test_review_endpoint_supports_recursive_audit_of_prior_audit():
+    storage = make_storage()
+    target = storage.tasks.create(
+        title="Recursive audit target",
+        description="Needs review",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+    )
+    storage.commit()
+
+    async def fake_review_trace(*_args, **kwargs):
+        return {
+            "status": "ok",
+            "trace_kind": "task_trace",
+            "reviewer_tier": kwargs.get("reviewer_tier"),
+            "recorded_at": "2026-03-26T00:00:00+00:00",
+            "summary": "Inline review summary.",
+            "overall_assessment": "needs_intervention",
+            "primary_failure_mode": "tool_avoidance",
+            "targeted_interventions": [],
+            "telemetry_to_watch": [],
+        }
+
+    import strata.api.experiment_admin as experiment_admin
+
+    original_review_trace = experiment_admin.review_trace
+    experiment_admin.review_trace = fake_review_trace
+    try:
+        first = asyncio.run(
+            api_main.review_task_trace(
+                payload={"task_id": target.task_id, "reviewer_tier": "weak", "persist_to_task": False},
+                storage=storage,
+            )
+        )
+        second = asyncio.run(
+            api_main.review_trace_endpoint(
+                payload={
+                    "artifact_type": "audit",
+                    "artifact_id": first["review"]["audit_artifact_id"],
+                },
+                storage=storage,
+            )
+        )
+    finally:
+        experiment_admin.review_trace = original_review_trace
+
+    assert second["status"] == "ok"
+    assert second["audit_artifact"]["audit_target_type"] == "timeline"
+    assert second["audit_artifact"]["metadata"]["recursive_target_type"] == "audit"

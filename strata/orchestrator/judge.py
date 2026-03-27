@@ -11,6 +11,7 @@ import os
 from typing import List, Dict, Any
 from strata.schemas.core import TaskFraming
 from strata.orchestrator.worker.telemetry import record_metric
+from strata.experimental.variants import classify_pool_pruning, record_ranked_variant_matchups
 
 class JudgeModule:
     """
@@ -84,6 +85,33 @@ class JudgeModule:
             valid = await self.maybe_llm_tiebreak(task, valid)
         else:
             record_metric(self.storage, "tie_break_triggered", 0.0, task_id=task.task_id)
+
+        ranked_variant_ids = []
+        for row in valid:
+            candidate = self.storage.session.get(CandidateModel, row["candidate_id"])
+            variant_id = str(getattr(candidate, "prompt_version", "") or "").strip()
+            if variant_id:
+                ranked_variant_ids.append(variant_id)
+        matchup_snapshots = []
+        if len(ranked_variant_ids) >= 2:
+            matchup_snapshots = record_ranked_variant_matchups(
+                self.storage,
+                domain=f"ops:implementation:{task.type.value.lower()}",
+                ranked_variant_ids=ranked_variant_ids,
+                context={"task_id": task.task_id, "stage": "implementation"},
+            )
+
+        pruning = classify_pool_pruning(self.storage, pool_size=len(valid))
+        constraints = dict(task.constraints or {})
+        constraints["candidate_ranking"] = {
+            "valid_count": len(valid),
+            "invalid_count": len(invalid),
+            "ranked_variant_ids": ranked_variant_ids,
+            "matchup_count": len(matchup_snapshots),
+            "pruning_policy": pruning,
+            "recommended_rejections": pruning.get("drop_count", 0),
+        }
+        task.constraints = constraints
 
         self.storage.commit()
         return valid + invalid

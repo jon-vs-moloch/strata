@@ -248,6 +248,8 @@ NON_GENERATIVE_TOOLS = [
                     "proposed_change": {"type": "string", "description": "The candidate change that should be reviewed against the current spec."},
                     "rationale": {"type": "string", "description": "Why this should become part of the durable spec."},
                     "user_signal": {"type": "string", "description": "The user statement or intent that triggered this proposal."},
+                    "claimed_mutation_class": {"type": "string", "description": "The mutation class this proposal claims under the current active spec."},
+                    "proposal_kind": {"type": "string", "description": "The governance path for this change.", "enum": ["amendment", "clarification", "policy_update"]},
                 },
                 "required": ["scope", "proposed_change", "rationale"],
             },

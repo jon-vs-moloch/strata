@@ -211,6 +211,10 @@ class ChatToolExecutor:
             proposed_change = str(args.get("proposed_change") or "").strip()
             rationale = str(args.get("rationale") or "").strip()
             user_signal = str(args.get("user_signal") or content).strip()
+            claimed_mutation_class = str(
+                args.get("claimed_mutation_class") or "clarification_with_no_behavior_change"
+            ).strip()
+            proposal_kind = str(args.get("proposal_kind") or "clarification").strip()
             current_specs = load_specs(storage=storage)
             current_spec = current_specs.get("global_spec" if scope == "global" else "project_spec", "")
             title = f"Spec Review ({scope.title()}): {proposed_change[:48] or rationale[:48] or 'pending proposal'}"
@@ -236,19 +240,34 @@ class ChatToolExecutor:
                     "proposed_change": proposed_change,
                     "rationale": rationale,
                     "user_signal": user_signal,
+                    "claimed_mutation_class": claimed_mutation_class,
+                    "proposal_kind": proposal_kind,
                 },
             )
             task.type = task_type_cls.RESEARCH
-            proposal = create_spec_proposal(
-                storage,
-                scope=scope,
-                proposed_change=proposed_change,
-                rationale=rationale,
-                user_signal=user_signal,
-                session_id=session_id,
-                source="chat_agent",
-                review_task_id=task.task_id,
-            )
+            try:
+                proposal = create_spec_proposal(
+                    storage,
+                    scope=scope,
+                    proposed_change=proposed_change,
+                    rationale=rationale,
+                    user_signal=user_signal,
+                    session_id=session_id,
+                    source="chat_agent",
+                    review_task_id=task.task_id,
+                    claimed_mutation_class=claimed_mutation_class,
+                    proposal_kind=proposal_kind,
+                )
+            except ValueError as exc:
+                storage.session.rollback()
+                tool_content = f"Spec proposal rejected: {exc}"
+                return {
+                    "tool_message": {"role": "tool", "tool_call_id": tool_call_id, "name": func_name, "content": tool_content},
+                    "tool_outputs_generated": tool_outputs_generated,
+                    "async_task_id": async_task_id,
+                    "tool_reason": reason,
+                    "tool_name": func_name,
+                }
             task.constraints["spec_proposal_id"] = proposal["proposal_id"]
             storage.commit()
             await self.deps["worker"].enqueue(task.task_id)

@@ -88,9 +88,13 @@ def test_spec_proposal_lifecycle(tmp_path, monkeypatch):
     )
     assert resolved["status"] == "approved"
     assert resolved["applied_at"] is not None
+    assert resolved["governance_audit_artifact_id"] is not None
     assert proposal["attribution"]["message_citations"][0]["message_id"] == "m1"
     assert proposal["proposal_id"] in bootstrap.PROJECT_SPEC_PATH.read_text(encoding="utf-8")
     assert "User Message Citations" in bootstrap.PROJECT_SPEC_PATH.read_text(encoding="utf-8")
+    active_spec = bootstrap.get_active_spec_record(storage, scope="project")
+    assert active_spec["proposal_id"] == proposal["proposal_id"]
+    assert active_spec["adoption_audit_artifact_id"] == resolved["governance_audit_artifact_id"]
 
 
 def test_spec_proposal_resubmission_clears_clarification(tmp_path, monkeypatch):
@@ -107,6 +111,7 @@ def test_spec_proposal_resubmission_clears_clarification(tmp_path, monkeypatch):
         proposed_change="Add a new persistent objective.",
         rationale="The user clarified a durable target.",
         user_signal="we should do x",
+        session_id="demo",
     )
     bootstrap.resolve_spec_proposal(
         storage,
@@ -139,6 +144,7 @@ def test_spec_proposal_index_is_bounded(tmp_path, monkeypatch):
             scope="project",
             proposed_change=f"change {idx}",
             rationale="test",
+            session_id="demo",
         )
         bootstrap.resolve_spec_proposal(
             storage,
@@ -157,3 +163,59 @@ def test_spec_placeholder_detection():
     assert not bootstrap.spec_is_bootstrap_placeholder(
         "# Project Spec\n\nCurrent project intent:\n- make the weak tier improve itself\n"
     )
+
+
+def test_spec_proposal_requires_explicit_user_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(bootstrap, "ROOT", tmp_path)
+    monkeypatch.setattr(bootstrap, "SPECS_DIR", tmp_path / ".knowledge" / "specs")
+    monkeypatch.setattr(bootstrap, "GLOBAL_SPEC_PATH", bootstrap.SPECS_DIR / "global_spec.md")
+    monkeypatch.setattr(bootstrap, "PROJECT_SPEC_PATH", bootstrap.SPECS_DIR / "project_spec.md")
+
+    storage = DummyStorage()
+    bootstrap.ensure_spec_files()
+
+    try:
+        bootstrap.create_spec_proposal(
+            storage,
+            scope="project",
+            proposed_change="Add a durable objective.",
+            rationale="test",
+            user_signal="operator preference",
+        )
+    except ValueError as exc:
+        assert "explicit user-message provenance" in str(exc)
+    else:
+        raise AssertionError("Expected create_spec_proposal to reject missing user provenance.")
+
+
+def test_spec_proposal_with_unauthorized_mutation_class_cannot_activate(tmp_path, monkeypatch):
+    monkeypatch.setattr(bootstrap, "ROOT", tmp_path)
+    monkeypatch.setattr(bootstrap, "SPECS_DIR", tmp_path / ".knowledge" / "specs")
+    monkeypatch.setattr(bootstrap, "GLOBAL_SPEC_PATH", bootstrap.SPECS_DIR / "global_spec.md")
+    monkeypatch.setattr(bootstrap, "PROJECT_SPEC_PATH", bootstrap.SPECS_DIR / "project_spec.md")
+
+    storage = DummyStorage()
+    bootstrap.ensure_spec_files()
+    proposal = bootstrap.create_spec_proposal(
+        storage,
+        scope="project",
+        proposed_change="Make arbitrary spec edits possible.",
+        rationale="test",
+        user_signal="please do this",
+        session_id="demo",
+        claimed_mutation_class="arbitrary_edit",
+        proposal_kind="amendment",
+    )
+    assert proposal["validation_status"] == "invalid"
+
+    try:
+        bootstrap.resolve_spec_proposal(
+            storage,
+            proposal_id=proposal["proposal_id"],
+            resolution="approved",
+            reviewer_notes="should fail",
+        )
+    except ValueError as exc:
+        assert "not allowed by the active spec" in str(exc)
+    else:
+        raise AssertionError("Expected unauthorized mutation class to block activation.")

@@ -9,6 +9,7 @@
 
 from typing import List, Dict, Any
 from strata.schemas.core import TaskDecomposition
+from strata.experimental.variants import build_stage_scope, list_variants_for_scope, record_ranked_variant_matchups
 
 class SynthesisModule:
     """
@@ -28,6 +29,31 @@ class SynthesisModule:
         self.model = model_adapter
         self.storage = storage_manager
 
+    async def _rank_synthesis_outputs(self, task_id: str, outputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if len(outputs) < 2:
+            return outputs
+        prompt = (
+            f"You are ranking synthesis outputs for task '{task_id}'. "
+            "Choose the best merged result for coherence, correctness, completeness, and minimal conflict. "
+            "Return only JSON like {\"preferred_variant_id\":\"...\"}.\n\n"
+        )
+        for item in outputs:
+            prompt += f"Variant {item['variant_id']}:\n```\n{item['content']}\n```\n\n"
+        response = await self.model.chat([{"role": "user", "content": prompt}])
+        preferred = str(response.get("content", "") or "").strip()
+        if preferred.startswith("{") and "preferred_variant_id" in preferred:
+            import json
+            try:
+                preferred = str(json.loads(preferred).get("preferred_variant_id") or "").strip()
+            except Exception:
+                preferred = ""
+        ranked = list(outputs)
+        for idx, item in enumerate(ranked):
+            if item["variant_id"] == preferred:
+                ranked.insert(0, ranked.pop(idx))
+                break
+        return ranked
+
     async def synthesize_subtasks(self, task_id: str, subtask_patches: Dict[str, str]) -> str:
         """
         @summary Harmonizes overlapping subtask patches into a final parent solution.
@@ -36,26 +62,55 @@ class SynthesisModule:
         @side_effects uses LLM to handle complex conflict resolution
         """
         # 3. Construct a prompt array for the model.chat() method
-        messages = [
+        stage_scope = build_stage_scope(component="synthesis", process="subtasks", step="default")
+        variants = list_variants_for_scope(
+            self.storage,
+            family="synthesis_prompt",
+            stage_scope=stage_scope,
+            domain=f"ops:{stage_scope}",
+        ) or [
             {
-                "role": "system",
-                "content": (
-                    "You are an expert code integration engine. Your job is to take multiple "
-                    "non-conflicting code patches/snippets and merge them into a single, cohesive "
-                    "file or patch. If you detect overlapping changes, harmonize them logically."
-                )
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Please synthesize the following subtask patches for parent task '{task_id}':\n\n" +
-                    "\n\n".join([f"### Subtask {tid}:\n```\n{patch}\n```" for tid, patch in subtask_patches.items()])
-                )
+                "variant_id": "synthesis_prompt.generic",
+                "payload": {},
+                "metadata": {"stage_scope": stage_scope},
             }
         ]
-        
-        # 4. Execute the LLM call
-        response = await self.model.chat(messages)
-        
-        # 5. Extract and return the content
-        return response.get("content", "# Synthesis failed or returned empty.")
+        outputs: List[Dict[str, Any]] = []
+        for variant in variants:
+            instruction = str((variant.get("payload") or {}).get("instruction_suffix") or "").strip()
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert code integration engine. Your job is to take multiple "
+                        "non-conflicting code patches/snippets and merge them into a single, cohesive "
+                        "file or patch. If you detect overlapping changes, harmonize them logically."
+                        + (f"\n\nVariant Instruction:\n{instruction}" if instruction else "")
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Please synthesize the following subtask patches for parent task '{task_id}':\n\n" +
+                        "\n\n".join([f"### Subtask {tid}:\n```\n{patch}\n```" for tid, patch in subtask_patches.items()])
+                    )
+                }
+            ]
+            response = await self.model.chat(messages)
+            outputs.append(
+                {
+                    "variant_id": str(variant.get("variant_id") or "synthesis_prompt.generic"),
+                    "content": response.get("content", "# Synthesis failed or returned empty."),
+                }
+            )
+        ranked_outputs = await self._rank_synthesis_outputs(task_id, outputs)
+        ranked_variant_ids = [item["variant_id"] for item in ranked_outputs if item.get("variant_id")]
+        if len(ranked_variant_ids) >= 2:
+            record_ranked_variant_matchups(
+                self.storage,
+                domain=f"ops:{stage_scope}",
+                ranked_variant_ids=ranked_variant_ids,
+                context={"task_id": task_id, "stage": "synthesis"},
+            )
+            self.storage.commit()
+        return ranked_outputs[0]["content"] if ranked_outputs else "# Synthesis failed or returned empty."

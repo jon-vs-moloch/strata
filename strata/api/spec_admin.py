@@ -50,16 +50,22 @@ def register_spec_admin_routes(
         rationale = str(payload.get("rationale") or "").strip()
         if not proposed_change or not rationale:
             raise HTTPException(status_code=400, detail="proposed_change and rationale are required")
-        proposal = create_spec_proposal(
-            storage,
-            scope=scope,
-            proposed_change=proposed_change,
-            rationale=rationale,
-            user_signal=str(payload.get("user_signal") or ""),
-            session_id=payload.get("session_id"),
-            source=str(payload.get("source") or "api"),
-            review_task_id=payload.get("review_task_id"),
-        )
+        try:
+            proposal = create_spec_proposal(
+                storage,
+                scope=scope,
+                proposed_change=proposed_change,
+                rationale=rationale,
+                user_signal=str(payload.get("user_signal") or ""),
+                session_id=payload.get("session_id"),
+                source=str(payload.get("source") or "api"),
+                review_task_id=payload.get("review_task_id"),
+                attribution=payload.get("attribution"),
+                claimed_mutation_class=str(payload.get("claimed_mutation_class") or "clarification_with_no_behavior_change"),
+                proposal_kind=str(payload.get("proposal_kind") or "clarification"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         storage.commit()
         return {"status": "ok", "proposal": proposal}
 

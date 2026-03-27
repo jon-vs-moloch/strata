@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from strata.observability.context import record_context_load
+from strata.experimental.audit_registry import audit_stored_artifact
 
 ROOT = Path(__file__).resolve().parents[2]
 SPECS_DIR = ROOT / ".knowledge" / "specs"
@@ -21,7 +23,16 @@ GLOBAL_SPEC_PATH = SPECS_DIR / "global_spec.md"
 PROJECT_SPEC_PATH = SPECS_DIR / "project_spec.md"
 SPEC_PROPOSALS_INDEX_KEY = "spec_proposals:index"
 SPEC_PROPOSAL_KEY_PREFIX = "spec_proposal:"
+SPEC_REGISTRY_KEY_PREFIX = "spec_registry"
+SPEC_SCOPE_INDEX_KEY = "spec_registry:index"
 MAX_TERMINAL_SPEC_PROPOSALS = 100
+DEFAULT_ALLOWED_MUTATION_CLASSES = [
+    "policy_weight_adjustment",
+    "clarification_with_no_behavior_change",
+    "new_forbidden_action",
+    "new_required_logging_field",
+    "metric_priority_restatement",
+]
 
 DEFAULT_GLOBAL_SPEC = """# Global Spec
 
@@ -166,6 +177,127 @@ def _spec_path_for_scope(scope: str) -> Path:
     return GLOBAL_SPEC_PATH if str(scope).strip().lower() == "global" else PROJECT_SPEC_PATH
 
 
+def _content_hash(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _registry_key(scope: str) -> str:
+    normalized_scope = "global" if str(scope).strip().lower() == "global" else "project"
+    return f"{SPEC_REGISTRY_KEY_PREFIX}:{normalized_scope}"
+
+
+def _scope_index_row(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "scope": record.get("scope"),
+        "active_version": record.get("active_version"),
+        "updated_at": record.get("updated_at"),
+        "history_count": len(record.get("history") or []),
+    }
+
+
+def _user_message_refs(attribution: Dict[str, Any]) -> List[Dict[str, Any]]:
+    refs: List[Dict[str, Any]] = []
+    for item in list((attribution or {}).get("message_citations") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").strip().lower() != "user":
+            continue
+        refs.append(
+            {
+                "message_id": item.get("message_id"),
+                "created_at": item.get("created_at"),
+                "excerpt": item.get("excerpt"),
+            }
+        )
+    return refs
+
+
+def ensure_spec_registry(storage, *, scope: str) -> Dict[str, Any]:
+    ensure_spec_files()
+    normalized_scope = "global" if str(scope).strip().lower() == "global" else "project"
+    existing = storage.parameters.peek_parameter(_registry_key(normalized_scope), default_value=None)
+    if isinstance(existing, dict) and existing.get("active_version"):
+        return dict(existing)
+    path = _spec_path_for_scope(normalized_scope)
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    initial_version = f"{normalized_scope}_bootstrap_{_content_hash(content)[:10]}"
+    now = datetime.now(timezone.utc).isoformat()
+    spec_artifact = {
+        "artifact_type": "spec_artifact",
+        "scope": normalized_scope,
+        "version": initial_version,
+        "prior_version": None,
+        "status": "active",
+        "allowed_mutation_classes": list(DEFAULT_ALLOWED_MUTATION_CLASSES),
+        "adoption_provenance": [],
+        "adoption_audit_artifact_id": None,
+        "activated_at": now,
+        "content_hash": _content_hash(content),
+        "content": content,
+    }
+    registry = {
+        "scope": normalized_scope,
+        "active_version": initial_version,
+        "updated_at": now,
+        "history": [spec_artifact],
+    }
+    storage.parameters.set_parameter(
+        _registry_key(normalized_scope),
+        registry,
+        description=f"Versioned {normalized_scope} spec registry.",
+    )
+    index = storage.parameters.peek_parameter(SPEC_SCOPE_INDEX_KEY, default_value=[]) or []
+    if not isinstance(index, list):
+        index = []
+    index = [dict(row) for row in index if isinstance(row, dict) and row.get("scope") != normalized_scope]
+    index.append(_scope_index_row(registry))
+    storage.parameters.set_parameter(
+        SPEC_SCOPE_INDEX_KEY,
+        index,
+        description="Versioned spec registry overview by scope.",
+    )
+    return registry
+
+
+def get_active_spec_record(storage, *, scope: str) -> Dict[str, Any]:
+    registry = ensure_spec_registry(storage, scope=scope)
+    active_version = registry.get("active_version")
+    for row in reversed(list(registry.get("history") or [])):
+        if isinstance(row, dict) and row.get("version") == active_version:
+            return dict(row)
+    return {}
+
+
+def validate_mutation_class(storage, *, scope: str, claimed_mutation_class: str) -> Dict[str, Any]:
+    active_spec = get_active_spec_record(storage, scope=scope)
+    allowed = list(active_spec.get("allowed_mutation_classes") or [])
+    normalized_class = str(claimed_mutation_class or "").strip()
+    return {
+        "active_spec_version": active_spec.get("version"),
+        "claimed_mutation_class": normalized_class,
+        "allowed_mutation_classes": allowed,
+        "allowed": normalized_class in allowed,
+    }
+
+
+def _persist_registry(storage, registry: Dict[str, Any]) -> None:
+    storage.parameters.set_parameter(
+        _registry_key(str(registry.get("scope") or "project")),
+        registry,
+        description=f"Versioned {registry.get('scope', 'project')} spec registry.",
+    )
+    index = storage.parameters.peek_parameter(SPEC_SCOPE_INDEX_KEY, default_value=[]) or []
+    if not isinstance(index, list):
+        index = []
+    index = [dict(row) for row in index if isinstance(row, dict) and row.get("scope") != registry.get("scope")]
+    index.append(_scope_index_row(registry))
+    storage.parameters.set_parameter(
+        SPEC_SCOPE_INDEX_KEY,
+        index,
+        description="Versioned spec registry overview by scope.",
+    )
+
+
 def build_spec_attribution(
     storage,
     *,
@@ -220,34 +352,55 @@ def create_spec_proposal(
     source: str = "chat_agent",
     review_task_id: Optional[str] = None,
     attribution: Optional[Dict[str, Any]] = None,
+    claimed_mutation_class: str = "clarification_with_no_behavior_change",
+    proposal_kind: str = "clarification",
 ) -> Dict[str, Any]:
     ensure_spec_files()
     normalized_scope = "global" if str(scope).strip().lower() == "global" else "project"
+    registry = ensure_spec_registry(storage, scope=normalized_scope)
+    active_spec = get_active_spec_record(storage, scope=normalized_scope)
     proposal_id = f"spec_{uuid4().hex[:12]}"
     current_specs = load_specs(storage=storage)
     now = datetime.now(timezone.utc).isoformat()
+    proposal_attribution = attribution or build_spec_attribution(
+        storage,
+        session_id=session_id,
+        user_signal=user_signal,
+    )
+    user_refs = _user_message_refs(proposal_attribution)
+    if not user_refs:
+        raise ValueError("Spec proposals require explicit user-message provenance.")
+    mutation_validation = validate_mutation_class(
+        storage,
+        scope=normalized_scope,
+        claimed_mutation_class=claimed_mutation_class,
+    )
     proposal = {
         "proposal_id": proposal_id,
         "scope": normalized_scope,
         "status": "pending_review",
+        "proposal_kind": str(proposal_kind or "clarification").strip(),
         "proposed_change": str(proposed_change).strip(),
         "rationale": str(rationale).strip(),
         "user_signal": str(user_signal).strip(),
         "session_id": session_id,
         "source": source,
         "review_task_id": review_task_id,
-        "attribution": attribution or build_spec_attribution(
-            storage,
-            session_id=session_id,
-            user_signal=user_signal,
-        ),
+        "attribution": proposal_attribution,
+        "requested_by_user_refs": user_refs,
+        "claimed_mutation_class": str(claimed_mutation_class or "").strip(),
+        "validation_status": "valid" if mutation_validation.get("allowed") else "invalid",
+        "validation_details": mutation_validation,
         "current_spec_snapshot": current_specs["global_spec" if normalized_scope == "global" else "project_spec"],
+        "target_spec_version": active_spec.get("version"),
+        "governing_spec_version": registry.get("active_version"),
         "created_at": now,
         "updated_at": now,
         "resolution": None,
         "resolution_notes": "",
         "clarification_request": "",
         "applied_at": None,
+        "governance_audit_artifact_id": None,
     }
     storage.parameters.set_parameter(
         _proposal_key(proposal_id),
@@ -326,6 +479,55 @@ def resolve_spec_proposal(
     proposal["updated_at"] = now
 
     if normalized_resolution == "approved":
+        if not proposal.get("requested_by_user_refs"):
+            raise ValueError("Spec proposal cannot activate without explicit user-message provenance.")
+        validation_details = dict(proposal.get("validation_details") or {})
+        if not validation_details.get("allowed"):
+            raise ValueError("Spec proposal claimed a mutation class that is not allowed by the active spec.")
+        scope = str(proposal.get("scope") or "project")
+        active_spec = get_active_spec_record(storage, scope=scope)
+        proposal["audit_timeline_artifact_id"] = proposal.get("audit_timeline_artifact_id") or proposal_id
+        storage.parameters.set_parameter(
+            f"audit_artifact:timeline:{proposal_id}",
+            {
+                "artifact_id": proposal_id,
+                "artifact_type": "timeline_artifact",
+                "trace_kind": "spec_change",
+                "created_at_utc": now,
+                "applicable_spec_version": active_spec.get("version"),
+                "parent_artifact_ids": [],
+                "events": [
+                    {
+                        "id": f"{proposal_id}:spec_change_proposed",
+                        "timeline_id": proposal_id,
+                        "type": "spec_change_proposed",
+                        "timestamp_utc": proposal.get("created_at") or now,
+                        "source_trace_refs": proposal.get("requested_by_user_refs") or [],
+                        "payload": {
+                            "proposal_id": proposal_id,
+                            "scope": scope,
+                            "claimed_mutation_class": proposal.get("claimed_mutation_class"),
+                            "validation_status": proposal.get("validation_status"),
+                        },
+                        "inferred": False,
+                    }
+                ],
+                "metadata": {"proposal_id": proposal_id, "scope": scope},
+                "content_hash": _content_hash(str(proposal.get("proposed_change") or "")),
+            },
+            description=f"Timeline artifact for spec proposal {proposal_id}.",
+        )
+        audit_artifact = audit_stored_artifact(
+            storage,
+            artifact_type="timeline",
+            artifact_id=proposal_id,
+            spec_version_used=active_spec.get("version"),
+            rationale="Current spec must judge the proposed next spec before activation.",
+        )
+        proposal["governance_audit_artifact_id"] = audit_artifact.get("artifact_id")
+        proposal["governance_audit_summary"] = audit_artifact.get("summary_verdict")
+        if str((audit_artifact.get("summary_verdict") or {}).get("status") or "") == "fail":
+            raise ValueError("Spec proposal failed current-spec audit and cannot activate.")
         path = _spec_path_for_scope(proposal.get("scope", "project"))
         current = path.read_text(encoding="utf-8") if path.exists() else ""
         appended = (
@@ -347,6 +549,37 @@ def resolve_spec_proposal(
                 )
         path.write_text(current.rstrip() + appended, encoding="utf-8")
         proposal["applied_at"] = now
+        current_content = path.read_text(encoding="utf-8")
+        registry = ensure_spec_registry(storage, scope=scope)
+        history = list(registry.get("history") or [])
+        prior_version = registry.get("active_version")
+        for row in history:
+            if isinstance(row, dict) and row.get("version") == prior_version:
+                row["status"] = "superseded"
+        next_version = f"{scope}_{_content_hash(current_content)[:10]}"
+        history.append(
+            {
+                "artifact_type": "spec_artifact",
+                "scope": scope,
+                "version": next_version,
+                "prior_version": prior_version,
+                "status": "active",
+                "allowed_mutation_classes": list(
+                    (active_spec.get("allowed_mutation_classes") or DEFAULT_ALLOWED_MUTATION_CLASSES)
+                ),
+                "adoption_provenance": list(proposal.get("requested_by_user_refs") or []),
+                "adoption_audit_artifact_id": proposal.get("governance_audit_artifact_id"),
+                "activated_at": now,
+                "content_hash": _content_hash(current_content),
+                "content": current_content,
+                "proposal_id": proposal_id,
+                "claimed_mutation_class": proposal.get("claimed_mutation_class"),
+            }
+        )
+        registry["active_version"] = next_version
+        registry["updated_at"] = now
+        registry["history"] = history[-100:]
+        _persist_registry(storage, registry)
 
     storage.parameters.set_parameter(
         _proposal_key(proposal_id),

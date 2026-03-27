@@ -11,12 +11,19 @@ from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import TaskModel, MetricModel
 from strata.eval.benchmark import run_benchmark, persist_benchmark_report
 from strata.eval.structured_eval import run_structured_eval, persist_structured_eval_report
-from strata.experimental.calibration import normalize_prediction, score_prediction_against_outcome, update_judge_trust
+from strata.eval.harness_eval import get_active_eval_harness_config
+from strata.experimental.calibration import (
+    infer_actual_outcome,
+    normalize_prediction,
+    score_prediction_against_outcome,
+    update_judge_trust,
+)
 from strata.experimental.promotion_policy import (
     build_promotion_readiness,
     calculate_deltas,
     decide_benchmark_promotion,
     decide_promotion,
+    get_promotion_policy,
 )
 from strata.experimental.report_store import (
     get_persisted_experiment_report,
@@ -24,6 +31,7 @@ from strata.experimental.report_store import (
     report_parameter_key,
 )
 from strata.experimental.diagnostics import review_eval_trace
+from strata.experimental.variants import ensure_variant, record_variant_matchup
 from strata.experimental.report_utils import (
     ExperimentResult,
     iter_experiment_reports,
@@ -57,6 +65,193 @@ class ExperimentRunner:
     ) -> str:
         return decide_benchmark_promotion(deltas, promotion_readiness)
 
+    def _resolve_eval_variant_pair(
+        self,
+        *,
+        candidate_change_id: str,
+        baseline_change_id: str,
+        eval_harness_config_override: Optional[Dict[str, Any]],
+        proposal_metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        baseline_payload = get_active_eval_harness_config()
+        baseline_policy_payload = get_promotion_policy(self.storage)
+        if baseline_change_id:
+            baseline_report = self.get_persisted_experiment_report(baseline_change_id)
+            if isinstance(baseline_report, dict):
+                baseline_payload = dict(baseline_report.get("eval_harness_config_override") or baseline_payload)
+                baseline_policy_payload = dict(
+                    (baseline_report.get("variant_assignment") or {}).get("baseline_promotion_policy_payload")
+                    or baseline_policy_payload
+                )
+        candidate_payload = dict(eval_harness_config_override or baseline_payload)
+        candidate_policy_payload = get_promotion_policy(self.storage)
+        baseline_variant = ensure_variant(
+            self.storage,
+            kind="eval_harness_bundle",
+            payload=baseline_payload,
+            label=baseline_change_id or "baseline",
+            family="eval_harness",
+            metadata={"role": "baseline"},
+        )
+        candidate_variant = ensure_variant(
+            self.storage,
+            kind="eval_harness_bundle",
+            payload=candidate_payload,
+            label=candidate_change_id,
+            family="eval_harness",
+            metadata={"role": "candidate", **dict(proposal_metadata or {})},
+        )
+        baseline_policy_variant = ensure_variant(
+            self.storage,
+            kind="promotion_policy_bundle",
+            payload=baseline_policy_payload,
+            label=f"{baseline_change_id or 'baseline'}_promotion_policy",
+            family="promotion_policy",
+            metadata={"role": "baseline"},
+        )
+        candidate_policy_variant = ensure_variant(
+            self.storage,
+            kind="promotion_policy_bundle",
+            payload=candidate_policy_payload,
+            label=f"{candidate_change_id}_promotion_policy",
+            family="promotion_policy",
+            metadata={"role": "candidate", **dict(proposal_metadata or {})},
+        )
+        return {
+            "family": "eval_harness",
+            "baseline_variant_id": baseline_variant.get("variant_id"),
+            "candidate_variant_id": candidate_variant.get("variant_id"),
+            "baseline_promotion_policy_variant_id": baseline_policy_variant.get("variant_id"),
+            "candidate_promotion_policy_variant_id": candidate_policy_variant.get("variant_id"),
+            "baseline_promotion_policy_payload": baseline_policy_payload,
+            "candidate_promotion_policy_payload": candidate_policy_payload,
+        }
+
+    def _record_variant_outcome(
+        self,
+        *,
+        domain: str,
+        variant_assignment: Dict[str, Any],
+        candidate_change_id: str,
+        actual_delta: Dict[str, Any],
+        recommendation: str,
+    ) -> Dict[str, Any]:
+        candidate_variant_id = str(variant_assignment.get("candidate_variant_id") or "").strip()
+        baseline_variant_id = str(variant_assignment.get("baseline_variant_id") or "").strip()
+        if not candidate_variant_id or not baseline_variant_id:
+            return {}
+        actual_outcome = infer_actual_outcome(actual_delta)
+        if actual_outcome == "improve":
+            left_score = 1.0
+        elif actual_outcome == "regress":
+            left_score = 0.0
+        else:
+            left_score = 0.5
+        eval_harness_snapshot = record_variant_matchup(
+            self.storage,
+            domain=domain,
+            left_variant_id=candidate_variant_id,
+            right_variant_id=baseline_variant_id,
+            left_score=left_score,
+            context={
+                "candidate_change_id": candidate_change_id,
+                "recommendation": recommendation,
+                "actual_outcome": actual_outcome,
+            },
+        )
+        policy_snapshot = {}
+        candidate_policy_variant_id = str(variant_assignment.get("candidate_promotion_policy_variant_id") or "").strip()
+        baseline_policy_variant_id = str(variant_assignment.get("baseline_promotion_policy_variant_id") or "").strip()
+        if candidate_policy_variant_id and baseline_policy_variant_id:
+            policy_snapshot = record_variant_matchup(
+                self.storage,
+                domain=f"promotion_policy:{domain}",
+                left_variant_id=candidate_policy_variant_id,
+                right_variant_id=baseline_policy_variant_id,
+                left_score=left_score,
+                context={
+                    "candidate_change_id": candidate_change_id,
+                    "recommendation": recommendation,
+                    "actual_outcome": actual_outcome,
+                },
+            )
+        return {
+            "eval_harness": eval_harness_snapshot,
+            "promotion_policy": policy_snapshot,
+        }
+
+    def _score_benchmark_report(self, report: Dict[str, Any]) -> float:
+        prompt_count = max(1, int(report.get("prompt_count", 0) or 0))
+        harness_wins = float(report.get("harness_wins", 0) or 0.0)
+        ties = float(report.get("ties", 0) or 0.0)
+        return max(0.0, min(1.0, (harness_wins + 0.5 * ties) / prompt_count))
+
+    def _score_structured_report(self, report: Dict[str, Any]) -> float:
+        harness_accuracy = float(report.get("harness_accuracy", 0.0) or 0.0)
+        baseline_accuracy = float(report.get("baseline_accuracy", 0.0) or 0.0)
+        if harness_accuracy > baseline_accuracy:
+            return 1.0
+        if harness_accuracy < baseline_accuracy:
+            return 0.0
+        return 0.5
+
+    def _record_ab_run_evidence(
+        self,
+        *,
+        domain: str,
+        variant_assignment: Dict[str, Any],
+        candidate_change_id: str,
+        benchmark_reports: Optional[List[Dict[str, Any]]] = None,
+        structured_reports: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        candidate_variant_id = str(variant_assignment.get("candidate_variant_id") or "").strip()
+        baseline_variant_id = str(variant_assignment.get("baseline_variant_id") or "").strip()
+        if not candidate_variant_id or not baseline_variant_id:
+            return {"matchup_count": 0, "recent_matchups": []}
+        evidence: List[Dict[str, Any]] = []
+        for report in benchmark_reports or []:
+            snapshot = record_variant_matchup(
+                self.storage,
+                domain=f"{domain}:benchmark_ab",
+                left_variant_id=candidate_variant_id,
+                right_variant_id=baseline_variant_id,
+                left_score=self._score_benchmark_report(report),
+                context={
+                    "candidate_change_id": candidate_change_id,
+                    "evidence_type": "benchmark_run",
+                    "run_label": report.get("run_label"),
+                },
+            )
+            if snapshot:
+                evidence.append({"kind": "benchmark_run", "run_label": report.get("run_label"), "snapshot": snapshot})
+        for report in structured_reports or []:
+            snapshot = record_variant_matchup(
+                self.storage,
+                domain=f"{domain}:structured_ab",
+                left_variant_id=candidate_variant_id,
+                right_variant_id=baseline_variant_id,
+                left_score=self._score_structured_report(report),
+                context={
+                    "candidate_change_id": candidate_change_id,
+                    "evidence_type": "structured_run",
+                    "run_label": report.get("run_label"),
+                    "suite_name": report.get("suite_name"),
+                },
+            )
+            if snapshot:
+                evidence.append(
+                    {
+                        "kind": "structured_run",
+                        "run_label": report.get("run_label"),
+                        "suite_name": report.get("suite_name"),
+                        "snapshot": snapshot,
+                    }
+                )
+        return {
+            "matchup_count": len(evidence),
+            "recent_matchups": evidence[-10:],
+        }
+
     def get_persisted_experiment_report(self, candidate_change_id: str) -> Optional[Dict[str, Any]]:
         return get_persisted_experiment_report(self.storage, candidate_change_id)
 
@@ -78,6 +273,12 @@ class ExperimentRunner:
         """
         logger.info(f"Running benchmark gate for candidate change {candidate_change_id}...")
         safe_runs = max(1, run_count)
+        variant_assignment = self._resolve_eval_variant_pair(
+            candidate_change_id=candidate_change_id,
+            baseline_change_id=baseline_change_id,
+            eval_harness_config_override=eval_harness_config_override,
+            proposal_metadata=proposal_metadata,
+        )
         benchmark_reports: List[Dict[str, Any]] = []
         for run_index in range(safe_runs):
             report = await run_benchmark(
@@ -92,6 +293,7 @@ class ExperimentRunner:
                 candidate_change_id=candidate_change_id,
                 run_mode="weak_eval",
                 model_id="benchmark/harness",
+                variant_assignment=variant_assignment,
             )
         candidate_metrics = self._gather_metrics(candidate_change_id)
         baseline_metrics = self._gather_metrics(baseline_change_id)
@@ -132,6 +334,19 @@ class ExperimentRunner:
             prediction=prediction_record,
             calibration_record=calibration_record,
         )
+        variant_rating_snapshot = self._record_variant_outcome(
+            domain="eval_harness_benchmark",
+            variant_assignment=variant_assignment,
+            candidate_change_id=candidate_change_id,
+            actual_delta=deltas,
+            recommendation=recommendation,
+        )
+        ab_evidence_summary = self._record_ab_run_evidence(
+            domain="eval_harness_benchmark",
+            variant_assignment=variant_assignment,
+            candidate_change_id=candidate_change_id,
+            benchmark_reports=benchmark_reports,
+        )
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -157,6 +372,9 @@ class ExperimentRunner:
             prediction_outcome=prediction_outcome,
             calibration_record=calibration_record,
             judge_trust_snapshot=judge_trust_snapshot,
+            variant_assignment=variant_assignment,
+            variant_rating_snapshot=variant_rating_snapshot,
+            ab_evidence_summary=ab_evidence_summary,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
@@ -181,6 +399,12 @@ class ExperimentRunner:
         @summary Run repeated benchmark and structured-eval passes, then compare against baseline.
         """
         safe_runs = max(1, run_count)
+        variant_assignment = self._resolve_eval_variant_pair(
+            candidate_change_id=candidate_change_id,
+            baseline_change_id=baseline_change_id,
+            eval_harness_config_override=eval_harness_config_override,
+            proposal_metadata=proposal_metadata,
+        )
         benchmark_reports: List[Dict[str, Any]] = []
         structured_reports: List[Dict[str, Any]] = []
         for run_index in range(safe_runs):
@@ -196,6 +420,7 @@ class ExperimentRunner:
                 candidate_change_id=candidate_change_id,
                 run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
                 model_id="benchmark/harness",
+                variant_assignment=variant_assignment,
             )
             structured_report = await run_structured_eval(
                 api_url=api_url,
@@ -210,6 +435,7 @@ class ExperimentRunner:
                 candidate_change_id=candidate_change_id,
                 run_mode="weak_eval" if candidate_change_id != "baseline" else "baseline",
                 model_id="structured_eval/harness",
+                variant_assignment=variant_assignment,
             )
         candidate_metrics = self._gather_metrics(candidate_change_id)
         baseline_metrics = self._gather_metrics(baseline_change_id)
@@ -253,6 +479,20 @@ class ExperimentRunner:
             prediction=prediction_record,
             calibration_record=calibration_record,
         )
+        variant_rating_snapshot = self._record_variant_outcome(
+            domain=f"eval_harness_full_eval:{suite_name}",
+            variant_assignment=variant_assignment,
+            candidate_change_id=candidate_change_id,
+            actual_delta=deltas,
+            recommendation=recommendation,
+        )
+        ab_evidence_summary = self._record_ab_run_evidence(
+            domain=f"eval_harness_full_eval:{suite_name}",
+            variant_assignment=variant_assignment,
+            candidate_change_id=candidate_change_id,
+            benchmark_reports=benchmark_reports,
+            structured_reports=structured_reports,
+        )
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -280,6 +520,9 @@ class ExperimentRunner:
             prediction_outcome=prediction_outcome,
             calibration_record=calibration_record,
             judge_trust_snapshot=judge_trust_snapshot,
+            variant_assignment=variant_assignment,
+            variant_rating_snapshot=variant_rating_snapshot,
+            ab_evidence_summary=ab_evidence_summary,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
@@ -327,6 +570,7 @@ class ExperimentRunner:
             promotion_readiness=promotion_readiness,
             code_validation=validation_result,
             diagnostic_review={},
+            ab_evidence_summary={"matchup_count": 0, "recent_matchups": []},
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,

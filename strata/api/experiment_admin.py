@@ -20,7 +20,14 @@ from strata.eval.harness_eval import (
 )
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
 from strata.experimental.trace_review import append_trace_review_to_task, build_trace_summary, review_trace
+from strata.experimental.audit_registry import (
+    audit_stored_artifact,
+    audit_timeline_artifact,
+    persist_timeline_artifact,
+)
+from strata.specs.bootstrap import get_active_spec_record
 from strata.experimental.calibration import JUDGE_TRUST_KEY
+from strata.experimental.variants import get_variant_rating_snapshot
 from strata.storage.models import ParameterModel
 
 
@@ -167,6 +174,8 @@ def register_experiment_routes(
                         "direction_correct": (current.get("calibration_record") or {}).get("direction_correct"),
                         "calibration_score": (current.get("calibration_record") or {}).get("calibration_score"),
                     },
+                    "variant_assignment": current.get("variant_assignment") or {},
+                    "variant_rating_snapshot": current.get("variant_rating_snapshot") or {},
                     "has_eval_harness_override": bool(current.get("eval_harness_config_override")),
                     "has_code_validation": bool(current.get("code_validation")),
                     "task_associations": current.get("task_associations") or {},
@@ -181,6 +190,20 @@ def register_experiment_routes(
             "current_promoted_candidate": promoted_state.get("current"),
             "promotion_history": promoted_state.get("history", []),
             "reports": history,
+        }
+
+    @app.get("/admin/variants")
+    async def get_variant_registry(storage=Depends(get_storage)):
+        snapshot = get_variant_rating_snapshot(storage)
+        return {"status": "ok", **snapshot}
+
+    @app.get("/admin/variants/ratings")
+    async def get_variant_ratings(storage=Depends(get_storage)):
+        snapshot = get_variant_rating_snapshot(storage)
+        return {
+            "status": "ok",
+            "ratings": snapshot.get("ratings", {}),
+            "recent_matchups": snapshot.get("recent_matchups", []),
         }
 
     @app.get("/admin/evals/config")
@@ -442,6 +465,20 @@ def register_experiment_routes(
 
     @app.post("/admin/traces/review")
     async def review_trace_endpoint(payload: Dict[str, Any], storage=Depends(get_storage)):
+        artifact_type = str(payload.get("artifact_type") or "").strip().lower()
+        artifact_id = str(payload.get("artifact_id") or "").strip()
+        spec_scope = str(payload.get("spec_scope") or "project").strip().lower() or "project"
+        if artifact_type and artifact_id:
+            active_spec = get_active_spec_record(storage, scope=spec_scope)
+            audit_artifact = audit_stored_artifact(
+                storage,
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                spec_version_used=active_spec.get("version"),
+                rationale=f"Recursive audit requested for stored {artifact_type} artifact.",
+            )
+            storage.commit()
+            return {"status": "ok", "audit_artifact": audit_artifact}
         trace_kind = str(payload.get("trace_kind") or "generic_trace").strip() or "generic_trace"
         reviewer_tier = str(payload.get("reviewer_tier") or "strong").strip().lower() or "strong"
         if payload.get("queue"):
@@ -481,6 +518,31 @@ def register_experiment_routes(
             reviewer_tier=reviewer_tier,
             candidate_change_id=payload.get("candidate_change_id"),
         )
+        active_spec = get_active_spec_record(storage, scope=spec_scope)
+        timeline_artifact = persist_timeline_artifact(
+            storage,
+            trace_kind=trace_kind,
+            trace_summary=trace_summary,
+            applicable_spec_version=active_spec.get("version"),
+            metadata={
+                "reviewer_tier": reviewer_tier,
+                "candidate_change_id": payload.get("candidate_change_id"),
+            },
+        )
+        audit_artifact = audit_timeline_artifact(
+            storage,
+            timeline_artifact=timeline_artifact,
+            spec_version_used=active_spec.get("version"),
+            rationale="Durable trace review artifacts should be auditable against the governing spec.",
+            confidence=float(review.get("confidence", 0.7) or 0.7),
+            extra_context={
+                "reviewer_tier": reviewer_tier,
+                "trace_kind": trace_kind,
+                "associated_review_status": review.get("status"),
+            },
+        )
+        review["timeline_artifact_id"] = timeline_artifact.get("artifact_id")
+        review["audit_artifact_id"] = audit_artifact.get("artifact_id")
         if payload.get("persist_to_task", False):
             target_task_ids = []
             for candidate in [payload.get("task_id"), *(payload.get("associated_task_ids") or [])]:
@@ -491,7 +553,14 @@ def register_experiment_routes(
                 append_trace_review_to_task(storage, task_id=task_id, review=review)
             if target_task_ids:
                 storage.commit()
-        return {"status": "ok", "review": review}
+        else:
+            storage.commit()
+        return {
+            "status": "ok",
+            "review": review,
+            "timeline_artifact": timeline_artifact,
+            "audit_artifact": audit_artifact,
+        }
 
     @app.post("/admin/traces/review_task")
     async def review_task_trace(payload: Dict[str, Any], storage=Depends(get_storage)):
