@@ -11,13 +11,14 @@ agents can inspect what the harness is learning and how it is behaving.
 """
 
 import logging
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, Optional
 import asyncio
 import os
+from sqlalchemy.exc import OperationalError
 from strata.storage.services.main import StorageManager
 from strata.storage.models import TaskModel, TaskType, TaskState, ParameterModel
 from strata.storage.retention import get_retention_policy, get_retention_runtime, run_retention_maintenance
@@ -151,8 +152,14 @@ async def lifespan(app: FastAPI):
         ) or {}
         GLOBAL_SETTINGS.update(_normalized_settings(persisted_settings))
         run_retention_maintenance(storage)
-        scan_codebase_context_pressure(storage, base_dir=_BASE_DIR)
-        storage.commit()
+        try:
+            scan_codebase_context_pressure(storage, base_dir=_BASE_DIR)
+            storage.commit()
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            logger.warning("Skipping startup context-pressure scan due to database lock contention.")
+            storage.rollback()
     finally:
         storage.close()
     await _worker.start()
@@ -256,6 +263,7 @@ async def _queue_eval_system_job(
     session_id: Optional[str] = None,
     dedupe_signature: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    blocked_retry_window = timedelta(minutes=5)
     if dedupe_signature:
         tasks = (
             storage.session.query(TaskModel)
@@ -263,9 +271,13 @@ async def _queue_eval_system_job(
             .all()
         )
         for task in tasks:
-            if not _task_is_active(task):
-                continue
             if task.state == TaskState.BLOCKED:
+                updated_at = task.updated_at or task.created_at
+                if updated_at is None:
+                    continue
+                if (datetime.utcnow() - updated_at.replace(tzinfo=None)) > blocked_retry_window:
+                    continue
+            elif not _task_is_active(task):
                 continue
             system_job = dict((task.constraints or {}).get("system_job") or {})
             if str(system_job.get("kind") or "") != kind:
@@ -277,7 +289,10 @@ async def _queue_eval_system_job(
                     matches = False
                     break
             if matches:
-                return {"task_id": task.task_id, "status": "already_queued", "kind": kind}
+                status = "already_queued"
+                if task.state == TaskState.BLOCKED:
+                    status = "recent_failure"
+                return {"task_id": task.task_id, "status": status, "kind": kind}
     task = storage.tasks.create(
         title=title,
         description=description,

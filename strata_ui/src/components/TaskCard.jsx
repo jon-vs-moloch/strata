@@ -45,6 +45,11 @@ function formatRelative(dateString) {
   return `${days}d ago`;
 }
 
+function formatAbsoluteWithRelative(dateString) {
+  if (!dateString) return '—';
+  return `${formatAbsolute(dateString)} (${formatRelative(dateString)})`;
+}
+
 function formatElapsed(startedAt, endedAt = null) {
   if (!startedAt) return 'unknown';
   const start = new Date(startedAt).getTime();
@@ -251,8 +256,8 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
             <p style={{ fontSize: '12px', color: '#6b6b7d', marginTop: '6px', lineHeight: '1.4' }}>{task.description}</p>
           )}
           <div style={{ display: 'flex', gap: '12px', marginTop: '8px', flexWrap: 'wrap', fontSize: '10px', color: '#626275' }}>
-            <span title={formatAbsolute(task.created_at)}>Created {formatRelative(task.created_at)}</span>
-            <span title={formatAbsolute(task.updated_at)}>Updated {formatRelative(task.updated_at)}</span>
+            <span title={formatRelative(task.created_at)}>Created {formatAbsoluteWithRelative(task.created_at)}</span>
+            <span title={formatRelative(task.updated_at)}>Updated {formatAbsoluteWithRelative(task.updated_at)}</span>
           </div>
         </div>
 
@@ -383,9 +388,9 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
           >
             <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '10px', color: '#777' }}>
-                <span title={formatAbsolute(attempt.started_at)}>Started {formatRelative(attempt.started_at)}</span>
-                <span title={formatAbsolute(lastActivityAt)}>Last task update {formatRelative(lastActivityAt)}</span>
-                {attempt.ended_at && <span title={formatAbsolute(attempt.ended_at)}>Ended {formatRelative(attempt.ended_at)}</span>}
+                <span title={formatRelative(attempt.started_at)}>Started {formatAbsoluteWithRelative(attempt.started_at)}</span>
+                <span title={formatRelative(lastActivityAt)}>Last task update {formatAbsoluteWithRelative(lastActivityAt)}</span>
+                {attempt.ended_at && <span title={formatRelative(attempt.ended_at)}>Ended {formatAbsoluteWithRelative(attempt.ended_at)}</span>}
               </div>
               {attempt.reason && (
                 <div style={{ fontSize: '11px', color: '#a8a8b5', lineHeight: 1.45 }}>

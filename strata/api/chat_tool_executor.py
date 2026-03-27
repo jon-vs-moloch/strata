@@ -54,7 +54,7 @@ class ChatToolExecutor:
             storage.commit()
             await self.deps["worker"].enqueue(task.task_id)
             async_task_id = task.task_id
-            tool_content = f"Successfully enqueued swarm implementation task {task.task_id}."
+            tool_content = f"Successfully enqueued formation implementation task {task.task_id}."
         elif func_name == "search_web":
             query = args.get("query")
             task = storage.tasks.create(
@@ -75,7 +75,7 @@ class ChatToolExecutor:
                 tasks = storage.session.query(self.deps["task_model_cls"]).filter(self.deps["task_model_cls"].task_id == target_id).all()
             else:
                 tasks = storage.session.query(self.deps["task_model_cls"]).filter(self.deps["task_model_cls"].state != task_state_cls.COMPLETE).all()
-            tool_content = "No active or matching tasks found in the database." if not tasks else "Current Swarm Status:\n" + "\n".join(
+            tool_content = "No active or matching tasks found in the database." if not tasks else "Current Formation Status:\n" + "\n".join(
                 f"- {task.title} ({task.task_id}): {task.state.value}" for task in tasks
             )
             tool_outputs_generated = True

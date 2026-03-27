@@ -243,30 +243,46 @@ def register_experiment_routes(
     @app.post("/admin/experiments/bootstrap_cycle")
     async def run_bootstrap_cycle(payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
         payload = payload or {}
-        if payload.get("queue"):
+        queue_requested = payload.get("queue")
+        wait_for_completion = bool(payload.get("wait", False))
+        if queue_requested is None:
+            queue_requested = not wait_for_completion
+        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
+        proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+        if not proposer_tiers:
+            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+        auto_promote = bool(payload.get("auto_promote", True))
+        suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
+        run_count = max(1, int(payload.get("run_count", 2) or 2))
+        baseline_change_id = payload.get("baseline_change_id", "baseline")
+        normalized_payload = {
+            "proposer_tiers": proposer_tiers,
+            "auto_promote": auto_promote,
+            "suite_name": suite_name,
+            "run_count": run_count,
+            "baseline_change_id": baseline_change_id,
+        }
+        if payload.get("api_url"):
+            normalized_payload["api_url"] = str(payload.get("api_url"))
+        if payload.get("associated_task_ids"):
+            normalized_payload["associated_task_ids"] = list(payload.get("associated_task_ids") or [])
+        if payload.get("source_task_id"):
+            normalized_payload["source_task_id"] = payload.get("source_task_id")
+        if queue_requested:
             queued = await queue_eval_system_job(
                 storage,
                 kind="bootstrap_cycle",
                 title="Bootstrap Cycle",
                 description="Queued strong/weak bootstrap cycle.",
-                payload=payload,
+                payload=normalized_payload,
                 session_id=payload.get("session_id"),
                 dedupe_signature={
-                    "suite_name": payload.get("suite_name", "bootstrap_mcq_v1"),
-                    "run_count": max(1, int(payload.get("run_count", 2) or 2)),
-                    "proposer_tiers": [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])],
+                    "suite_name": suite_name,
+                    "run_count": run_count,
+                    "proposer_tiers": proposer_tiers,
                 },
             )
             return {"status": "ok", **queued}
-        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
-        proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
-        if not proposer_tiers:
-            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
-
-        auto_promote = bool(payload.get("auto_promote", True))
-        suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
-        run_count = max(1, int(payload.get("run_count", 2) or 2))
-        baseline_change_id = payload.get("baseline_change_id", "baseline")
         current_config = get_active_eval_harness_config()
         proposals = await asyncio.gather(*[generate_eval_candidate_from_tier(tier, current_config) for tier in proposer_tiers])
 

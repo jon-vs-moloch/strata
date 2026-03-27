@@ -62,7 +62,7 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
 
     # 2. LLM-BASED ANALYSIS (Fallback/Override)
     logger.info("Falling back to LLM for complex failure analysis.")
-    prompt = f"""You are a failure analysis agent for the Strata Swarm.
+    prompt = f"""You are a failure analysis agent for Strata.
 A background task has failed. Evaluate the error and determine the structural fix.
 
 TASK: {task.title}

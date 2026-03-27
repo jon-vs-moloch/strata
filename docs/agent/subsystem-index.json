@@ -2,11 +2,11 @@
   "subsystem": "core",
   "purpose": "Generate, synthesize, evaluate, and promote task resolutions.",
   "key_modules": [
-    "shotgun_tokens/orchestrator/skeleton.py",
-    "shotgun_tokens/orchestrator/decomposition.py",
-    "shotgun_tokens/orchestrator/judge.py",
-    "shotgun_tokens/orchestrator/synthesis.py",
-    "shotgun_tokens/orchestrator/promotion.py"
+    "strata/orchestrator/skeleton.py",
+    "strata/orchestrator/decomposition.py",
+    "strata/orchestrator/judge.py",
+    "strata/orchestrator/synthesis.py",
+    "strata/orchestrator/promotion.py"
   ],
   "common_failure_modes": [
     "LLM returning malformed JSON",

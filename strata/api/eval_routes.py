@@ -96,12 +96,6 @@ def register_eval_routes(
     async def get_provider_telemetry(storage=Depends(get_storage)):
         providers = get_provider_telemetry_snapshot()
         if providers:
-            storage.parameters.set_parameter(
-                key="provider_transport_telemetry_snapshot",
-                value=providers,
-                description="Last persisted provider transport telemetry snapshot.",
-            )
-            storage.commit()
             return {"status": "ok", "providers": providers, "source": "live"}
 
         persisted = storage.parameters.get_parameter(

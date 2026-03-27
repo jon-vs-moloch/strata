@@ -62,6 +62,11 @@ const formatAbsoluteTime = (dateString) => {
   return new Date(dateString).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
+const formatAbsoluteWithRelative = (dateString) => {
+  if (!dateString) return '—';
+  return `${formatAbsoluteTime(dateString)} (${formatRelativeTime(dateString)})`;
+};
+
 const formatMessageForDisplay = (content) => {
   const raw = String(content || '');
   const normalized = raw.replace(/([.!?])\s+\*?#\s+/g, '$1\n\n# ').replace(/\n\*?#\s+/g, '\n# ');
@@ -1084,7 +1089,7 @@ function App() {
                 />
                 <RoutePill
                   label="LOOP"
-                  value={routingSummary?.supervision?.active_jobs?.length ? `${routingSummary.supervision.active_jobs.length} queued bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}` : 'idle'}
+                  value={routingSummary?.supervision?.active_jobs?.length ? `${routingSummary.supervision.active_jobs.length} supervision job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}` : 'idle'}
                   tone={routingSummary?.supervision?.active_jobs?.length ? 'success' : 'neutral'}
                 />
               </div>
@@ -1210,8 +1215,8 @@ function App() {
                     {msg.failed ? 'SEND FAILED' : 'SENDING'}
                   </div>
                 )}
-                <div title={formatAbsoluteTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
-                  {formatRelativeTime(msg.created_at)}
+                <div title={formatRelativeTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
+                  {formatAbsoluteTime(msg.created_at)}
                 </div>
               </MotionDiv>
             )})}
@@ -1223,8 +1228,8 @@ function App() {
                 style={{ textAlign: 'center', color: '#333', marginTop: 'auto', marginBottom: 'auto', padding: '48px 32px' }}
               >
                 <Zap size={32} color="#2a2a35" style={{ margin: '0 auto 16px' }} />
-                <div style={{ fontSize: '15px', fontWeight: 600, color: '#3d3d4d', marginBottom: '6px' }}>Swarm at rest</div>
-                <div style={{ fontSize: '13px', color: '#2d2d38' }}>Describe a goal to initialize the swarm</div>
+                <div style={{ fontSize: '15px', fontWeight: 600, color: '#3d3d4d', marginBottom: '6px' }}>Formation at rest</div>
+                <div style={{ fontSize: '13px', color: '#2d2d38' }}>Describe a goal to initialize the formation</div>
               </MotionDiv>
             )}
 
@@ -1235,7 +1240,7 @@ function App() {
                 style={{ alignSelf: 'flex-start', background: '#1c1c22', padding: '12px 18px', borderRadius: '16px 16px 16px 4px', color: '#888', fontSize: '13px', fontStyle: 'italic', border: '1px solid rgba(255,255,255,0.05)' }}
               >
                 <span style={{ display: 'inline-flex', gap: '4px', alignItems: 'center' }}>
-                  Swarm is formulating
+                  Formation is formulating
                   {[0,1,2].map(i => (
                     <MotionSpan
                       key={i}
@@ -1288,10 +1293,10 @@ function App() {
         )}
       </section>
 
-      {/* ── COLUMN 4: TASK SWARM ────────────────────────────────────────────── */}
+      {/* ── COLUMN 4: TASK FORMATION ───────────────────────────────────────── */}
       <section style={{ width: '420px', display: 'flex', flexDirection: 'column', background: '#0a0a0c', flexShrink: 0 }}>
         <header style={{ padding: '20px 24px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#edeeef' }}>Active Swarm</h2>
+          <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#edeeef' }}>Active Formation</h2>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
             {runningCount > 0 && (
               <MotionSpan
@@ -1621,7 +1626,7 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
         <span style={{ color: '#8d8ea1' }}>Supervision</span>
         <span style={{ color: '#e7e8ef' }}>
           {routingSummary?.supervision?.active_jobs?.length
-            ? `${routingSummary.supervision.active_jobs.length} queued bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
+            ? `${routingSummary.supervision.active_jobs.length} supervision job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
             : 'No bootstrap jobs queued'}
         </span>
       </div>

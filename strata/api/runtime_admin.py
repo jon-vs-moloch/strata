@@ -173,12 +173,14 @@ def register_runtime_admin_routes(
             if task.state not in {TaskState.PENDING, TaskState.WORKING}:
                 continue
             system_job = dict((task.constraints or {}).get("system_job") or {})
-            if str(system_job.get("kind") or "") != "bootstrap_cycle":
+            job_kind = str(system_job.get("kind") or "")
+            if job_kind not in {"bootstrap_cycle", "eval_matrix"}:
                 continue
             supervision_jobs.append(
                 {
                     "task_id": task.task_id,
                     "title": task.title,
+                    "kind": job_kind,
                     "state": task.state.value.lower(),
                     "updated_at": task.updated_at.isoformat() if task.updated_at else None,
                 }
@@ -197,9 +199,9 @@ def register_runtime_admin_routes(
                 "strong": chat_route,
                 "weak": weak_route,
                 "supervision": {
-                    "launcher_default_enabled": False,
+                    "launcher_default_enabled": True,
                     "active_jobs": supervision_jobs,
-                    "description": "Continuous bootstrap cycles are healthiest when queued onto the background worker.",
+                    "description": "Continuous self-improvement runs bootstrap cycles and sampled evals through the background worker.",
                 },
             },
         }

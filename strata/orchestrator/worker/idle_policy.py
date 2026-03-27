@@ -114,7 +114,7 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             from strata.schemas.execution import WeakExecutionContext
             model_adapter.bind_execution_context(WeakExecutionContext(run_id="idle_alignment"))
             
-            sys_prompt = f"""You are the Alignment Module for the Strata Swarm.
+            sys_prompt = f"""You are the Alignment Module for Strata.
 The system is currently IDLE. Your job is to identify ONE concrete alignment gap between the durable spec and the current repo, then propose exactly one bounded task.
 
 Canonical spec paths:

@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Iterable, Optional
 
+from sqlalchemy.exc import OperationalError
+
 from strata.storage.services.main import StorageManager
 
 
@@ -222,31 +224,14 @@ def _record_context_load_with_storage(
     content: str,
     source: str,
     metadata: Optional[Dict[str, Any]] = None,
+    commit_immediately: bool = True,
 ) -> Dict[str, Any]:
     identifier = str(identifier or "").strip()
     if not identifier:
         return {}
 
-    policy = get_context_load_policy(storage)
     estimated_tokens = estimate_text_tokens(content)
     now = _utcnow()
-    key = f"{artifact_type}:{identifier}"
-    stats_payload = storage.parameters.peek_parameter(CONTEXT_LOAD_STATS_KEY, default_value={"artifacts": {}}) or {"artifacts": {}}
-    artifacts = dict(stats_payload.get("artifacts") or {})
-    current = dict(artifacts.get(key) or {})
-    current["artifact_type"] = artifact_type
-    current["identifier"] = identifier
-    current["load_count"] = int(current.get("load_count", 0)) + 1
-    current["last_loaded_at"] = now
-    current["last_source"] = source
-    current["total_estimated_tokens"] = int(current.get("total_estimated_tokens", 0)) + estimated_tokens
-    current["total_estimated_tokens_sq"] = float(current.get("total_estimated_tokens_sq", 0.0)) + float(estimated_tokens * estimated_tokens)
-    current["max_estimated_tokens"] = max(int(current.get("max_estimated_tokens", 0)), estimated_tokens)
-    current["avg_estimated_tokens"] = round(current["total_estimated_tokens"] / max(1, current["load_count"]), 2)
-    current["last_metadata"] = dict(metadata or {})
-    artifacts[key] = current
-    stats_payload["artifacts"] = artifacts
-
     event = {
         "artifact_type": artifact_type,
         "identifier": identifier,
@@ -255,44 +240,75 @@ def _record_context_load_with_storage(
         "loaded_at": now,
         "metadata": dict(metadata or {}),
     }
-    recent = list(storage.parameters.peek_parameter(CONTEXT_LOAD_RECENT_KEY, default_value=[]) or [])
-    recent.append(event)
-    recent = recent[-max(1, policy["recent_event_limit"]):]
 
-    warnings = list(storage.parameters.peek_parameter(CONTEXT_LOAD_WARNINGS_KEY, default_value=[]) or [])
-    if estimated_tokens >= max(1, policy["warning_estimated_tokens"]):
-        warning = {
-            **event,
-            "warning": "context_load_large_artifact",
-            "threshold": policy["warning_estimated_tokens"],
-        }
-        warnings.append(warning)
-        warnings = warnings[-max(1, policy["recent_warning_limit"]):]
+    try:
+        with storage.session.no_autoflush:
+            policy = get_context_load_policy(storage)
+            key = f"{artifact_type}:{identifier}"
+            stats_payload = storage.parameters.peek_parameter(CONTEXT_LOAD_STATS_KEY, default_value={"artifacts": {}}) or {"artifacts": {}}
+            artifacts = dict(stats_payload.get("artifacts") or {})
+            current = dict(artifacts.get(key) or {})
+            current["artifact_type"] = artifact_type
+            current["identifier"] = identifier
+            current["load_count"] = int(current.get("load_count", 0)) + 1
+            current["last_loaded_at"] = now
+            current["last_source"] = source
+            current["total_estimated_tokens"] = int(current.get("total_estimated_tokens", 0)) + estimated_tokens
+            current["total_estimated_tokens_sq"] = float(current.get("total_estimated_tokens_sq", 0.0)) + float(estimated_tokens * estimated_tokens)
+            current["max_estimated_tokens"] = max(int(current.get("max_estimated_tokens", 0)), estimated_tokens)
+            current["avg_estimated_tokens"] = round(current["total_estimated_tokens"] / max(1, current["load_count"]), 2)
+            current["last_metadata"] = dict(metadata or {})
+            artifacts[key] = current
+            stats_payload["artifacts"] = artifacts
+
+            recent = list(storage.parameters.peek_parameter(CONTEXT_LOAD_RECENT_KEY, default_value=[]) or [])
+            recent.append(event)
+            recent = recent[-max(1, policy["recent_event_limit"]):]
+
+            warnings = list(storage.parameters.peek_parameter(CONTEXT_LOAD_WARNINGS_KEY, default_value=[]) or [])
+            if estimated_tokens >= max(1, policy["warning_estimated_tokens"]):
+                warning = {
+                    **event,
+                    "warning": "context_load_large_artifact",
+                    "threshold": policy["warning_estimated_tokens"],
+                }
+                warnings.append(warning)
+                warnings = warnings[-max(1, policy["recent_warning_limit"]):]
+                logger.warning(
+                    "Large context artifact loaded: %s (%s) estimated_tokens=%s threshold=%s",
+                    identifier,
+                    artifact_type,
+                    estimated_tokens,
+                    policy["warning_estimated_tokens"],
+                )
+
+            storage.parameters.set_parameter(
+                CONTEXT_LOAD_STATS_KEY,
+                stats_payload,
+                description="Aggregate context-load usage by artifact.",
+            )
+            storage.parameters.set_parameter(
+                CONTEXT_LOAD_RECENT_KEY,
+                recent,
+                description="Recent context-load events.",
+            )
+            storage.parameters.set_parameter(
+                CONTEXT_LOAD_WARNINGS_KEY,
+                warnings,
+                description="Recent warnings for large context-load artifacts.",
+            )
+            if commit_immediately and hasattr(storage, "commit"):
+                storage.commit()
+    except OperationalError as exc:
+        if "database is locked" not in str(exc).lower():
+            raise
         logger.warning(
-            "Large context artifact loaded: %s (%s) estimated_tokens=%s threshold=%s",
+            "Skipping context telemetry write for %s (%s) due to database lock contention.",
             identifier,
             artifact_type,
-            estimated_tokens,
-            policy["warning_estimated_tokens"],
         )
-
-    storage.parameters.set_parameter(
-        CONTEXT_LOAD_STATS_KEY,
-        stats_payload,
-        description="Aggregate context-load usage by artifact.",
-    )
-    storage.parameters.set_parameter(
-        CONTEXT_LOAD_RECENT_KEY,
-        recent,
-        description="Recent context-load events.",
-    )
-    storage.parameters.set_parameter(
-        CONTEXT_LOAD_WARNINGS_KEY,
-        warnings,
-        description="Recent warnings for large context-load artifacts.",
-    )
-    if hasattr(storage, "commit"):
-        storage.commit()
+        if commit_immediately and hasattr(storage, "rollback"):
+            storage.rollback()
     return event
 
 
@@ -305,16 +321,8 @@ def record_context_load(
     metadata: Optional[Dict[str, Any]] = None,
     storage=None,
 ) -> Dict[str, Any]:
-    if storage is not None:
-        return _record_context_load_with_storage(
-            storage,
-            artifact_type=artifact_type,
-            identifier=identifier,
-            content=content,
-            source=source,
-            metadata=metadata,
-        )
-
+    # Observability should never poison the caller's main transaction. Always use
+    # an isolated storage session and treat lock contention as a dropped metric.
     ephemeral_storage = StorageManager()
     try:
         return _record_context_load_with_storage(
@@ -324,6 +332,7 @@ def record_context_load(
             content=content,
             source=source,
             metadata=metadata,
+            commit_immediately=True,
         )
     finally:
         ephemeral_storage.close()

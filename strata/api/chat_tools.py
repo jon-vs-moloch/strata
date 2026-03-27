@@ -44,7 +44,7 @@ TASK_GENERATION_TOOLS = [
         "type": "function",
         "function": {
             "name": "kickoff_swarm_task",
-            "description": "Initialize a swarm of coding agents to implement a large feature, refactor, or fix a bug in the codebase.",
+            "description": "Initialize a formation of coding workers to implement a large feature, refactor, or fix a bug in the codebase.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -174,7 +174,7 @@ NON_GENERATIVE_TOOLS = [
         "type": "function",
         "function": {
             "name": "check_swarm_status",
-            "description": "Check the status of currently running tasks.",
+            "description": "Check the status of currently running formation tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {

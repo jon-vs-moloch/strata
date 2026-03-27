@@ -238,5 +238,4 @@ The repository should maintain a machine-readable symbol index (e.g. `symbols.js
 Metadata and documentation must not silently rot.
 - When code changes for a symbol, its metadata MUST be updated.
 - The **Judge Module** MUST penalize any candidate that lacks a proper semantic header or documentation block.
-- A "pass" in the shotgun swarm includes a verification of documentation quality.
-
+- A "pass" in Strata's formation includes a verification of documentation quality.

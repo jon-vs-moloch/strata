@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 
 API_URL = "http://127.0.0.1:8000"
-SUPERVISOR_MODE = os.getenv("SUPERVISOR_MODE", "telemetry_safe").strip().lower()
+SUPERVISOR_MODE = os.getenv("SUPERVISOR_MODE", "continuous").strip().lower()
 STANDARD_EVAL_EVERY = 4
 ERROR_BACKOFF_SECONDS = 15
 POLL_INTERVAL_SECONDS = 5
@@ -110,6 +110,27 @@ def run_context_snapshot(cycle_number: int) -> dict:
     return {"sampled_matrix": wait_for_job(str(queued.get("task_id")))}
 
 
+def _log_matrix_result(prefix: str, task: dict) -> None:
+    result = ((task.get("system_job_result") or {}).get("result") or {})
+    variants = result.get("variants") or []
+    weak_variants = [variant for variant in variants if str(variant.get("mode")) == "weak"]
+    strong_variants = [variant for variant in variants if str(variant.get("mode")) == "strong"]
+    weak_avg = (
+        sum(float(variant.get("accuracy", 0.0) or 0.0) for variant in weak_variants) / len(weak_variants)
+        if weak_variants
+        else 0.0
+    )
+    strong_avg = (
+        sum(float(variant.get("accuracy", 0.0) or 0.0) for variant in strong_variants) / len(strong_variants)
+        if strong_variants
+        else 0.0
+    )
+    log(
+        f"{prefix} task={task.get('task_id')} weak_avg={weak_avg:.2f} "
+        f"strong_avg={strong_avg:.2f} variants={len(variants)}"
+    )
+
+
 def main() -> None:
     cycle_number = 0
     while True:
@@ -122,25 +143,34 @@ def main() -> None:
                 bootstrap_result = ((bootstrap_task.get("system_job_result") or {}).get("result") or {})
                 promoted = len(bootstrap_result.get("promoted", []))
                 log(f"completed bootstrap cycle {cycle_number}; promoted={promoted}")
-            else:
+            elif SUPERVISOR_MODE == "telemetry_safe":
                 log(f"starting telemetry supervision cycle {cycle_number}")
                 eval_result = run_telemetry_cycle(cycle_number)
                 matrix_task = eval_result["sampled_matrix"]
-                matrix_summary = ((matrix_task.get("system_job_result") or {}).get("result") or {}).get("summary") or {}
-                log(
-                    "completed telemetry supervision cycle "
-                    f"{cycle_number} (task={matrix_task.get('task_id')}, variants={matrix_summary.get('variant_count', '—')})"
-                )
+                _log_matrix_result(f"completed telemetry supervision cycle {cycle_number}", matrix_task)
 
                 if cycle_number % STANDARD_EVAL_EVERY == 0:
                     log(f"starting context-on snapshot after cycle {cycle_number}")
                     context_result = run_context_snapshot(cycle_number)
                     context_task = context_result["sampled_matrix"]
-                    context_summary = ((context_task.get("system_job_result") or {}).get("result") or {}).get("summary") or {}
-                    log(
-                        "completed context-on snapshot "
-                        f"(task={context_task.get('task_id')}, variants={context_summary.get('variant_count', '—')})"
-                    )
+                    _log_matrix_result("completed context-on snapshot", context_task)
+            else:
+                log(f"starting continuous self-improvement cycle {cycle_number}")
+                queued = run_bootstrap_cycle()
+                bootstrap_task = wait_for_job(str(queued.get("task_id")))
+                bootstrap_result = ((bootstrap_task.get("system_job_result") or {}).get("result") or {})
+                promoted = len(bootstrap_result.get("promoted", []))
+                log(f"completed bootstrap phase {cycle_number}; promoted={promoted}")
+
+                eval_result = run_telemetry_cycle(cycle_number)
+                matrix_task = eval_result["sampled_matrix"]
+                _log_matrix_result(f"completed telemetry phase {cycle_number}", matrix_task)
+
+                if cycle_number % STANDARD_EVAL_EVERY == 0:
+                    log(f"starting context-on snapshot after cycle {cycle_number}")
+                    context_result = run_context_snapshot(cycle_number)
+                    context_task = context_result["sampled_matrix"]
+                    _log_matrix_result("completed context-on snapshot", context_task)
         except KeyboardInterrupt:
             log("supervisor interrupted; exiting")
             raise

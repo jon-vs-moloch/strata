@@ -12,10 +12,23 @@ fi
 
 mkdir -p strata/runtime
 HEALTH_URL="http://127.0.0.1:8000/admin/health"
-START_BOOTSTRAP_SUPERVISOR="${START_BOOTSTRAP_SUPERVISOR:-0}"
-SUPERVISOR_MODE="${SUPERVISOR_MODE:-telemetry_safe}"
+START_BOOTSTRAP_SUPERVISOR="${START_BOOTSTRAP_SUPERVISOR:-1}"
+SUPERVISOR_MODE="${SUPERVISOR_MODE:-continuous}"
+API_PATTERN="uvicorn strata.api.main:app --host 0.0.0.0 --port 8000"
+
+cleanup_stale_api_processes() {
+  mapfile -t api_pids < <(pgrep -f "$API_PATTERN" || true)
+  if [ "${#api_pids[@]}" -le 1 ]; then
+    return
+  fi
+  echo "Stopping stale API processes: ${api_pids[*]:1}"
+  kill "${api_pids[@]:1}" >/dev/null 2>&1 || true
+  sleep 1
+  kill -9 "${api_pids[@]:1}" >/dev/null 2>&1 || true
+}
 
 start_api() {
+  cleanup_stale_api_processes
   if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
     echo "API already listening on :8000"
     return
@@ -54,7 +67,7 @@ wait_for_api
 if [ "$START_BOOTSTRAP_SUPERVISOR" = "1" ]; then
   start_supervisor
 else
-  echo "Bootstrap supervisor disabled by default (set START_BOOTSTRAP_SUPERVISOR=1 to enable)"
+  echo "Bootstrap supervisor disabled for this launch (set START_BOOTSTRAP_SUPERVISOR=1 to enable)"
 fi
 
 echo "System launch requested. Logs:"

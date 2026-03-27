@@ -120,11 +120,12 @@ def unload_context_file(storage, raw_path: str, *, base_dir: str | None = None) 
 def build_loaded_context_block(storage, *, source: str) -> str:
     registry = _load_registry(storage)
     parts: List[str] = []
-    updated = False
+    changed = False
     files = []
     for entry in registry["files"]:
         path = Path(str(entry.get("path") or ""))
         if not path.exists() or not path.is_file():
+            changed = True
             continue
         content = path.read_text(encoding="utf-8", errors="ignore")
         record_context_load(
@@ -141,8 +142,7 @@ def build_loaded_context_block(storage, *, source: str) -> str:
         refreshed = dict(entry)
         refreshed["loaded_at"] = refreshed.get("loaded_at") or None
         files.append(refreshed)
-        updated = True
-    if updated:
+    if changed:
         registry["files"] = files
         storage.parameters.set_parameter(
             LOADED_CONTEXT_FILES_KEY,
