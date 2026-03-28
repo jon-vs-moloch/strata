@@ -94,6 +94,35 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "submit_feedback_signal",
+            "description": "Register a lightweight feedback, surprise, correction, or attention signal so the system can prioritize it without waiting for a human reaction.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_type": {
+                        "type": "string",
+                        "description": "What produced or received the signal.",
+                        "enum": ["message", "session", "task", "eval", "tool", "system"],
+                    },
+                    "source_id": {"type": "string", "description": "Stable identifier for the source item."},
+                    "signal_kind": {
+                        "type": "string",
+                        "description": "Kind of signal being registered.",
+                        "enum": ["reaction", "response", "correction", "surprise", "unexpected_success", "unexpected_failure", "importance", "highlight", "emphasize"],
+                    },
+                    "signal_value": {"type": "string", "description": "Short label or payload for the signal."},
+                    "source_preview": {"type": "string", "description": "Short excerpt or summary of the source item."},
+                    "expected_outcome": {"type": "string", "description": "Optional expectation that was violated."},
+                    "observed_outcome": {"type": "string", "description": "Optional observed outcome."},
+                    "note": {"type": "string", "description": "Optional short explanation of why the signal matters."},
+                },
+                "required": ["source_type", "source_id", "signal_kind", "signal_value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_knowledge_pages",
             "description": "List synthesized knowledge pages by metadata only. Use this before loading a full page when you need to find relevant existing knowledge.",
             "parameters": {

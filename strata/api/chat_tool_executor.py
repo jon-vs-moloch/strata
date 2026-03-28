@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
+from strata.feedback.signals import register_feedback_signal
 
 
 class ChatToolExecutor:
@@ -20,6 +21,7 @@ class ChatToolExecutor:
         slugify_page_title = self.deps["slugify_page_title"]
         load_specs = self.deps["load_specs"]
         create_spec_proposal = self.deps["create_spec_proposal"]
+        queue_eval_system_job = self.deps.get("queue_eval_system_job")
 
         func_name = call.get("function", {}).get("name")
         tool_call_id = call.get("id", "call_xyz")
@@ -77,6 +79,56 @@ class ChatToolExecutor:
                 tasks = storage.session.query(self.deps["task_model_cls"]).filter(self.deps["task_model_cls"].state != task_state_cls.COMPLETE).all()
             tool_content = "No active or matching tasks found in the database." if not tasks else "Current Formation Status:\n" + "\n".join(
                 f"- {task.title} ({task.task_id}): {task.state.value}" for task in tasks
+            )
+            tool_outputs_generated = True
+        elif func_name == "submit_feedback_signal":
+            signal = register_feedback_signal(
+                storage,
+                source_type=str(args.get("source_type") or "system"),
+                source_id=str(args.get("source_id") or ""),
+                signal_kind=str(args.get("signal_kind") or "highlight"),
+                signal_value=str(args.get("signal_value") or ""),
+                source_actor="agent",
+                session_id=session_id,
+                source_preview=str(args.get("source_preview") or content),
+                note=str(args.get("note") or reason),
+                expected_outcome=str(args.get("expected_outcome") or ""),
+                observed_outcome=str(args.get("observed_outcome") or ""),
+                metadata={"tool_name": "submit_feedback_signal", "tool_reason": reason},
+            )
+            prioritized = signal.get("prioritization") or {}
+            distillation_job = None
+            if queue_eval_system_job and str(prioritized.get("priority") or "") in {"review_soon", "urgent"}:
+                source_type = str(signal.get("source_type") or "")
+                target_session_id = session_id if source_type in {"message", "session", "system"} else ""
+                if target_session_id:
+                    distillation_job = await queue_eval_system_job(
+                        storage,
+                        kind="trace_review",
+                        title=f"Signal Distillation: {target_session_id}",
+                        description=f"Queued session trace review after internal feedback signal for '{target_session_id}'.",
+                        payload={
+                            "trace_kind": "session_trace",
+                            "session_id": target_session_id,
+                            "reviewer_tier": "strong",
+                            "emit_followups": True,
+                            "persist_to_task": False,
+                            "spec_scope": "project",
+                            "prioritization": prioritized,
+                        },
+                        session_id=target_session_id,
+                        dedupe_signature={
+                            "trace_kind": "session_trace",
+                            "reviewer_tier": "strong",
+                            "session_id": target_session_id,
+                        },
+                    )
+            tool_content = json.dumps(
+                {
+                    "signal": signal,
+                    "distillation_job": distillation_job,
+                },
+                indent=2,
             )
             tool_outputs_generated = True
         elif func_name == "list_knowledge_pages":

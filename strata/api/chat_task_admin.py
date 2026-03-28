@@ -23,6 +23,7 @@ from strata.api.message_feedback import (
     should_trigger_feedback_distillation,
     toggle_message_reaction,
 )
+from strata.feedback.signals import list_feedback_signals
 from strata.prioritization.feedback import classify_feedback_priority
 
 
@@ -199,6 +200,18 @@ def register_chat_task_routes(
         return {
             "status": "ok",
             "events": list_message_feedback_events(storage, limit=limit, session_id=session_id),
+        }
+
+    @app.get("/admin/feedback/signals")
+    async def get_feedback_signals(
+        session_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        limit: int = 100,
+        storage=Depends(get_storage),
+    ):
+        return {
+            "status": "ok",
+            "signals": list_feedback_signals(storage, limit=limit, session_id=session_id, source_type=source_type),
         }
 
     @app.post("/admin/messages/feedback/distill_session")

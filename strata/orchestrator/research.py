@@ -9,7 +9,9 @@
 
 from pathlib import Path
 from typing import Dict, Any, Optional
+import json
 from strata.knowledge.pages import KnowledgePageStore
+from strata.feedback.signals import register_feedback_signal
 from strata.schemas.core import ResearchReport
 
 
@@ -58,7 +60,7 @@ Your primary goal is to decompose the user's research task and iteratively gathe
 [CRITICAL - TOOL USE]
 To gather information or save data, you MUST use the structured tool-calling format.
 If you simply say "I will call a tool" in plain text without a structured tool call, the system will reject your response.
-Your current tools: list_directory, read_file, search_web, write_library_file, list_knowledge_pages, read_knowledge_page, inspect_knowledge_maintenance, propose_knowledge_merge, propose_knowledge_correction, queue_knowledge_refresh.
+Your current tools: list_directory, read_file, search_web, write_library_file, list_knowledge_pages, read_knowledge_page, inspect_knowledge_maintenance, propose_knowledge_merge, propose_knowledge_correction, queue_knowledge_refresh, submit_feedback_signal.
 
 [LIBRARY STRUCTURE]
 - As you find complete atomic findings, you MUST use `write_library_file` to save them locally into the `.knowledge/` memory store.
@@ -189,6 +191,27 @@ class ResearchModule:
                             "content": {"type": "string", "description": "The complete markdown content to write, including YAML frontmatter tags."}
                         },
                         "required": ["filename", "content"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_feedback_signal",
+                    "description": "Register a lightweight feedback, surprise, correction, or attention signal so the system can prioritize it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source_type": {"type": "string", "description": "What produced or received the signal."},
+                            "source_id": {"type": "string", "description": "Stable identifier for the source item."},
+                            "signal_kind": {"type": "string", "description": "Kind of signal being registered."},
+                            "signal_value": {"type": "string", "description": "Short label or payload for the signal."},
+                            "source_preview": {"type": "string", "description": "Short excerpt or summary of the source item."},
+                            "expected_outcome": {"type": "string", "description": "Optional expectation that was violated."},
+                            "observed_outcome": {"type": "string", "description": "Optional observed outcome."},
+                            "note": {"type": "string", "description": "Optional short explanation of why the signal matters."}
+                        },
+                        "required": ["source_type", "source_id", "signal_kind", "signal_value"]
                     }
                 }
             },
@@ -453,6 +476,25 @@ class ResearchModule:
                 elif func_name == "inspect_knowledge_maintenance":
                     report = knowledge_pages.get_maintenance_report()
                     tool_result = json.dumps(report, indent=2) if report else "No knowledge maintenance report is available yet."
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "submit_feedback_signal":
+                    signal = register_feedback_signal(
+                        self.storage,
+                        source_type=str(args.get("source_type") or "system"),
+                        source_id=str(args.get("source_id") or task_description[:32]),
+                        signal_kind=str(args.get("signal_kind") or "highlight"),
+                        signal_value=str(args.get("signal_value") or ""),
+                        source_actor="researcher",
+                        session_id="",
+                        source_preview=str(args.get("source_preview") or task_description),
+                        note=str(args.get("note") or ""),
+                        expected_outcome=str(args.get("expected_outcome") or ""),
+                        observed_outcome=str(args.get("observed_outcome") or ""),
+                        metadata={"module": "research"},
+                    )
+                    self.storage.commit()
+                    tool_result = json.dumps(signal, indent=2)
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
                 elif func_name == "propose_knowledge_merge":

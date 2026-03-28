@@ -17,3 +17,4 @@ Current durable guidance:
 - if a decision can be improved by mixing deterministic checks with model judgment, run the deterministic pass first and feed its output to the model rather than asking the model to rediscover obvious structure from scratch
 - treat user feedback, reactions, audits, and research artifacts as raw evidence that should eventually cash out into durable state changes: user knowledge, agent knowledge, project specs, constitution updates, or other reviewable promoted improvements
 - treat surprise as a first-class signal: when observed outcomes differ from expected outcomes without a good explanation, the mismatch should receive attention because it indicates the system's current model may be wrong
+- prefer extending or unifying existing systems over creating parallel ones; introduce a new subsystem only when it is a reusable primitive that can serve multiple parts of Strata rather than a one-off special case
