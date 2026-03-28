@@ -8,7 +8,8 @@ import {
   MessageSquare, Send, History, Cpu,
   Terminal, AlertCircle, X, Settings,
   Activity, Trash2, Database, LayoutDashboard,
-  Pause, Play, Square, ChevronDown, ChevronRight
+  Pause, Play, Square, ChevronDown, ChevronRight,
+  BookOpen, Search
 } from 'lucide-react';
 import TaskCard from './components/TaskCard';
 
@@ -672,6 +673,10 @@ function App() {
   const [specsSnapshot, setSpecsSnapshot] = useState(null);
   const [specProposalSnapshot, setSpecProposalSnapshot] = useState([]);
   const [knowledgePagesSnapshot, setKnowledgePagesSnapshot] = useState([]);
+  const [knowledgeQuery, setKnowledgeQuery] = useState('');
+  const [knowledgePages, setKnowledgePages] = useState([]);
+  const [selectedKnowledgeSlug, setSelectedKnowledgeSlug] = useState('');
+  const [selectedKnowledgePage, setSelectedKnowledgePage] = useState(null);
   const [retentionSnapshot, setRetentionSnapshot] = useState(null);
   const [variantRatingsSnapshot, setVariantRatingsSnapshot] = useState(null);
   const [predictionTrustSnapshot, setPredictionTrustSnapshot] = useState(null);
@@ -849,6 +854,48 @@ function App() {
     return () => es.close();
   }, [fetchData]);
 
+  useEffect(() => {
+    if (activeNav !== 'knowledge') return;
+    let cancelled = false;
+
+    const loadKnowledge = async () => {
+      try {
+        const pagesRes = await axios.get(`${API}/admin/knowledge/pages`, {
+          params: {
+            limit: 50,
+            query: knowledgeQuery || undefined,
+          },
+        });
+        if (cancelled) return;
+        const nextPages = pagesRes.data.pages || [];
+        setKnowledgePages(nextPages);
+
+        const hasCurrent = nextPages.some((page) => page.slug === selectedKnowledgeSlug);
+        const nextSlug = hasCurrent ? selectedKnowledgeSlug : (nextPages[0]?.slug || '');
+        setSelectedKnowledgeSlug(nextSlug);
+
+        if (!nextSlug) {
+          setSelectedKnowledgePage(null);
+          return;
+        }
+
+        const pageRes = await axios.get(`${API}/admin/knowledge/pages/${nextSlug}`);
+        if (cancelled) return;
+        setSelectedKnowledgePage(pageRes.data.page || null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Failed to load knowledge pages', err);
+        setKnowledgePages([]);
+        setSelectedKnowledgePage(null);
+      }
+    };
+
+    void loadKnowledge();
+    return () => {
+      cancelled = true;
+    };
+  }, [API, activeNav, knowledgeQuery, selectedKnowledgeSlug]);
+
   const handleSendMessage = async () => {
     if (!inputText.trim() || isSending) return;
     const text = inputText;
@@ -1019,6 +1066,7 @@ function App() {
   const navItems = [
     { id: 'chat',      Icon: MessageSquare,  label: 'Chat'      },
     { id: 'history',   Icon: History,        label: 'History'   },
+    { id: 'knowledge', Icon: BookOpen,       label: 'Knowledge' },
     { id: 'dashboard', Icon: LayoutDashboard,label: 'Dashboard' },
   ];
 
@@ -1152,9 +1200,15 @@ function App() {
         <header style={{ padding: '20px 28px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
           <div>
             <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
-              {activeNav === 'dashboard' ? 'Operator Dashboard' : `Orchestrator Chat · ${chatLane.toUpperCase()}`}
+              {activeNav === 'dashboard'
+                ? 'Operator Dashboard'
+                : activeNav === 'knowledge'
+                ? 'Knowledge Base'
+                : `Orchestrator Chat · ${chatLane.toUpperCase()}`}
             </h1>
-            <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>{sessionLabel}</p>
+            <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>
+              {activeNav === 'knowledge' ? 'Navigable system wiki' : sessionLabel}
+            </p>
             {routingSummary && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
                 <RoutePill
@@ -1264,6 +1318,15 @@ function App() {
             onQueueSampleTick={handleQueueSampleTick}
             onResolveSpecProposal={handleResolveSpecProposal}
           />
+        ) : activeNav === 'knowledge' ? (
+          <KnowledgeView
+            pages={knowledgePages}
+            query={knowledgeQuery}
+            selectedPage={selectedKnowledgePage}
+            selectedSlug={selectedKnowledgeSlug}
+            onQueryChange={setKnowledgeQuery}
+            onSelectSlug={setSelectedKnowledgeSlug}
+          />
         ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <AnimatePresence initial={false}>
@@ -1351,7 +1414,7 @@ function App() {
         )}
 
         {/* Input bar */}
-        {activeNav !== 'dashboard' && (
+        {activeNav !== 'dashboard' && activeNav !== 'knowledge' && (
         <div style={{ padding: '20px 28px', borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
           {sendError && (
             <div style={{ marginBottom: '10px', background: 'rgba(255,92,92,0.08)', border: '1px solid rgba(255,92,92,0.22)', borderRadius: '10px', padding: '10px 12px', color: '#ffb3b3', fontSize: '12px' }}>
@@ -1618,6 +1681,166 @@ const Sparkline = ({ values, color = '#8257e5' }) => {
         strokeLinejoin="round"
       />
     </svg>
+  );
+};
+
+const KnowledgeView = ({
+  pages,
+  query,
+  selectedPage,
+  selectedSlug,
+  onQueryChange,
+  onSelectSlug,
+}) => {
+  const relatedPages = selectedPage?.related_pages || [];
+
+  return (
+    <div style={{ flex: 1, overflow: 'hidden', display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: '0', minHeight: 0 }}>
+      <div style={{ borderRight: '1px solid rgba(255,255,255,0.05)', background: '#0d0d11', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ padding: '20px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ fontSize: '11px', color: '#7f8091', letterSpacing: '0.12em', fontWeight: 800 }}>KNOWLEDGE INDEX</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '10px 12px' }}>
+            <Search size={15} color="#696a7b" />
+            <input
+              type="text"
+              value={query}
+              onChange={(event) => onQueryChange(event.target.value)}
+              placeholder="Search titles, tags, aliases..."
+              style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px' }}
+            />
+          </div>
+          <div style={{ fontSize: '12px', color: '#8d8ea1' }}>
+            {pages.length ? `${pages.length} page${pages.length === 1 ? '' : 's'} visible` : 'No indexed pages yet'}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '10px' }}>
+          {pages.map((page) => {
+            const active = page.slug === selectedSlug;
+            return (
+              <button
+                key={page.slug}
+                onClick={() => onSelectSlug(page.slug)}
+                style={{
+                  width: '100%',
+                  textAlign: 'left',
+                  background: active ? 'rgba(130,87,229,0.14)' : 'transparent',
+                  border: active ? '1px solid rgba(130,87,229,0.28)' : '1px solid transparent',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  cursor: 'pointer',
+                  marginBottom: '8px'
+                }}
+              >
+                <div style={{ color: active ? '#f2ecff' : '#edeeef', fontSize: '13px', fontWeight: 700 }}>
+                  {page.title || page.slug}
+                </div>
+                <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.5 }}>
+                  {page.summary || 'No summary available yet.'}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  <RoutePill label="DOMAIN" value={page.domain || 'project'} tone={active ? 'success' : 'neutral'} />
+                  <RoutePill label="UPDATED" value={page.last_updated ? formatAbsoluteTime(page.last_updated) : '—'} tone="neutral" />
+                </div>
+              </button>
+            );
+          })}
+
+          {!pages.length && (
+            <div style={{ padding: '18px 12px', color: '#8d8ea1', fontSize: '12px', lineHeight: 1.6 }}>
+              Strata supports synthesized knowledge pages, but there are no indexed wiki pages yet. Once pages are compacted or written into the knowledge store, they will show up here.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ minWidth: 0, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+        {selectedPage ? (
+          <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <RoutePill label="SLUG" value={selectedPage.slug || '—'} tone="neutral" />
+                <RoutePill label="DOMAIN" value={selectedPage.domain || 'project'} tone="success" />
+                <RoutePill label="CONF" value={typeof selectedPage.confidence === 'number' ? selectedPage.confidence.toFixed(2) : '—'} tone="neutral" />
+                <RoutePill label="UPDATED" value={selectedPage.last_updated ? formatAbsoluteTime(selectedPage.last_updated) : '—'} tone="neutral" />
+              </div>
+              <div>
+                <h2 style={{ margin: 0, color: '#edeeef', fontSize: '28px', lineHeight: 1.1 }}>{selectedPage.title || selectedPage.slug}</h2>
+                <div style={{ marginTop: '10px', color: '#a9aaba', fontSize: '14px', lineHeight: 1.6 }}>
+                  {selectedPage.summary || 'No summary available for this page yet.'}
+                </div>
+              </div>
+            </div>
+
+            {!!selectedPage.tags?.length && (
+              <DashboardPanel title="TAGS">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {selectedPage.tags.map((tag) => (
+                    <RoutePill key={tag} label="TAG" value={tag} tone="neutral" />
+                  ))}
+                </div>
+              </DashboardPanel>
+            )}
+
+            {!!selectedPage.aliases?.length && (
+              <DashboardPanel title="ALIASES">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {selectedPage.aliases.map((alias) => (
+                    <RoutePill key={alias} label="ALIAS" value={alias} tone="neutral" />
+                  ))}
+                </div>
+              </DashboardPanel>
+            )}
+
+            <div style={{ background: '#141418', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '22px' }}>
+              <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.75', color: '#edeeef' }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {selectedPage.body || selectedPage.summary || 'No page body available yet.'}
+                </ReactMarkdown>
+              </div>
+            </div>
+
+            <DashboardPanel title="RELATED PAGES">
+              {relatedPages.length ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {relatedPages.map((slug) => (
+                    <button
+                      key={slug}
+                      onClick={() => onSelectSlug(slug)}
+                      style={{
+                        background: 'rgba(255,255,255,0.04)',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        color: '#e7e8ef',
+                        borderRadius: '999px',
+                        padding: '7px 12px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {slug}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: '12px', color: '#666' }}>No related pages linked yet.</div>
+              )}
+            </DashboardPanel>
+          </>
+        ) : (
+          <div style={{ margin: 'auto 0', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', textAlign: 'center' }}>
+            <BookOpen size={34} color="#2f3040" />
+            <div style={{ fontSize: '18px', fontWeight: 700, color: '#c7c8d6' }}>Knowledge wiki is ready</div>
+            <div style={{ maxWidth: '520px', fontSize: '14px', lineHeight: 1.7, color: '#8d8ea1' }}>
+              This view is wired up, but the indexed knowledge store is currently empty. Once Strata writes or compacts pages into the knowledge base, they will be navigable here like a wiki.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 };
 
