@@ -13,6 +13,7 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
+from strata.feedback.signals import register_feedback_signal
 from strata.storage.models import TaskModel, TaskState, AttemptOutcome
 from strata.orchestrator.worker.queue_recovery import recover_tasks
 from strata.orchestrator.worker.idle_policy import run_idle_tasks
@@ -24,6 +25,104 @@ from strata.orchestrator.worker.routing_policy import select_model_tier
 from strata.eval.job_runner import run_eval_job_task
 
 logger = logging.getLogger(__name__)
+
+
+def emit_task_execution_attention_signal(
+    storage,
+    *,
+    task,
+    attempt,
+    context,
+    plan_review: Optional[dict] = None,
+    error: Optional[BaseException] = None,
+):
+    prior_attempts = [
+        row for row in (storage.attempts.get_by_task_id(task.task_id) or [])
+        if str(getattr(row, "attempt_id", "")) != str(getattr(attempt, "attempt_id", ""))
+    ]
+    prior_failed = [row for row in prior_attempts if row.outcome == AttemptOutcome.FAILED]
+    prior_succeeded = [row for row in prior_attempts if row.outcome == AttemptOutcome.SUCCEEDED]
+    plan_review = dict(plan_review or {})
+    plan_health = str(plan_review.get("plan_health") or "").strip().lower()
+    recommendation = str(plan_review.get("recommendation") or "").strip().lower()
+    outcome = getattr(attempt.outcome, "value", "").strip().lower() if attempt.outcome else ""
+
+    signal_kind = None
+    signal_value = outcome or "unknown"
+    expected_outcome = "progress"
+    observed_outcome = outcome or "unknown"
+    note_bits = []
+
+    if attempt.outcome == AttemptOutcome.FAILED and not prior_failed:
+        signal_kind = "unexpected_failure"
+        signal_value = "first_failure"
+        observed_outcome = "failed"
+        note_bits.append("Task failed on its first recorded failed attempt.")
+    elif attempt.outcome == AttemptOutcome.SUCCEEDED and prior_failed:
+        signal_kind = "unexpected_success"
+        signal_value = "recovered_after_failures"
+        expected_outcome = "continued_struggle"
+        observed_outcome = "succeeded"
+        note_bits.append(f"Task succeeded after {len(prior_failed)} prior failed attempt(s).")
+    elif attempt.outcome == AttemptOutcome.FAILED and len(prior_failed) >= 2:
+        signal_kind = "importance"
+        signal_value = "repeated_failures"
+        observed_outcome = "failed_repeatedly"
+        note_bits.append(f"Task has {len(prior_failed) + 1} failed attempts.")
+    elif attempt.outcome == AttemptOutcome.SUCCEEDED and (
+        plan_health in {"degraded", "invalid"} or recommendation in {"decompose", "internal_replan", "abandon_to_parent"}
+    ):
+        signal_kind = "surprise"
+        signal_value = "success_but_plan_degraded"
+        expected_outcome = "stable_success"
+        observed_outcome = "succeeded_but_needs_restructure"
+        note_bits.append("Attempt succeeded, but plan review says the branch remains unhealthy.")
+
+    if not signal_kind:
+        return None
+
+    usage = dict(getattr(attempt, "artifacts", {}) or {})
+    model_id = f"{usage.get('provider', 'unknown')}/{usage.get('model', 'unknown')}"
+    return register_feedback_signal(
+        storage,
+        source_type="task_execution",
+        source_id=str(task.task_id),
+        signal_kind=signal_kind,
+        signal_value=signal_value,
+        source_actor="background_worker",
+        session_id=str(task.session_id or "").strip(),
+        source_preview=str(task.title or task.description or f"Task {task.task_id}")[:220],
+        note=" ".join(
+            [
+                part
+                for part in [
+                    *note_bits,
+                    f"task_type={getattr(task.type, 'value', str(task.type))}",
+                    f"context_mode={getattr(context, 'mode', 'unknown')}",
+                    f"model_id={model_id}",
+                    f"plan_health={plan_health or 'unknown'}",
+                    f"recommendation={recommendation or 'unknown'}",
+                    f"error={str(error)[:180] if error else ''}",
+                ]
+                if str(part).strip()
+            ]
+        )[:500],
+        expected_outcome=expected_outcome,
+        observed_outcome=observed_outcome,
+        metadata={
+            "task_id": task.task_id,
+            "attempt_id": getattr(attempt, "attempt_id", None),
+            "task_type": getattr(task.type, "value", str(task.type)),
+            "context_mode": getattr(context, "mode", "unknown"),
+            "candidate_change_id": getattr(context, "candidate_change_id", None),
+            "run_mode": getattr(context, "run_mode", "weak_eval" if getattr(context, "evaluation_run", False) else "normal"),
+            "plan_health": plan_health,
+            "recommendation": recommendation,
+            "prior_failed_attempts": len(prior_failed),
+            "prior_succeeded_attempts": len(prior_succeeded),
+            "error": str(error)[:220] if error else "",
+        },
+    )
 
 class BackgroundWorker:
     """
@@ -335,6 +434,20 @@ class BackgroundWorker:
             try:
                 review = await generate_plan_review(task, attempt, self._model, storage)
                 storage.attempts.set_plan_review(attempt.attempt_id, review)
+                attention_signal = emit_task_execution_attention_signal(
+                    storage,
+                    task=task,
+                    attempt=attempt,
+                    context=context,
+                    plan_review=review,
+                    error=error,
+                )
+                if attention_signal:
+                    logger.info(
+                        "Emitted task execution attention signal %s for task %s",
+                        attention_signal.get("signal_kind"),
+                        task.task_id,
+                    )
                 storage.commit()
             except Exception as review_err:
                 logger.error(f"Failed to generate plan review for attempt {attempt.attempt_id}: {review_err}")
