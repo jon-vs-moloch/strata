@@ -27,6 +27,9 @@ This is why the codebase emphasizes explicit task structure, external state, eva
 - `strata/storage/`: SQLAlchemy models, repositories, and storage service.
 - `strata/memory/`: semantic memory backed by ChromaDB.
 - `strata/models/`: model adapter, provider, and registry logic.
+- `strata/experimental/`: self-improvement substrate for autonomous optimization.
+- `strata/context/`: persistent workspace context management.
+- `strata/feedback/`: internal reaction and alignment-risk triage.
 - `strata_ui/`: active frontend for the dashboard.
 - `docs/`: design notes and agent-specific documentation.
 - `.knowledge/`: raw generated research artifacts and provenance archive.
@@ -159,7 +162,9 @@ There are additional admin endpoints for reboot, promotion, rollback, worker con
 
 The backend now applies conservative DB retention on startup and exposes its last compaction summary through `/admin/storage/retention`. The current defaults keep recent raw state lossless, compact old metrics into aggregate rollups, archive older chat history per session, trim old terminal attempt tails, and shrink stale experiment reports instead of letting raw traces grow forever.
 
-Context-load telemetry is available at `/admin/context/telemetry`, and `/admin/context/scan` reruns the startup file-token pressure scan on demand.
+Context-load telemetry is available at `/admin/context/telemetry`, and `/admin/context/scan` reruns the startup file-token pressure scan on demand. Pinned context files are managed through [context-management.md](/Users/jon/Projects/strata/docs/spec/context-management.md).
+
+User and agent feedback is triaged via a surprise-first priority model, documented in [feedback-prioritization.md](/Users/jon/Projects/strata/docs/spec/feedback-prioritization.md).
 
 ## Evaluation Loop
 
@@ -204,7 +209,7 @@ The heavier eval endpoints also support queued execution with `queue=true`, whic
 
 `/admin/experiments/bootstrap_cycle` can now ask both the weak and strong tiers to propose small eval-harness changes in parallel, evaluate them with provenance, and auto-promote any winner into the shared active harness configuration. Promotions now require repeated sample wins by default instead of a single pass. `GET /admin/experiments/history` exposes recent experiment reports and promotion readiness, while `GET /admin/experiments/secondary_ignition` reports whether a weak-originated promoted change has produced a measurable weak-tier gain.
 
-For a first bounded code-change lane, `/admin/experiments/tool_cycle` lets a proposer tier generate a dynamic tool under `strata/tools/`, run it through the existing tool promotion pipeline, and persist the outcome as a provenance-tagged experiment report.
+For a first bounded code-change lane, `/admin/experiments/tool_cycle` lets a proposer tier generate a dynamic tool under `strata/tools/`, run it through the existing tool promotion pipeline, and persist the outcome as a provenance-tagged experiment report. The underlying variant and experiment architecture is described in [self-improvement-substrate.md](/Users/jon/Projects/strata/docs/spec/self-improvement-substrate.md).
 
 ## Knowledge System
 

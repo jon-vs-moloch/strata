@@ -26,6 +26,16 @@ The goal is not to list every file. The goal is to help humans and small-context
   Dashboard frontend.
 - `.knowledge/`
   Raw research archive and provenance artifacts.
+- `strata/context/`
+  Persistent workspace context management and file pinning.
+- `strata/feedback/`
+  Surprise-first feedback signal registry.
+- `strata/prioritization/`
+  Signal classification and alignment risk triage.
+- `strata/experimental/`
+  Self-improvement substrate: variants, experiments, and trace review.
+- `docs/spec/`
+  Design notes and architecture specifications.
 - `docs/spec/kb/`
   Mirrored synthesized knowledge pages for human/model browsing.
 
@@ -132,6 +142,16 @@ Important worker submodules:
 
 - [bootstrap.py](/Users/jon/Projects/strata/strata/specs/bootstrap.py)
   Durable spec bootstrap, proposal persistence, and resolution flow.
+- [project-philosophy.md](/Users/jon/Projects/strata/docs/spec/project-philosophy.md)
+  Core project goals and systems-intelligence thesis.
+- [task-attempt-ontology.md](/Users/jon/Projects/strata/docs/spec/task-attempt-ontology.md)
+  Task and attempt primitives.
+- [feedback-prioritization.md](/Users/jon/Projects/strata/docs/spec/feedback-prioritization.md)
+  Surprise-first feedback and alignment risk triage.
+- [context-management.md](/Users/jon/Projects/strata/docs/spec/context-management.md)
+  Persistent workspace context management and token pressure scans.
+- [self-improvement-substrate.md](/Users/jon/Projects/strata/docs/spec/self-improvement-substrate.md)
+  Autonomous variant optimization and experiment runner.
 - [.knowledge/specs/constitution.md](/Users/jon/Projects/strata/.knowledge/specs/constitution.md)
   Global durable intent.
 - [.knowledge/specs/project_spec.md](/Users/jon/Projects/strata/.knowledge/specs/project_spec.md)
@@ -166,6 +186,12 @@ For common tasks, start here:
   [context.py](/Users/jon/Projects/strata/strata/observability/context.py)
 - “How does long-term retention work?”
   [retention.py](/Users/jon/Projects/strata/strata/storage/retention.py)
+- “How are feedback signals prioritized?”
+  [feedback-prioritization.md](/Users/jon/Projects/strata/docs/spec/feedback-prioritization.md)
+- “How does context pinning work?”
+  [context-management.md](/Users/jon/Projects/strata/docs/spec/context-management.md)
+- “How are system prompts optimized?”
+  [self-improvement-substrate.md](/Users/jon/Projects/strata/docs/spec/self-improvement-substrate.md)
 
 ## Remaining Large Files
 
