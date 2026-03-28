@@ -9,6 +9,7 @@
 
 from pathlib import Path
 from typing import Dict, Any, Optional
+from strata.knowledge.pages import KnowledgePageStore
 from strata.schemas.core import ResearchReport
 
 
@@ -57,12 +58,17 @@ Your primary goal is to decompose the user's research task and iteratively gathe
 [CRITICAL - TOOL USE]
 To gather information or save data, you MUST use the structured tool-calling format.
 If you simply say "I will call a tool" in plain text without a structured tool call, the system will reject your response.
-Your current tools: list_directory, read_file, search_web, write_library_file.
+Your current tools: list_directory, read_file, search_web, write_library_file, list_knowledge_pages, read_knowledge_page, inspect_knowledge_maintenance, propose_knowledge_merge, propose_knowledge_correction, queue_knowledge_refresh.
 
 [LIBRARY STRUCTURE]
 - As you find complete atomic findings, you MUST use `write_library_file` to save them locally into the `.knowledge/` memory store.
 - Enforce a clean library structure: small, atomic files. ALWAYS include YAML metadata (title, subjects, tags) at the top.
 - Use [[Wikilinks]] to cross-reference other documents you create.
+
+[KNOWLEDGE MAINTENANCE]
+- Before creating a brand new research note or proposing a new durable page, inspect the synthesized knowledge pages when relevant.
+- If you discover overlap, contradictions, or stale claims, use the maintenance tools to propose merge/correction/refresh work rather than silently duplicating the wiki.
+- Prefer durable knowledge pages for retrieval, and raw `.knowledge/` notes for draft or intermediate findings.
 
 [LOCAL CONTEXT]
 - Repository paths are relative to the repo root.
@@ -81,7 +87,7 @@ class ResearchModule:
     @depends models.adapter, schemas.core.ResearchReport
     @invariants always returns a ResearchReport regardless of findings
     """
-    def __init__(self, model_adapter, storage_manager):
+    def __init__(self, model_adapter, storage_manager, enqueue_task=None):
         """
         @summary Initialize the ResearchModule.
         @inputs model_adapter instance, storage_manager instance
@@ -89,6 +95,7 @@ class ResearchModule:
         """
         self.model = model_adapter
         self.storage = storage_manager
+        self.enqueue_task = enqueue_task
 
     async def conduct_research(
         self,
@@ -184,6 +191,101 @@ class ResearchModule:
                         "required": ["filename", "content"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_knowledge_pages",
+                    "description": "List synthesized knowledge pages by metadata so you can reuse or inspect existing wiki pages before drafting new notes.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Optional query to filter pages by title, summary, alias, or tag."},
+                            "tag": {"type": "string", "description": "Optional tag filter."},
+                            "domain": {"type": "string", "description": "Optional domain filter."},
+                            "limit": {"type": "integer", "description": "Maximum number of page metadata results to return."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_knowledge_page",
+                    "description": "Read a synthesized knowledge page or a specific section when you need durable wiki context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {"type": "string", "description": "Knowledge page slug."},
+                            "heading": {"type": "string", "description": "Optional heading to fetch a specific section only."}
+                        },
+                        "required": ["slug"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "inspect_knowledge_maintenance",
+                    "description": "Inspect the knowledge maintenance backlog, including duplicate candidates and stale pages.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "propose_knowledge_merge",
+                    "description": "Queue a merge/canonicalization proposal when two knowledge pages overlap or should be consolidated.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "canonical_slug": {"type": "string", "description": "The page that should remain canonical."},
+                            "duplicate_slug": {"type": "string", "description": "The page that may be merged into the canonical page."},
+                            "reason": {"type": "string", "description": "Why the pages should be merged."},
+                            "target_scope": {"type": "string", "description": "Whether to inspect the codebase or the public web.", "enum": ["codebase", "web"]},
+                            "evidence_hints": {"type": "array", "items": {"type": "string"}, "description": "Optional evidence supporting the merge."}
+                        },
+                        "required": ["canonical_slug", "duplicate_slug", "reason"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "propose_knowledge_correction",
+                    "description": "Queue a correction or contradiction-resolution proposal for a knowledge page.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {"type": "string", "description": "The page that needs correction."},
+                            "reason": {"type": "string", "description": "What looks wrong, stale, or contradictory."},
+                            "target_scope": {"type": "string", "description": "Whether to inspect the codebase or the public web.", "enum": ["codebase", "web"]},
+                            "evidence_hints": {"type": "array", "items": {"type": "string"}, "description": "Optional evidence supporting the correction."},
+                            "related_slugs": {"type": "array", "items": {"type": "string"}, "description": "Optional other pages involved in the conflict."}
+                        },
+                        "required": ["slug", "reason"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "queue_knowledge_refresh",
+                    "description": "Queue a freshness refresh for a knowledge page when its source evidence may have changed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {"type": "string", "description": "The page that should be refreshed."},
+                            "reason": {"type": "string", "description": "Why the page may be stale."},
+                            "target_scope": {"type": "string", "description": "Whether to inspect the codebase or the public web.", "enum": ["codebase", "web"]},
+                            "evidence_hints": {"type": "array", "items": {"type": "string"}, "description": "Optional evidence supporting the refresh."}
+                        },
+                        "required": ["slug", "reason"]
+                    }
+                }
             }
         ]
 
@@ -211,6 +313,7 @@ class ResearchModule:
         )
         
         final_report_data = None
+        knowledge_pages = KnowledgePageStore(self.storage)
         
         for iteration in range(max_iterations):
             print(f"Research Loop Iteration {iteration+1}/{max_iterations}")
@@ -315,6 +418,95 @@ class ResearchModule:
                     except Exception as e:
                         tool_result = f"Failed to write file: {e}"
                         
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "list_knowledge_pages":
+                    pages = knowledge_pages.list_pages(
+                        query=args.get("query"),
+                        tag=args.get("tag"),
+                        domain=args.get("domain"),
+                        audience="operator",
+                        limit=int(args.get("limit") or 8),
+                    )
+                    if not pages:
+                        tool_result = "No synthesized knowledge pages matched that query."
+                    else:
+                        tool_result = "Knowledge Page Metadata:\n" + "\n".join(
+                            f"- {page.get('slug')}: {page.get('title')} | summary={page.get('summary')} | "
+                            f"domain={page.get('domain')} | maintenance={page.get('maintenance', {}).get('freshness_status', 'unknown')} | "
+                            f"last_updated={page.get('last_updated')}"
+                            for page in pages
+                        )
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "read_knowledge_page":
+                    slug = str(args.get("slug") or "")
+                    heading = str(args.get("heading") or "").strip()
+                    if heading:
+                        section = knowledge_pages.get_page_section(slug, heading, audience="operator")
+                        tool_result = section.get("content") or f"No section '{heading}' found in knowledge page '{slug}'."
+                    else:
+                        page = knowledge_pages.get_page(slug, audience="operator")
+                        tool_result = page.get("body") or f"No synthesized knowledge page found for '{slug}'."
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "inspect_knowledge_maintenance":
+                    report = knowledge_pages.get_maintenance_report()
+                    tool_result = json.dumps(report, indent=2) if report else "No knowledge maintenance report is available yet."
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "propose_knowledge_merge":
+                    canonical_slug = str(args.get("canonical_slug") or "")
+                    duplicate_slug = str(args.get("duplicate_slug") or "")
+                    reason = str(args.get("reason") or "possible duplicate knowledge pages")
+                    task = knowledge_pages.enqueue_update_task(
+                        slug=canonical_slug,
+                        reason=f"[merge] {reason}",
+                        target_scope=str(args.get("target_scope") or target_scope or "codebase"),
+                        evidence=[str(item) for item in (args.get("evidence_hints") or [])],
+                        operation="knowledge_merge",
+                        related_slugs=[duplicate_slug],
+                    )
+                    self.storage.commit()
+                    if self.enqueue_task:
+                        await self.enqueue_task(task.task_id)
+                    tool_result = (
+                        f"Queued knowledge merge proposal task {task.task_id} to evaluate '{canonical_slug}' "
+                        f"against duplicate candidate '{duplicate_slug}'."
+                    )
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "propose_knowledge_correction":
+                    slug = str(args.get("slug") or "")
+                    reason = str(args.get("reason") or "possible knowledge correction needed")
+                    task = knowledge_pages.enqueue_update_task(
+                        slug=slug,
+                        reason=f"[correction] {reason}",
+                        target_scope=str(args.get("target_scope") or target_scope or "codebase"),
+                        evidence=[str(item) for item in (args.get("evidence_hints") or [])],
+                        operation="knowledge_correction",
+                        related_slugs=[str(item) for item in (args.get("related_slugs") or [])],
+                    )
+                    self.storage.commit()
+                    if self.enqueue_task:
+                        await self.enqueue_task(task.task_id)
+                    tool_result = f"Queued knowledge correction task {task.task_id} for '{slug}'."
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                elif func_name == "queue_knowledge_refresh":
+                    slug = str(args.get("slug") or "")
+                    reason = str(args.get("reason") or "page may be stale")
+                    task = knowledge_pages.enqueue_update_task(
+                        slug=slug,
+                        reason=f"[refresh] {reason}",
+                        target_scope=str(args.get("target_scope") or target_scope or "codebase"),
+                        evidence=[str(item) for item in (args.get("evidence_hints") or [])],
+                        operation="knowledge_refresh",
+                    )
+                    self.storage.commit()
+                    if self.enqueue_task:
+                        await self.enqueue_task(task.task_id)
+                    tool_result = f"Queued knowledge refresh task {task.task_id} for '{slug}'."
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
             else:

@@ -160,6 +160,35 @@ class ChatToolExecutor:
             await self.deps["worker"].enqueue(task.task_id)
             async_task_id = task.task_id
             tool_content = f"Queued knowledge update task {task.task_id} for page '{slugify_page_title(slug)}'."
+        elif func_name == "inspect_knowledge_maintenance":
+            report = knowledge_pages.get_maintenance_report()
+            if not report:
+                tool_content = "No knowledge maintenance report is available yet. Run compaction or refresh maintenance first."
+            else:
+                tool_content = json.dumps(report, indent=2)
+            tool_outputs_generated = True
+        elif func_name == "flag_knowledge_issue":
+            slug = str(args.get("slug") or "")
+            issue_type = str(args.get("issue_type") or "correction")
+            reason = str(args.get("reason") or "knowledge issue detected")
+            related_slugs = [str(item) for item in (args.get("related_slugs") or [])]
+            evidence = [str(item) for item in (args.get("evidence_hints") or [])]
+            task = knowledge_pages.enqueue_update_task(
+                slug=slug,
+                reason=f"[{issue_type}] {reason}",
+                session_id=session_id,
+                target_scope=str(args.get("target_scope") or "codebase"),
+                evidence=evidence,
+                related_slugs=related_slugs,
+                operation=f"knowledge_{issue_type}",
+            )
+            storage.commit()
+            await self.deps["worker"].enqueue(task.task_id)
+            async_task_id = task.task_id
+            tool_content = (
+                f"Queued knowledge maintenance task {task.task_id} for page '{slugify_page_title(slug)}' "
+                f"with issue type '{issue_type}'."
+            )
         elif func_name == "read_spec":
             scope = str(args.get("scope") or "project")
             specs = load_specs(storage=storage)

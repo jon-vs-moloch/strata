@@ -173,6 +173,52 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "inspect_knowledge_maintenance",
+            "description": "Inspect the current knowledge maintenance backlog, including duplicate candidates and stale pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "flag_knowledge_issue",
+            "description": "Flag a knowledge page for maintenance when you suspect it is stale, duplicated, contradictory, or otherwise needs review. This queues downstream work instead of mutating the wiki directly.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Primary page slug or topic name to flag."},
+                    "issue_type": {
+                        "type": "string",
+                        "description": "What kind of issue was detected.",
+                        "enum": ["stale", "duplicate", "correction", "missing_context", "conflict"],
+                    },
+                    "reason": {"type": "string", "description": "Why this issue should be reviewed."},
+                    "related_slugs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional related pages involved in the issue, such as duplicate candidates.",
+                    },
+                    "target_scope": {
+                        "type": "string",
+                        "description": "Whether to inspect the codebase or the public web.",
+                        "enum": ["codebase", "web"],
+                    },
+                    "evidence_hints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional hints about missing, stale, or contradictory evidence.",
+                    },
+                },
+                "required": ["slug", "issue_type", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_swarm_status",
             "description": "Check the status of currently running formation tasks.",
             "parameters": {

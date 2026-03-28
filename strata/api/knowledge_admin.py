@@ -58,6 +58,11 @@ def register_knowledge_admin_routes(
         )
         return {"status": "ok", "pages": pages}
 
+    @app.get("/admin/knowledge/maintenance")
+    async def get_knowledge_maintenance(storage=Depends(get_storage)):
+        report = knowledge_page_store_cls(storage).get_maintenance_report()
+        return {"status": "ok", "report": report}
+
     @app.get("/admin/knowledge/pages/{slug}/metadata")
     async def get_knowledge_page_metadata(slug: str, audience: str = "user", storage=Depends(get_storage)):
         page = knowledge_page_store_cls(storage).get_page_metadata(slug, audience=audience)
@@ -134,6 +139,7 @@ def register_knowledge_admin_routes(
         {
             "compact_knowledge_base": compact_knowledge_base,
             "list_knowledge_pages": list_knowledge_pages,
+            "get_knowledge_maintenance": get_knowledge_maintenance,
             "get_knowledge_page_metadata": get_knowledge_page_metadata,
             "get_knowledge_page": get_knowledge_page,
             "get_knowledge_page_section": get_knowledge_page_section,

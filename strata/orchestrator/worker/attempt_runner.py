@@ -26,7 +26,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
 
     try:
         if task.type == TaskType.RESEARCH:
-            await _run_research(task, storage, model_adapter)
+            await _run_research(task, storage, model_adapter, enqueue_fn)
         elif task.type == TaskType.DECOMP:
             await _run_decomposition(task, storage, model_adapter, enqueue_fn)
         elif task.type == TaskType.IMPL:
@@ -60,8 +60,8 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         storage.rollback()
         return False, e, attempt
 
-async def _run_research(task, storage, model_adapter):
-    research = ResearchModule(model_adapter, storage)
+async def _run_research(task, storage, model_adapter, enqueue_fn):
+    research = ResearchModule(model_adapter, storage, enqueue_task=enqueue_fn)
     report = await research.conduct_research(
         task_description=task.description,
         repo_path=task.repo_path,

@@ -113,6 +113,23 @@ def test_enqueue_update_task_marks_knowledge_operation(tmp_path, monkeypatch):
     assert task.constraints["target_scope"] == "web"
 
 
+def test_enqueue_update_task_supports_maintenance_operations(tmp_path, monkeypatch):
+    monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
+    storage = DummyStorage()
+    store = knowledge_pages.KnowledgePageStore(storage)
+
+    task = store.enqueue_update_task(
+        slug="constitution",
+        reason="[merge] overlapping page detected",
+        target_scope="codebase",
+        operation="knowledge_merge",
+        related_slugs=["system-constitution"],
+    )
+
+    assert task.constraints["knowledge_operation"] == "knowledge_merge"
+    assert task.constraints["related_knowledge_slugs"] == ["system-constitution"]
+
+
 def test_user_access_respects_visibility_and_redaction(tmp_path, monkeypatch):
     monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
     storage = DummyStorage()

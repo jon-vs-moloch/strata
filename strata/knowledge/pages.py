@@ -265,6 +265,12 @@ class KnowledgePageStore:
                 pages.append(page)
         return self._write_maintenance_report(pages)
 
+    def get_maintenance_report(self) -> Dict[str, Any]:
+        report = self.storage.parameters.peek_parameter(KNOWLEDGE_PAGE_MAINTENANCE_REPORT_KEY, default_value={}) or {}
+        if not isinstance(report, dict):
+            return {}
+        return report
+
     def delete_page(self, slug: str) -> bool:
         normalized_slug = slugify_page_title(slug)
         existing = self._load_page_payload(normalized_slug)
@@ -431,6 +437,8 @@ class KnowledgePageStore:
         target_scope: str = "codebase",
         evidence: Optional[List[str]] = None,
         domain: Optional[str] = None,
+        operation: str = "update_page",
+        related_slugs: Optional[List[str]] = None,
     ):
         normalized_slug = slugify_page_title(slug)
         page = self.get_page(normalized_slug)
@@ -444,6 +452,9 @@ class KnowledgePageStore:
             "First inspect existing knowledge metadata/body and provenance, then gather only the missing or stale evidence.\n"
             "Produce an updated synthesized page with summary, headings, related pages, and provenance candidates."
         )
+        normalized_related = [slugify_page_title(item) for item in (related_slugs or []) if str(item).strip()]
+        if normalized_related:
+            description += "\nRelated pages:\n" + "\n".join(f"- {item}" for item in normalized_related[:10])
         if evidence:
             description += "\nEvidence hints:\n" + "\n".join(f"- {hint}" for hint in evidence[:10])
         task = self.storage.tasks.create(
@@ -453,11 +464,12 @@ class KnowledgePageStore:
             state=TaskState.PENDING,
             constraints={
                 "target_scope": target_scope,
-                "knowledge_operation": "update_page",
+                "knowledge_operation": operation,
                 "knowledge_slug": normalized_slug,
                 "knowledge_domain": resolved_domain,
                 "reason": reason,
                 "evidence_hints": evidence or [],
+                "related_knowledge_slugs": normalized_related,
             },
         )
         task.type = TaskType.RESEARCH
