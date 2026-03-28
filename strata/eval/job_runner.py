@@ -30,6 +30,7 @@ from strata.experimental.artifact_pipeline import (
 from strata.experimental.trace_review import (
     append_trace_review_to_task,
     build_trace_summary,
+    emit_trace_review_attention_signal,
     review_trace,
 )
 from strata.knowledge.pages import KnowledgePageStore
@@ -400,8 +401,18 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                     append_trace_review_to_task(storage, task_id=task_id, review=review)
             session_review = None
             session_id = str(payload.get("session_id") or "").strip()
+            derived_session_id = session_id or str((trace_summary.get("task") or {}).get("session_id") or "").strip()
             if trace_kind == "session_trace" and session_id:
                 session_review = append_trace_review_to_session(storage, session_id=session_id, review=review)
+            attention_signal = emit_trace_review_attention_signal(
+                storage,
+                trace_kind=trace_kind,
+                trace_summary=trace_summary,
+                review=review,
+                reviewer_tier=review.get("reviewer_tier") or reviewer_tier,
+                session_id=derived_session_id or None,
+                task_id=payload.get("task_id"),
+            )
             queued_followups = []
             if bool(payload.get("emit_followups", True)):
                 queued_followups = enqueue_review_followups(
@@ -423,6 +434,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 "associated_task_ids": target_task_ids,
                 "timeline_artifact": artifacts["timeline_artifact"],
                 "audit_artifact": artifacts["audit_artifact"],
+                "attention_signal": attention_signal,
                 "session_review": session_review,
                 "queued_followup_task_ids": queued_followups,
             }

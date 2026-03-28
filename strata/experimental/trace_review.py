@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from strata.api.message_feedback import list_message_feedback_events
+from strata.feedback.signals import register_feedback_signal
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 from strata.storage.models import MessageModel, TaskModel
 
@@ -453,3 +454,132 @@ def append_trace_review_to_task(storage, *, task_id: str, review: Dict[str, Any]
     constraints["trace_reviews"] = reviews[-max(1, limit):]
     task.constraints = constraints
     return True
+
+
+def emit_trace_review_attention_signal(
+    storage,
+    *,
+    trace_kind: str,
+    trace_summary: Dict[str, Any],
+    review: Dict[str, Any],
+    reviewer_tier: str,
+    session_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    source_actor: str = "trace_reviewer",
+) -> Optional[Dict[str, Any]]:
+    normalized_kind = str(trace_kind or "generic_trace").strip() or "generic_trace"
+    normalized_status = str(review.get("status") or "").strip().lower()
+    normalized_assessment = str(review.get("overall_assessment") or "").strip().lower()
+    confidence = float(review.get("confidence") or 0.0)
+    interventions = list(review.get("targeted_interventions") or [])
+    primary_failure_mode = str(
+        review.get("primary_failure_mode") or review.get("failure_family") or "unknown"
+    ).strip()
+    summary = str(review.get("summary") or "").strip()
+
+    signal_kind: Optional[str] = None
+    signal_value = normalized_assessment or primary_failure_mode or normalized_kind
+    expected_outcome = "healthy_trace"
+    observed_outcome = signal_value
+
+    if normalized_status != "ok" or normalized_assessment == "review_unavailable":
+        signal_kind = "unexpected_failure"
+        expected_outcome = "review_available"
+        observed_outcome = normalized_assessment or "review_unavailable"
+    elif normalized_assessment in {"needs_intervention", "misaligned", "blocked", "failed", "degraded"}:
+        signal_kind = "surprise"
+    elif interventions and confidence >= 0.6:
+        signal_kind = "importance"
+        expected_outcome = "stable_trace"
+        observed_outcome = "intervention_opportunity"
+
+    if not signal_kind:
+        return None
+
+    source_id = (
+        str(task_id or "").strip()
+        or str(session_id or "").strip()
+        or str(review.get("timeline_artifact_id") or "").strip()
+        or normalized_kind
+    )
+    source_type = (
+        "task_review"
+        if normalized_kind == "task_trace"
+        else "session_review"
+        if normalized_kind == "session_trace"
+        else "eval_review"
+        if normalized_kind == "eval_trace"
+        else "trace_review"
+    )
+    preview = summary or f"{normalized_kind} review: {primary_failure_mode}"
+    note = (
+        f"{normalized_kind} reviewed by {str(reviewer_tier or 'strong').lower()}; "
+        f"assessment={normalized_assessment or 'unknown'}; "
+        f"failure_mode={primary_failure_mode or 'unknown'}; "
+        f"interventions={len(interventions)}."
+    )
+
+    return register_feedback_signal(
+        storage,
+        source_type=source_type,
+        source_id=source_id,
+        signal_kind=signal_kind,
+        signal_value=signal_value,
+        source_actor=source_actor,
+        session_id=str(session_id or "").strip(),
+        source_preview=preview,
+        note=note,
+        expected_outcome=expected_outcome,
+        observed_outcome=observed_outcome,
+        metadata={
+            "trace_kind": normalized_kind,
+            "reviewer_tier": str(reviewer_tier or "strong").strip().lower(),
+            "overall_assessment": normalized_assessment,
+            "primary_failure_mode": primary_failure_mode,
+            "confidence": confidence,
+            "targeted_intervention_count": len(interventions),
+            "domains_affected": list(review.get("domains_affected") or []),
+            "timeline_artifact_id": review.get("timeline_artifact_id"),
+            "audit_artifact_id": review.get("audit_artifact_id"),
+            "trace_subject_id": (
+                str(task_id or "").strip()
+                or str(session_id or "").strip()
+                or str((trace_summary or {}).get("candidate_change_id") or "").strip()
+            ),
+        },
+    )
+
+
+def emit_recursive_audit_attention_signal(
+    storage,
+    *,
+    artifact_type: str,
+    artifact_id: str,
+    audit_artifact: Dict[str, Any],
+    source_actor: str = "audit_registry",
+) -> Optional[Dict[str, Any]]:
+    summary_verdict = dict(audit_artifact.get("summary_verdict") or {})
+    verdict_status = str(summary_verdict.get("status") or "pass").strip().lower() or "pass"
+    if verdict_status == "pass":
+        return None
+
+    signal_kind = "unexpected_failure" if verdict_status == "fail" else "surprise"
+    return register_feedback_signal(
+        storage,
+        source_type="audit",
+        source_id=str(audit_artifact.get("artifact_id") or artifact_id or "audit").strip(),
+        signal_kind=signal_kind,
+        signal_value=verdict_status,
+        source_actor=source_actor,
+        session_id="",
+        source_preview=str(audit_artifact.get("rationale") or f"Recursive audit of {artifact_type}:{artifact_id}").strip(),
+        note=f"Recursive audit of {artifact_type}:{artifact_id} produced summary verdict '{verdict_status}'.",
+        expected_outcome="pass",
+        observed_outcome=verdict_status,
+        metadata={
+            "artifact_type": str(artifact_type or "").strip().lower(),
+            "artifact_id": str(artifact_id or "").strip(),
+            "audit_artifact_id": audit_artifact.get("artifact_id"),
+            "summary_verdict": summary_verdict,
+        },
+    )

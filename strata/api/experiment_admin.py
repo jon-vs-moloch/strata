@@ -33,7 +33,13 @@ from strata.experimental.artifact_pipeline import (
     enqueue_review_followups,
     persist_trace_review_artifacts,
 )
-from strata.experimental.trace_review import append_trace_review_to_task, build_trace_summary, review_trace
+from strata.experimental.trace_review import (
+    append_trace_review_to_task,
+    build_trace_summary,
+    emit_recursive_audit_attention_signal,
+    emit_trace_review_attention_signal,
+    review_trace,
+)
 from strata.experimental.audit_registry import audit_stored_artifact
 from strata.specs.bootstrap import get_active_spec_record
 from strata.experimental.calibration import JUDGE_TRUST_KEY
@@ -593,8 +599,14 @@ def register_experiment_routes(
                 spec_version_used=active_spec.get("version"),
                 rationale=f"Recursive audit requested for stored {artifact_type} artifact.",
             )
+            attention_signal = emit_recursive_audit_attention_signal(
+                storage,
+                artifact_type=artifact_type,
+                artifact_id=artifact_id,
+                audit_artifact=audit_artifact,
+            )
             storage.commit()
-            return {"status": "ok", "audit_artifact": audit_artifact}
+            return {"status": "ok", "audit_artifact": audit_artifact, "attention_signal": attention_signal}
         trace_kind = str(payload.get("trace_kind") or "generic_trace").strip() or "generic_trace"
         reviewer_tier = str(payload.get("reviewer_tier") or "strong").strip().lower() or "strong"
         if payload.get("queue"):
@@ -648,9 +660,19 @@ def register_experiment_routes(
         review["timeline_artifact_id"] = timeline_artifact.get("artifact_id")
         review["audit_artifact_id"] = audit_artifact.get("artifact_id")
         session_id = str(payload.get("session_id") or "").strip()
+        derived_session_id = session_id or str((trace_summary.get("task") or {}).get("session_id") or "").strip()
         session_review = None
         if trace_kind == "session_trace" and session_id:
             session_review = append_trace_review_to_session(storage, session_id=session_id, review=review)
+        attention_signal = emit_trace_review_attention_signal(
+            storage,
+            trace_kind=trace_kind,
+            trace_summary=trace_summary,
+            review=review,
+            reviewer_tier=review.get("reviewer_tier") or reviewer_tier,
+            session_id=derived_session_id or None,
+            task_id=payload.get("task_id"),
+        )
         queued_followup_task_ids = []
         if bool(payload.get("emit_followups", True)):
             queued_followup_task_ids = enqueue_review_followups(
@@ -678,6 +700,7 @@ def register_experiment_routes(
             "review": review,
             "timeline_artifact": timeline_artifact,
             "audit_artifact": audit_artifact,
+            "attention_signal": attention_signal,
             "session_review": session_review,
             "queued_followup_task_ids": queued_followup_task_ids,
         }
