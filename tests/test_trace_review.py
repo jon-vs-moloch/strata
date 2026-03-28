@@ -8,7 +8,7 @@ from strata.api import message_feedback
 from strata.eval.job_runner import run_eval_job_task
 from strata.experimental.audit_registry import get_audit_artifact, get_timeline_artifact
 from strata.experimental.artifact_pipeline import append_trace_review_to_session
-from strata.feedback.signals import list_feedback_signals
+from strata.feedback.signals import list_feedback_signals, register_feedback_signal
 from strata.experimental.trace_review import build_task_trace_summary, review_trace
 from strata.storage.models import Base, AttemptOutcome, TaskState, TaskType
 from strata.storage.services.main import StorageManager
@@ -328,3 +328,58 @@ def test_review_endpoint_emits_attention_signal_for_warn_recursive_audit():
     assert result["status"] == "ok"
     assert result["attention_signal"]["signal_kind"] == "surprise"
     assert result["attention_signal"]["source_type"] == "audit"
+
+
+def test_review_signal_endpoint_treats_signal_as_auditable_trace():
+    storage = make_storage()
+    signal = register_feedback_signal(
+        storage,
+        source_type="message",
+        source_id="msg_1",
+        signal_kind="surprise",
+        signal_value="unexpected thumbs_down",
+        source_actor="system",
+        session_id="trace-session",
+        source_preview="User disliked a greeting that the system expected to be welcome.",
+        expected_outcome="positive",
+        observed_outcome="negative",
+    )
+
+    async def fake_review_trace(*_args, **kwargs):
+        assert kwargs["trace_kind"] == "feedback_signal_trace"
+        assert kwargs["trace_summary"]["signal_id"] == signal["signal_id"]
+        return {
+            "status": "ok",
+            "trace_kind": "feedback_signal_trace",
+            "reviewer_tier": kwargs.get("reviewer_tier"),
+            "recorded_at": "2026-03-28T00:00:00+00:00",
+            "summary": "The system should inspect why the surprise fired.",
+            "overall_assessment": "needs_intervention",
+            "primary_failure_mode": "attention_miscalibration",
+            "targeted_interventions": [{"kind": "telemetry", "description": "Track greeting preference confidence."}],
+            "telemetry_to_watch": ["attention_false_positive_rate"],
+            "domains_affected": ["attention", "user_model"],
+            "confidence": 0.81,
+        }
+
+    import strata.api.experiment_admin as experiment_admin
+
+    original_review_trace = experiment_admin.review_trace
+    experiment_admin.review_trace = fake_review_trace
+    try:
+        result = asyncio.run(
+            api_main.review_trace_endpoint(
+                payload={
+                    "trace_kind": "feedback_signal_trace",
+                    "signal_id": signal["signal_id"],
+                    "reviewer_tier": "strong",
+                },
+                storage=storage,
+            )
+        )
+    finally:
+        experiment_admin.review_trace = original_review_trace
+
+    assert result["status"] == "ok"
+    assert result["review"]["primary_failure_mode"] == "attention_miscalibration"
+    assert result["attention_signal"]["source_type"] == "trace_review"

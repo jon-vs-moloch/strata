@@ -40,6 +40,19 @@ def list_feedback_signals(
     return signals[-safe_limit:]
 
 
+def get_feedback_signal(storage, signal_id: str) -> Optional[Dict[str, Any]]:
+    target = str(signal_id or "").strip()
+    if not target:
+        return None
+    rows = storage.parameters.peek_parameter(FEEDBACK_SIGNAL_INDEX_KEY, default_value=[]) or []
+    if not isinstance(rows, list):
+        rows = []
+    for row in reversed(rows):
+        if isinstance(row, dict) and str(row.get("signal_id") or "").strip() == target:
+            return dict(row)
+    return None
+
+
 def _append_feedback_signal(storage, signal: Dict[str, Any]) -> Dict[str, Any]:
     rows = storage.parameters.peek_parameter(FEEDBACK_SIGNAL_INDEX_KEY, default_value=[]) or []
     if not isinstance(rows, list):

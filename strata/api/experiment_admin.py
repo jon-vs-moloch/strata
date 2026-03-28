@@ -632,6 +632,7 @@ def register_experiment_routes(
             trace_payload=payload.get("trace_payload"),
             task_id=payload.get("task_id"),
             session_id=payload.get("session_id"),
+            signal_id=payload.get("signal_id"),
             candidate_change_id=payload.get("candidate_change_id"),
             baseline_change_id=payload.get("baseline_change_id"),
             benchmark_reports=payload.get("benchmark_reports"),
@@ -733,6 +734,39 @@ def register_experiment_routes(
             },
             storage=storage,
         )
+
+    @app.post("/admin/traces/review_signal")
+    async def review_feedback_signal(payload: Dict[str, Any], storage=Depends(get_storage)):
+        signal_id = str(payload.get("signal_id") or "").strip()
+        if not signal_id:
+            raise HTTPException(status_code=400, detail="signal_id field required")
+        return await review_trace_endpoint(
+            {
+                **payload,
+                "trace_kind": payload.get("trace_kind") or "feedback_signal_trace",
+                "signal_id": signal_id,
+            },
+            storage=storage,
+        )
+
+    @app.post("/admin/traces/audit_task")
+    async def audit_task_trace(payload: Dict[str, Any], storage=Depends(get_storage)):
+        return await review_task_trace({**payload, "audit_mode": "external"}, storage=storage)
+
+    @app.post("/admin/traces/audit_session")
+    async def audit_session_trace(payload: Dict[str, Any], storage=Depends(get_storage)):
+        return await review_session_trace({**payload, "audit_mode": "external"}, storage=storage)
+
+    @app.post("/admin/traces/audit_signal")
+    async def audit_feedback_signal(payload: Dict[str, Any], storage=Depends(get_storage)):
+        return await review_feedback_signal({**payload, "audit_mode": "internal"}, storage=storage)
+
+    @app.post("/admin/traces/reflect")
+    async def reflect_trace(payload: Dict[str, Any], storage=Depends(get_storage)):
+        normalized = dict(payload or {})
+        if normalized.get("signal_id"):
+            normalized["trace_kind"] = normalized.get("trace_kind") or "reflection_trace"
+        return await review_trace_endpoint({**normalized, "audit_mode": "internal"}, storage=storage)
 
     @app.post("/admin/predictions/run")
     async def run_prediction_review(payload: Dict[str, Any], storage=Depends(get_storage)):

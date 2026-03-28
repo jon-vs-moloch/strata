@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from strata.feedback.signals import list_feedback_signals, register_feedback_signal
+from strata.feedback.signals import get_feedback_signal, list_feedback_signals, register_feedback_signal
 
 
 class DummyParameterRepo:
@@ -52,3 +52,20 @@ def test_register_response_signal_is_listed_by_session():
     rows = list_feedback_signals(storage, session_id="strong:default")
     assert len(rows) == 1
     assert rows[0]["prioritization"]["priority"] == "review_soon"
+
+
+def test_get_feedback_signal_returns_matching_row():
+    storage = DummyStorage()
+    signal = register_feedback_signal(
+        storage,
+        source_type="session",
+        source_id="session-1",
+        signal_kind="surprise",
+        signal_value="unexpected dislike",
+        source_actor="system",
+        session_id="session-1",
+        source_preview="User disliked a greeting we expected to land well.",
+    )
+    loaded = get_feedback_signal(storage, signal["signal_id"])
+    assert loaded is not None
+    assert loaded["signal_id"] == signal["signal_id"]

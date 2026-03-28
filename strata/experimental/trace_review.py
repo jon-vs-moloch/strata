@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from strata.api.message_feedback import list_message_feedback_events
-from strata.feedback.signals import register_feedback_signal
+from strata.feedback.signals import get_feedback_signal, register_feedback_signal
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 from strata.storage.models import MessageModel, TaskModel
 
@@ -240,6 +240,33 @@ def build_session_trace_summary(
     }
 
 
+def build_feedback_signal_trace_summary(storage, *, signal_id: str) -> Dict[str, Any]:
+    signal = get_feedback_signal(storage, signal_id)
+    if not signal:
+        raise ValueError(f"Feedback signal not found: {signal_id}")
+    prioritization = dict(signal.get("prioritization") or {})
+    return {
+        "signal_id": signal.get("signal_id"),
+        "source_type": signal.get("source_type"),
+        "source_id": signal.get("source_id"),
+        "session_id": signal.get("session_id"),
+        "signal_kind": signal.get("signal_kind"),
+        "signal_value": signal.get("signal_value"),
+        "source_actor": signal.get("source_actor"),
+        "source_preview": _clip(signal.get("source_preview"), 320),
+        "note": _clip(signal.get("note"), 320),
+        "expected_outcome": signal.get("expected_outcome"),
+        "observed_outcome": signal.get("observed_outcome"),
+        "status": signal.get("status"),
+        "created_at": signal.get("created_at"),
+        "prioritization": prioritization,
+        "surprise_score": prioritization.get("surprise_score"),
+        "alignment_risk": prioritization.get("alignment_risk"),
+        "target_surface": prioritization.get("target_surface"),
+        "metadata": dict(signal.get("metadata") or {}),
+    }
+
+
 def build_trace_summary(
     *,
     trace_kind: str,
@@ -247,6 +274,7 @@ def build_trace_summary(
     trace_payload: Optional[Dict[str, Any]] = None,
     task_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    signal_id: Optional[str] = None,
     candidate_change_id: Optional[str] = None,
     baseline_change_id: Optional[str] = None,
     benchmark_reports: Optional[List[Dict[str, Any]]] = None,
@@ -275,6 +303,10 @@ def build_trace_summary(
         if storage is None or not session_id:
             raise ValueError("session_trace requires storage and session_id")
         return build_session_trace_summary(storage, session_id=session_id)
+    if normalized_kind in {"feedback_signal_trace", "signal_trace", "reflection_trace"}:
+        if storage is None or not signal_id:
+            raise ValueError(f"{normalized_kind} requires storage and signal_id")
+        return build_feedback_signal_trace_summary(storage, signal_id=signal_id)
     if normalized_kind == "generic_trace":
         return dict(trace_payload or {})
     raise ValueError(f"Unsupported trace_kind: {normalized_kind}")
@@ -303,6 +335,10 @@ def _trace_focus(trace_kind: str) -> str:
     if kind == "session_trace":
         return (
             "Focus on whether the conversation stayed aligned, asked the right questions, used tools or memory appropriately, and responded well to explicit user feedback such as reactions or correction signals."
+        )
+    if kind in {"feedback_signal_trace", "signal_trace", "reflection_trace"}:
+        return (
+            "Focus on whether this internal attention or surprise signal was well-calibrated, whether the system was right to notice it, and what model, policy, or expectation should change in response."
         )
     if kind == "eval_trace":
         return (
