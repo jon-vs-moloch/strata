@@ -95,6 +95,18 @@ const formatMessageForDisplay = (content) => {
   };
 };
 
+const summarizeBootstrapReasons = (items = []) => {
+  const counts = new Map();
+  items.forEach((item) => {
+    const key = String(item?.reason || item?.resolution?.decision || 'unknown');
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([reason, count]) => `${reason.replace(/_/g, ' ')} ×${count}`);
+};
+
 
 // ─── Settings Modal ────────────────────────────────────────────────────────────
 const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
@@ -694,6 +706,8 @@ function App() {
   const [retentionSnapshot, setRetentionSnapshot] = useState(null);
   const [variantRatingsSnapshot, setVariantRatingsSnapshot] = useState(null);
   const [predictionTrustSnapshot, setPredictionTrustSnapshot] = useState(null);
+  const [proposalConfigSnapshot, setProposalConfigSnapshot] = useState(null);
+  const [evalJobsSnapshot, setEvalJobsSnapshot] = useState([]);
   const [operatorNotice, setOperatorNotice] = useState('');
   const [showFinishedTasks, setShowFinishedTasks] = useState(false);
   const API = 'http://localhost:8000';
@@ -787,7 +801,7 @@ function App() {
     const gen = ++fetchGenRef.current;
 
     try {
-      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes] = await Promise.all([
+      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes, proposalConfigRes, evalJobsRes] = await Promise.all([
         axios.get(`${API}/tasks`),
         axios.get(`${API}/messages?session_id=${sessionId}`),
         axios.get(`${API}/sessions`),
@@ -801,7 +815,9 @@ function App() {
         axios.get(`${API}/admin/knowledge/pages?limit=6&audience=operator`),
         axios.get(`${API}/admin/storage/retention`),
         activeNav === 'dashboard' ? axios.get(`${API}/admin/variants/ratings`) : Promise.resolve({ data: null }),
-        activeNav === 'dashboard' ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null })
+        activeNav === 'dashboard' ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null }),
+        activeNav === 'dashboard' ? axios.get(`${API}/admin/evals/proposal_config`) : Promise.resolve({ data: null }),
+        activeNav === 'dashboard' ? axios.get(`${API}/admin/evals/jobs`) : Promise.resolve({ data: null })
       ]);
 
       // If a newer fetch was launched while we were awaiting, discard this result
@@ -834,6 +850,8 @@ function App() {
       setRetentionSnapshot(retentionRes.data || null);
       setVariantRatingsSnapshot(variantRatingsRes?.data?.ratings || null);
       setPredictionTrustSnapshot(predictionTrustRes?.data?.trust || null);
+      setProposalConfigSnapshot(proposalConfigRes?.data?.config || null);
+      setEvalJobsSnapshot(evalJobsRes?.data?.jobs || []);
       setApiStatus('ok');
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
@@ -1002,7 +1020,7 @@ function App() {
   )), [API, runOperatorAction]);
 
   const handleQueueBootstrap = useCallback(() => runOperatorAction('Bootstrap cycle', () => (
-    axios.post(`${API}/admin/experiments/bootstrap_cycle`, { queue: true, proposer_tiers: ['strong'], run_count: 1, auto_promote: true })
+    axios.post(`${API}/admin/experiments/bootstrap_cycle`, { queue: true, auto_promote: true })
   )), [API, runOperatorAction]);
 
   const handleQueueSampleTick = useCallback(() => runOperatorAction('Sampled eval', () => (
@@ -1327,6 +1345,8 @@ function App() {
             retentionSnapshot={retentionSnapshot}
             variantRatingsSnapshot={variantRatingsSnapshot}
             predictionTrustSnapshot={predictionTrustSnapshot}
+            proposalConfigSnapshot={proposalConfigSnapshot}
+            evalJobsSnapshot={evalJobsSnapshot}
             operatorNotice={operatorNotice}
             onRunRetention={handleRunRetention}
             onCompactKnowledge={handleCompactKnowledge}
@@ -1874,6 +1894,8 @@ const DashboardView = ({
   retentionSnapshot,
   variantRatingsSnapshot,
   predictionTrustSnapshot,
+  proposalConfigSnapshot,
+  evalJobsSnapshot,
   operatorNotice,
   onRunRetention,
   onCompactKnowledge,
@@ -1886,6 +1908,12 @@ const DashboardView = ({
     .sort((a, b) => (b[1]?.rating || 0) - (a[1]?.rating || 0))
     .slice(0, 5);
   const strongTrust = predictionTrustSnapshot?.by_tier?.strong;
+  const bootstrapPolicy = proposalConfigSnapshot?.bootstrap || {};
+  const bootstrapInference = proposalConfigSnapshot?.inference || {};
+  const bootstrapResolution = proposalConfigSnapshot?.resolution || {};
+  const recentBootstrapJobs = (evalJobsSnapshot || [])
+    .filter((job) => job?.system_job?.kind === 'bootstrap_cycle')
+    .slice(0, 5);
 
   return (
   <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1991,6 +2019,35 @@ const DashboardView = ({
       </div>
     </DashboardPanel>
 
+    <DashboardPanel title="BOOTSTRAP POLICY">
+      <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', fontSize: '12px', alignItems: 'start' }}>
+        <span style={{ color: '#8d8ea1' }}>Continuous tiers</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {(bootstrapPolicy.continuous_proposer_tiers || []).join(' + ') || '—'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Default tiers</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {(bootstrapPolicy.default_proposer_tiers || []).join(' + ') || '—'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Run count</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          continuous {bootstrapPolicy.continuous_run_count ?? '—'} · default {bootstrapPolicy.default_run_count ?? '—'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Proposal temps</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          weak {bootstrapInference?.weak?.temperature ?? '—'} · strong {bootstrapInference?.strong?.temperature ?? '—'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Novelty retry</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {bootstrapInference.novelty_retry_count ?? '—'} retry · +{bootstrapInference.novelty_temperature_step ?? '—'} temp · cap {bootstrapInference.novelty_max_temperature ?? '—'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Resolution</span>
+        <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+          {bootstrapResolution.use_llm_for_ambiguous ? 'hybrid' : 'deterministic'} · {bootstrapResolution.adjudicator_tier || '—'} judge · {bootstrapResolution.vote_count ?? '—'} vote
+        </span>
+      </div>
+    </DashboardPanel>
+
     <DashboardPanel title="SUPERVISION">
       <div style={{ fontSize: '12px', color: '#a9aaba' }}>
         {routingSummary?.supervision?.active_jobs?.length
@@ -2006,6 +2063,49 @@ const DashboardView = ({
           <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>{job.state}</span>
         </div>
       ))}
+    </DashboardPanel>
+
+    <DashboardPanel title="BOOTSTRAP RESOLUTION">
+      {recentBootstrapJobs.length ? recentBootstrapJobs.map((job) => {
+        const result = job?.system_job_result?.result || {};
+        const skipped = result?.skipped || [];
+        const evaluated = result?.evaluated || [];
+        const promoted = result?.promoted || [];
+        const reasonSummary = summarizeBootstrapReasons(skipped);
+        return (
+          <div key={job.task_id} style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '12px' }}>
+              <span style={{ color: '#e7e8ef', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {job.title}
+              </span>
+              <span style={{ color: '#8d8ea1', fontFamily: "'JetBrains Mono', monospace" }}>
+                {job.state}
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontSize: '11px', color: '#a9aaba' }}>
+              <span>tiers {(job?.system_job?.payload?.proposer_tiers || []).join(' + ') || '—'}</span>
+              <span>evaluated {evaluated.length}</span>
+              <span>skipped {skipped.length}</span>
+              <span>promoted {promoted.length}</span>
+            </div>
+            {!!reasonSummary.length && (
+              <div style={{ fontSize: '11px', color: '#c7c8d6', lineHeight: 1.6 }}>
+                {reasonSummary.join(' · ')}
+              </div>
+            )}
+            {evaluated[0]?.resolution?.decision && (
+              <div style={{ fontSize: '11px', color: '#8d8ea1' }}>
+                Latest evaluation path: {evaluated[0].resolution.decision.replace(/_/g, ' ')}
+              </div>
+            )}
+            <div style={{ fontSize: '11px', color: '#77798b' }}>
+              {job.updated_at ? formatAbsoluteWithRelative(job.updated_at) : '—'}
+            </div>
+          </div>
+        );
+      }) : (
+        <div style={{ fontSize: '12px', color: '#666' }}>No recent bootstrap resolution records.</div>
+      )}
     </DashboardPanel>
 
     <DashboardPanel title="CONTEXT">
