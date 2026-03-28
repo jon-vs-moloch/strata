@@ -214,35 +214,41 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 if not resolution.get("should_evaluate", False):
                     skipped.append({"proposal": proposal, "reason": resolution.get("decision"), "resolution": resolution})
                     continue
+                proposal_to_evaluate = dict(resolution.get("proposal") or proposal)
+                proposal_signature = eval_override_signature(proposal_to_evaluate["eval_harness_config_override"])
+                if proposal_signature in recent_signatures or proposal_signature in seen_signatures:
+                    skipped.append({"proposal": proposal_to_evaluate, "reason": "merged_duplicate_signature", "resolution": resolution})
+                    continue
                 seen_signatures.add(proposal_signature)
                 seen_candidates.append(
                     {
-                        "candidate_change_id": proposal.get("candidate_change_id"),
-                        "proposer_tier": proposal.get("proposer_tier"),
-                        "rationale": proposal.get("rationale"),
-                        "expected_gain": proposal.get("expected_gain"),
-                        "eval_harness_config_override": canonical_eval_override(proposal.get("eval_harness_config_override")),
+                        "candidate_change_id": proposal_to_evaluate.get("candidate_change_id"),
+                        "proposer_tier": proposal_to_evaluate.get("proposer_tier"),
+                        "rationale": proposal_to_evaluate.get("rationale"),
+                        "expected_gain": proposal_to_evaluate.get("expected_gain"),
+                        "eval_harness_config_override": canonical_eval_override(proposal_to_evaluate.get("eval_harness_config_override")),
                     }
                 )
                 experiment_result = await runner.run_full_eval_gate(
-                    proposal["candidate_change_id"],
+                    proposal_to_evaluate["candidate_change_id"],
                     api_url=str(payload.get("api_url") or "http://127.0.0.1:8000"),
                     baseline_change_id=baseline_change_id,
                     suite_name=suite_name,
                     run_count=run_count,
-                    eval_harness_config_override=proposal["eval_harness_config_override"],
+                    eval_harness_config_override=proposal_to_evaluate["eval_harness_config_override"],
                     proposal_metadata={
-                        "proposer_tier": proposal["proposer_tier"],
-                        "rationale": proposal["rationale"],
-                        "expected_gain": proposal["expected_gain"],
+                        "proposer_tier": proposal_to_evaluate["proposer_tier"],
+                        "rationale": proposal_to_evaluate["rationale"],
+                        "expected_gain": proposal_to_evaluate["expected_gain"],
                         "source": "bootstrap_cycle_queue",
+                        "resolution": resolution,
                     },
                     source_task_id=task.task_id,
                     associated_task_ids=[task.task_id, *(payload.get("associated_task_ids") or [])],
                 )
-                evaluated.append({"proposal": proposal, "result": experiment_result.model_dump()})
+                evaluated.append({"proposal": proposal_to_evaluate, "result": experiment_result.model_dump(), "resolution": resolution})
                 if auto_promote and experiment_result.recommendation == "promote":
-                    promoted.append(_apply_experiment_promotion(storage, proposal["candidate_change_id"], force=False))
+                    promoted.append(_apply_experiment_promotion(storage, proposal_to_evaluate["candidate_change_id"], force=False))
 
             result = {
                 "current_eval_harness_config": current_config,

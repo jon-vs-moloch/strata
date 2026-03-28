@@ -570,6 +570,140 @@ Use the deterministic preflight as strong evidence. Prefer merge/same-family out
     }
 
 
+def _merge_context_files(left: list[str], right: list[str]) -> list[str]:
+    merged: list[str] = []
+    for path in [*(left or []), *(right or [])]:
+        normalized = str(path or "").strip()
+        if normalized and normalized not in merged:
+            merged.append(normalized)
+    return merged
+
+
+def _deterministic_merged_eval_proposal(
+    proposal: Dict[str, Any],
+    existing_candidate: Dict[str, Any],
+    current_config: Dict[str, Any],
+    *,
+    merge_strategy: str = "",
+) -> Dict[str, Any]:
+    proposal_override = canonical_eval_override(proposal.get("eval_harness_config_override"))
+    existing_override = canonical_eval_override(existing_candidate.get("eval_harness_config_override"))
+    proposal_prompt = str(proposal_override.get("system_prompt") or "")
+    existing_prompt = str(existing_override.get("system_prompt") or "")
+    merged_prompt = proposal_prompt if len(proposal_prompt) >= len(existing_prompt) else existing_prompt
+    merged_context = _merge_context_files(
+        existing_override.get("context_files") or current_config.get("context_files") or [],
+        proposal_override.get("context_files") or current_config.get("context_files") or [],
+    )
+    rationale_parts = [
+        str(existing_candidate.get("rationale") or "").strip(),
+        str(proposal.get("rationale") or "").strip(),
+    ]
+    expected_gain_parts = [
+        str(existing_candidate.get("expected_gain") or "").strip(),
+        str(proposal.get("expected_gain") or "").strip(),
+    ]
+    merged_rationale = " ".join(part for part in rationale_parts if part).strip() or "Merged duplicate-family harness proposals into one synthesized candidate."
+    if merge_strategy:
+        merged_rationale += f" Merge strategy: {merge_strategy.strip()}"
+    merged_expected_gain = " + ".join(part for part in expected_gain_parts if part) or "combine the strongest gains from both related proposals"
+    return {
+        "candidate_suffix": "merged_eval_mutation",
+        "system_prompt": merged_prompt,
+        "context_files": merged_context,
+        "rationale": merged_rationale,
+        "expected_gain": merged_expected_gain,
+    }
+
+
+async def synthesize_merged_eval_proposal(
+    proposal: Dict[str, Any],
+    existing_candidate: Dict[str, Any],
+    current_config: Dict[str, Any],
+    *,
+    proposal_config: Optional[Dict[str, Any]],
+    model_adapter_factory,
+    merge_strategy: str = "",
+) -> Dict[str, Any]:
+    proposal_config = normalize_eval_proposal_config(proposal_config)
+    resolution_config = dict(proposal_config.get("resolution") or {})
+    adjudicator_tier = str(resolution_config.get("adjudicator_tier", "strong") or "strong")
+
+    from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+
+    adapter = model_adapter_factory()
+    if adjudicator_tier == "weak":
+        adapter.bind_execution_context(WeakExecutionContext(run_id=f"proposal_merge_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+    else:
+        adapter.bind_execution_context(StrongExecutionContext(run_id=f"proposal_merge_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+
+    proposal_override = canonical_eval_override(proposal.get("eval_harness_config_override"))
+    existing_override = canonical_eval_override(existing_candidate.get("eval_harness_config_override"))
+    deterministic_merge = _deterministic_merged_eval_proposal(
+        proposal,
+        existing_candidate,
+        current_config,
+        merge_strategy=merge_strategy,
+    )
+    merge_prompt = f"""
+You are synthesizing a single merged Strata eval-harness mutation from two overlapping proposals.
+Return only JSON with this schema:
+{{
+  "candidate_suffix": "short_slug_like_name",
+  "system_prompt": "full replacement system prompt",
+  "context_files": [".knowledge/specs/project_spec.md", ".knowledge/specs/constitution.md", "docs/spec/eval-brief.md"],
+  "rationale": "why the merged proposal is better than either duplicate alone",
+  "expected_gain": "what telemetry should improve"
+}}
+
+Current harness config:
+{json.dumps(canonical_eval_override(current_config), indent=2)}
+
+Existing candidate:
+{json.dumps({
+    "candidate_change_id": existing_candidate.get("candidate_change_id"),
+    "override": existing_override,
+    "rationale": existing_candidate.get("rationale"),
+    "expected_gain": existing_candidate.get("expected_gain"),
+}, indent=2)}
+
+New proposal:
+{json.dumps({
+    "candidate_change_id": proposal.get("candidate_change_id"),
+    "override": proposal_override,
+    "rationale": proposal.get("rationale"),
+    "expected_gain": proposal.get("expected_gain"),
+}, indent=2)}
+
+Suggested merge strategy:
+{merge_strategy or "Unify the overlapping proposals into one stronger candidate without duplicating intent."}
+
+Deterministic fallback merge:
+{json.dumps(deterministic_merge, indent=2)}
+""".strip()
+    response = await adapter.chat([{"role": "user", "content": merge_prompt}], temperature=0.0)
+    raw_content = response.get("content", "")
+    try:
+        merged_payload = extract_json_object(raw_content)
+    except Exception:
+        merged_payload = deterministic_merge
+        merged_payload["parse_error"] = str(raw_content or "")[:2000]
+    merged = _normalize_eval_candidate(
+        "merged",
+        merged_payload,
+        current_config,
+        metadata={
+            "merge_of": [
+                existing_candidate.get("candidate_change_id"),
+                proposal.get("candidate_change_id"),
+            ],
+            "merge_strategy": merge_strategy,
+            "synthesized": True,
+        },
+    )
+    return merged
+
+
 async def resolve_eval_proposal_against_history(
     proposal: Dict[str, Any],
     *,
@@ -622,13 +756,24 @@ async def resolve_eval_proposal_against_history(
             model_adapter_factory=model_adapter_factory,
         )
         final_decision = str(adjudication.get("decision") or "keep_both_distinct")
+        merged_proposal = None
+        if final_decision == "merge_with_existing":
+            merged_proposal = await synthesize_merged_eval_proposal(
+                proposal,
+                best_match,
+                current_config,
+                proposal_config=proposal_config,
+                model_adapter_factory=model_adapter_factory,
+                merge_strategy=str(adjudication.get("merge_strategy") or ""),
+            )
         return {
             "decision": final_decision,
-            "should_evaluate": final_decision in {"supersedes_existing", "keep_both_distinct"},
+            "should_evaluate": final_decision in {"supersedes_existing", "keep_both_distinct", "merge_with_existing"},
             "reason": "llm_adjudicated",
             "compared_candidate_change_id": best_match.get("candidate_change_id"),
             "preflight": best_preflight,
             "adjudication": adjudication,
+            "proposal": merged_proposal,
         }
     return {
         "decision": "keep_both_distinct",
