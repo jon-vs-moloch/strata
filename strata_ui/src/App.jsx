@@ -669,6 +669,10 @@ function App() {
   const [dashboard, setDashboard] = useState(null);
   const [loadedContext, setLoadedContext] = useState({ files: [], budget_tokens: 0 });
   const [routingSummary, setRoutingSummary] = useState(null);
+  const [specsSnapshot, setSpecsSnapshot] = useState(null);
+  const [specProposalSnapshot, setSpecProposalSnapshot] = useState([]);
+  const [knowledgePagesSnapshot, setKnowledgePagesSnapshot] = useState([]);
+  const [retentionSnapshot, setRetentionSnapshot] = useState(null);
   const [showFinishedTasks, setShowFinishedTasks] = useState(false);
   const API = 'http://localhost:8000';
 
@@ -761,7 +765,7 @@ function App() {
     const gen = ++fetchGenRef.current;
 
     try {
-      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes] = await Promise.all([
+      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes] = await Promise.all([
         axios.get(`${API}/tasks`),
         axios.get(`${API}/messages?session_id=${sessionId}`),
         axios.get(`${API}/sessions`),
@@ -769,7 +773,11 @@ function App() {
         axios.get(`${API}/admin/providers/telemetry`),
         axios.get(`${API}/admin/dashboard?limit=6`),
         axios.get(`${API}/admin/context/loaded`),
-        axios.get(`${API}/admin/routing`)
+        axios.get(`${API}/admin/routing`),
+        axios.get(`${API}/admin/specs`),
+        axios.get(`${API}/admin/spec_proposals?limit=6`),
+        axios.get(`${API}/admin/knowledge/pages?limit=6`),
+        axios.get(`${API}/admin/storage/retention`)
       ]);
 
       // If a newer fetch was launched while we were awaiting, discard this result
@@ -796,6 +804,10 @@ function App() {
       setDashboard(dashboardRes.data.dashboard || null);
       setLoadedContext(loadedContextRes.data.loaded || { files: [], budget_tokens: 0 });
       setRoutingSummary(routingRes.data.routing || null);
+      setSpecsSnapshot(specsRes.data.specs || null);
+      setSpecProposalSnapshot(specProposalsRes.data.proposals || []);
+      setKnowledgePagesSnapshot(knowledgePagesRes.data.pages || []);
+      setRetentionSnapshot(retentionRes.data || null);
       setApiStatus('ok');
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
@@ -1170,6 +1182,10 @@ function App() {
             loadedContext={loadedContext}
             tiers={tiers}
             routingSummary={routingSummary}
+            specsSnapshot={specsSnapshot}
+            specProposalSnapshot={specProposalSnapshot}
+            knowledgePagesSnapshot={knowledgePagesSnapshot}
+            retentionSnapshot={retentionSnapshot}
           />
         ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -1385,7 +1401,7 @@ function App() {
         {/* Telemetry — computed from live data */}
         <div style={{ padding: '16px 20px', borderTop: '1px solid rgba(255,255,255,0.05)', background: '#0c0c0e', flexShrink: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <span style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>SWARM TELEMETRY</span>
+            <span style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>FORMATION TELEMETRY</span>
             <Terminal size={12} style={{ color: '#333' }} />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
@@ -1528,7 +1544,7 @@ const Sparkline = ({ values, color = '#8257e5' }) => {
   );
 };
 
-const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers, routingSummary }) => (
+const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers, routingSummary, specsSnapshot, specProposalSnapshot, knowledgePagesSnapshot, retentionSnapshot }) => (
   <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
     <DashboardPanel title="SYSTEM STATUS">
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
@@ -1632,6 +1648,23 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
       </div>
     </DashboardPanel>
 
+    <DashboardPanel title="SUPERVISION">
+      <div style={{ fontSize: '12px', color: '#a9aaba' }}>
+        {routingSummary?.supervision?.active_jobs?.length
+          ? `${routingSummary.supervision.active_jobs.length} active supervision job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
+          : 'No active supervision jobs'}
+      </div>
+      {(routingSummary?.supervision?.active_jobs || []).map((job) => (
+        <div key={job.task_id} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 1.2fr) 100px 120px', gap: '12px', fontSize: '12px', alignItems: 'center' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {job.title}
+          </span>
+          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{job.kind}</span>
+          <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>{job.state}</span>
+        </div>
+      ))}
+    </DashboardPanel>
+
     <DashboardPanel title="CONTEXT">
       <div style={{ fontSize: '12px', color: '#a9aaba' }}>
         Loaded files: {loadedContext?.files?.length || 0} · budget {loadedContext?.budget_tokens || 0} tokens · recent load volume {dashboard?.context_pressure?.recent_estimated_tokens || 0}t
@@ -1665,6 +1698,66 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
           </span>
         </div>
       ))}
+    </DashboardPanel>
+
+    <DashboardPanel title="OPERATOR SURFACES">
+      <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: '10px', fontSize: '12px', alignItems: 'start' }}>
+        <span style={{ color: '#8d8ea1' }}>Constitution</span>
+        <span style={{ color: '#e7e8ef' }}>
+          {specsSnapshot?.constitution ? 'Loaded in durable state' : 'Unavailable'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Project spec</span>
+        <span style={{ color: '#e7e8ef' }}>
+          {specsSnapshot?.project_spec ? 'Loaded in durable state' : 'Unavailable'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Spec proposals</span>
+        <span style={{ color: '#e7e8ef' }}>
+          {specProposalSnapshot.length ? `${specProposalSnapshot.length} visible proposal records` : 'No recent proposal records'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Knowledge pages</span>
+        <span style={{ color: '#e7e8ef' }}>
+          {knowledgePagesSnapshot.length ? `${knowledgePagesSnapshot.length} recent knowledge pages visible` : 'No recent knowledge pages visible'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Retention</span>
+        <span style={{ color: '#e7e8ef' }}>
+          {retentionSnapshot?.runtime?.last_run_at ? `Last run ${formatAbsoluteWithRelative(retentionSnapshot.runtime.last_run_at)}` : 'No retention runtime snapshot'}
+        </span>
+        <span style={{ color: '#8d8ea1' }}>Worker controls</span>
+        <span style={{ color: '#e7e8ef' }}>
+          Visible in header: pause, resume, stop, reboot, routing, settings
+        </span>
+      </div>
+    </DashboardPanel>
+
+    <DashboardPanel title="RECENT KNOWLEDGE">
+      {(knowledgePagesSnapshot || []).slice(0, 6).map((page) => (
+        <div key={page.slug} style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1.1fr) 100px 120px', gap: '12px', fontSize: '12px', alignItems: 'center' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {page.title || page.slug}
+          </span>
+          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+            {page.domain || 'project'}
+          </span>
+          <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
+            {page.updated_at ? formatAbsoluteTime(page.updated_at) : '—'}
+          </span>
+        </div>
+      ))}
+      {!knowledgePagesSnapshot.length && <div style={{ fontSize: '12px', color: '#666' }}>No recent knowledge pages.</div>}
+    </DashboardPanel>
+
+    <DashboardPanel title="RETENTION">
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+        <TelemetryCell value={retentionSnapshot?.policy?.cooldown_minutes ?? '—'} label="COOLDOWN" />
+        <TelemetryCell value={retentionSnapshot?.policy?.message_keep_per_session ?? '—'} label="MSG KEEP" />
+        <TelemetryCell value={retentionSnapshot?.runtime?.last_summary?.metrics?.archived_metrics ?? '—'} label="ARCH METRICS" />
+        <TelemetryCell value={retentionSnapshot?.runtime?.last_summary?.attempts?.archived_attempts ?? '—'} label="ARCH ATTEMPTS" />
+      </div>
+      <div style={{ fontSize: '12px', color: '#a9aaba' }}>
+        {retentionSnapshot?.runtime?.last_run_at
+          ? `Last retention run ${formatAbsoluteWithRelative(retentionSnapshot.runtime.last_run_at)}`
+          : 'No retention run recorded'}
+      </div>
     </DashboardPanel>
   </div>
 );
