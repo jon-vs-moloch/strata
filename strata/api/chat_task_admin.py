@@ -16,12 +16,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, HTTPException
 from strata.api.chat_runtime import ChatRuntime
 from strata.api.message_feedback import (
+    annotate_feedback_event,
     build_feedback_event_message,
     get_message_feedback,
     list_message_feedback_events,
     should_trigger_feedback_distillation,
     toggle_message_reaction,
 )
+from strata.prioritization.feedback import classify_feedback_priority
 
 
 def register_chat_task_routes(
@@ -113,6 +115,20 @@ def register_chat_task_routes(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        prioritization = classify_feedback_priority(
+            message=message,
+            reaction=result.get("event", {}).get("reaction") or reaction,
+            action=result.get("action") or "added",
+            recent_events=list_message_feedback_events(storage, session_id=session_id, limit=20),
+        )
+        updated_event = annotate_feedback_event(
+            storage,
+            event_id=str(result.get("event", {}).get("event_id") or ""),
+            prioritization=prioritization,
+            distillation_status="pending_attention",
+        )
+        if updated_event:
+            result["event"] = updated_event
 
         feedback_event_message = build_feedback_event_message(
             action=result.get("action") or "added",
@@ -129,7 +145,7 @@ def register_chat_task_routes(
         if queue_eval_system_job and should_trigger_feedback_distillation(
             action=result.get("action") or "",
             reaction=result.get("event", {}).get("reaction") or reaction,
-        ):
+        ) and str(prioritization.get("priority") or "") in {"review_soon", "urgent"}:
             distillation_job = await queue_eval_system_job(
                 storage,
                 kind="trace_review",
@@ -142,6 +158,7 @@ def register_chat_task_routes(
                     "emit_followups": True,
                     "persist_to_task": False,
                     "spec_scope": "project",
+                    "prioritization": prioritization,
                 },
                 session_id=session_id,
                 dedupe_signature={
@@ -150,12 +167,30 @@ def register_chat_task_routes(
                     "session_id": session_id,
                 },
             )
+            updated_event = annotate_feedback_event(
+                storage,
+                event_id=str(result.get("event", {}).get("event_id") or ""),
+                prioritization=prioritization,
+                distillation_status="queued",
+            )
+            if updated_event:
+                result["event"] = updated_event
+        else:
+            updated_event = annotate_feedback_event(
+                storage,
+                event_id=str(result.get("event", {}).get("event_id") or ""),
+                prioritization=prioritization,
+                distillation_status="batched" if prioritization.get("should_batch") else "logged",
+            )
+            if updated_event:
+                result["event"] = updated_event
         await broadcast_event({"type": "message", "session_id": session_id})
         return {
             "status": "ok",
             "message_id": message_id,
             "feedback": result.get("feedback") or {},
             "event": result.get("event") or {},
+            "prioritization": prioritization,
             "distillation_job": distillation_job,
         }
 

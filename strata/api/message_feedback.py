@@ -78,6 +78,35 @@ def _append_feedback_index_event(storage, event: Dict[str, Any]) -> None:
     )
 
 
+def annotate_feedback_event(
+    storage,
+    *,
+    event_id: str,
+    prioritization: Optional[Dict[str, Any]] = None,
+    distillation_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    rows = storage.parameters.peek_parameter(MESSAGE_FEEDBACK_INDEX_KEY, default_value=[]) or []
+    if not isinstance(rows, list):
+        rows = []
+    updated_event: Dict[str, Any] = {}
+    next_rows = []
+    for row in rows:
+        item = dict(row) if isinstance(row, dict) else {}
+        if str(item.get("event_id") or "") == str(event_id):
+            if prioritization is not None:
+                item["prioritization"] = dict(prioritization)
+            if distillation_status is not None:
+                item["distillation_status"] = str(distillation_status)
+            updated_event = item
+        next_rows.append(item)
+    storage.parameters.set_parameter(
+        MESSAGE_FEEDBACK_INDEX_KEY,
+        next_rows[-MAX_MESSAGE_FEEDBACK_EVENTS:],
+        description="Recent durable chat-feedback events for downstream audit and distillation.",
+    )
+    return updated_event
+
+
 def list_message_feedback_events(storage, *, limit: int = 100, session_id: Optional[str] = None) -> list[Dict[str, Any]]:
     rows = storage.parameters.peek_parameter(MESSAGE_FEEDBACK_INDEX_KEY, default_value=[]) or []
     if not isinstance(rows, list):

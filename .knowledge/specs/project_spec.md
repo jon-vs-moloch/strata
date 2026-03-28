@@ -30,3 +30,4 @@ Operational guidance:
 - if the spec is missing detail, prefer a bounded spec-hardening task over claiming the project vision is unknown
 - when duplicate detection, routing, or mutation selection is ambiguous, prefer a hybrid pipeline: deterministic preflight first, then inference over the reduced ambiguity set
 - user-chat feedback should be gathered as durable evidence and eventually distilled into maintained user knowledge, agent knowledge, project intent, and other reviewable state rather than remaining an isolated UI-side signal
+- prioritization should be surprise-sensitive: expected successes and expected failures usually warrant less attention than outcomes that violate the system's current expectations, because unexpected outcomes are often the strongest evidence that the model of the user, task, or harness is incomplete
