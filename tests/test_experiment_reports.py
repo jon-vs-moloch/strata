@@ -8,6 +8,7 @@ from strata.api import experiment_runtime as experiment_runtime
 from strata.experimental.calibration import JUDGE_TRUST_KEY
 from strata.experimental.experiment_runner import (
     ExperimentRunner,
+    emit_eval_attention_signal,
     normalize_experiment_report,
     report_has_weak_gain,
 )
@@ -59,6 +60,9 @@ class FakeParameters:
 
     def peek_parameter(self, key, default_value=None):
         return self._values.get(key, default_value)
+
+    def set_parameter(self, key, value, description=""):
+        self._values[key] = value
 
 
 class FakeStorage:
@@ -362,3 +366,50 @@ def test_prediction_history_and_calibration_endpoints_surface_persisted_records(
     assert history["history"][0]["prediction_record"]["predicted_outcome"] == "improve"
     assert calibration["average_calibration_score"] > 0.0
     assert trust["trust"]["by_tier"]["strong"]["trust"] == 0.88
+
+
+def test_emit_eval_attention_signal_marks_unexpected_failure_as_urgent():
+    storage = FakeStorage([], {})
+    signal = emit_eval_attention_signal(
+        storage,
+        candidate_change_id="candidate_x",
+        evaluation_kind="full_eval:bootstrap_mcq_v1",
+        prediction_record={
+            "predicted_outcome": "improve",
+            "rationale": "Expected prompt tightening to help.",
+            "failure_family": "overfit",
+            "confidence": 0.82,
+        },
+        calibration_record={
+            "actual_outcome": "regress",
+            "calibration_score": 0.11,
+        },
+        recommendation="reject",
+        deltas={"structured_eval_harness_accuracy": -0.2},
+    )
+    assert signal["signal_kind"] == "unexpected_failure"
+    assert signal["prioritization"]["priority"] == "urgent"
+    assert storage.parameters.peek_parameter("feedback_signal:index", default_value=[])[0]["signal_id"] == signal["signal_id"]
+
+
+def test_emit_eval_attention_signal_marks_unexpected_success_as_urgent():
+    storage = FakeStorage([], {})
+    signal = emit_eval_attention_signal(
+        storage,
+        candidate_change_id="candidate_y",
+        evaluation_kind="benchmark",
+        prediction_record={
+            "predicted_outcome": "regress",
+            "rationale": "Expected this to be too verbose.",
+            "failure_family": "verbosity",
+            "confidence": 0.73,
+        },
+        calibration_record={
+            "actual_outcome": "improve",
+            "calibration_score": 0.93,
+        },
+        recommendation="promote",
+        deltas={"benchmark_score_delta": 1.2},
+    )
+    assert signal["signal_kind"] == "unexpected_success"
+    assert signal["prioritization"]["reason_family"] == "expectation_violation"

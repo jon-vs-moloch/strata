@@ -6,6 +6,7 @@
 
 import logging
 from typing import List, Dict, Any, Optional, Literal
+from strata.feedback.signals import register_feedback_signal
 from strata.schemas.execution import WeakExecutionContext
 from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import TaskModel, MetricModel
@@ -40,6 +41,56 @@ from strata.experimental.report_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def emit_eval_attention_signal(
+    storage,
+    *,
+    candidate_change_id: str,
+    evaluation_kind: str,
+    prediction_record: Dict[str, Any],
+    calibration_record: Dict[str, Any],
+    recommendation: str,
+    deltas: Dict[str, Any],
+) -> Dict[str, Any]:
+    predicted_outcome = str(prediction_record.get("predicted_outcome") or "uncertain").strip().lower()
+    actual_outcome = str(calibration_record.get("actual_outcome") or "neutral").strip().lower()
+    if predicted_outcome == actual_outcome and predicted_outcome in {"improve", "neutral", "regress"}:
+        signal_kind = "importance"
+        signal_value = f"{evaluation_kind}:{actual_outcome}"
+    elif predicted_outcome == "improve" and actual_outcome != "improve":
+        signal_kind = "unexpected_failure"
+        signal_value = f"{evaluation_kind}:expected_improve_observed_{actual_outcome}"
+    elif predicted_outcome in {"regress", "neutral", "uncertain"} and actual_outcome == "improve":
+        signal_kind = "unexpected_success"
+        signal_value = f"{evaluation_kind}:expected_{predicted_outcome}_observed_improve"
+    else:
+        signal_kind = "surprise"
+        signal_value = f"{evaluation_kind}:expected_{predicted_outcome}_observed_{actual_outcome}"
+
+    return register_feedback_signal(
+        storage,
+        source_type="eval",
+        source_id=candidate_change_id,
+        signal_kind=signal_kind,
+        signal_value=signal_value,
+        source_actor="system",
+        source_preview=(
+            f"Eval candidate '{candidate_change_id}' in {evaluation_kind} predicted {predicted_outcome} "
+            f"but observed {actual_outcome}. Recommendation={recommendation}."
+        ),
+        note=str(prediction_record.get("rationale") or ""),
+        expected_outcome=predicted_outcome,
+        observed_outcome=actual_outcome,
+        metadata={
+            "evaluation_kind": evaluation_kind,
+            "recommendation": recommendation,
+            "failure_family": prediction_record.get("failure_family"),
+            "confidence": prediction_record.get("confidence"),
+            "calibration_score": calibration_record.get("calibration_score"),
+            "actual_delta": dict(deltas or {}),
+        },
+    )
 
 class ExperimentRunner:
     """
@@ -334,6 +385,15 @@ class ExperimentRunner:
             prediction=prediction_record,
             calibration_record=calibration_record,
         )
+        attention_signal = emit_eval_attention_signal(
+            self.storage,
+            candidate_change_id=candidate_change_id,
+            evaluation_kind="benchmark",
+            prediction_record=prediction_record,
+            calibration_record=calibration_record,
+            recommendation=recommendation,
+            deltas=deltas,
+        )
         variant_rating_snapshot = self._record_variant_outcome(
             domain="eval_harness_benchmark",
             variant_assignment=variant_assignment,
@@ -372,9 +432,9 @@ class ExperimentRunner:
             prediction_outcome=prediction_outcome,
             calibration_record=calibration_record,
             judge_trust_snapshot=judge_trust_snapshot,
+            ab_evidence_summary={**(ab_evidence_summary or {}), "attention_signal": attention_signal},
             variant_assignment=variant_assignment,
             variant_rating_snapshot=variant_rating_snapshot,
-            ab_evidence_summary=ab_evidence_summary,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
@@ -479,6 +539,15 @@ class ExperimentRunner:
             prediction=prediction_record,
             calibration_record=calibration_record,
         )
+        attention_signal = emit_eval_attention_signal(
+            self.storage,
+            candidate_change_id=candidate_change_id,
+            evaluation_kind=f"full_eval:{suite_name}",
+            prediction_record=prediction_record,
+            calibration_record=calibration_record,
+            recommendation=recommendation,
+            deltas=deltas,
+        )
         variant_rating_snapshot = self._record_variant_outcome(
             domain=f"eval_harness_full_eval:{suite_name}",
             variant_assignment=variant_assignment,
@@ -520,9 +589,9 @@ class ExperimentRunner:
             prediction_outcome=prediction_outcome,
             calibration_record=calibration_record,
             judge_trust_snapshot=judge_trust_snapshot,
+            ab_evidence_summary={**(ab_evidence_summary or {}), "attention_signal": attention_signal},
             variant_assignment=variant_assignment,
             variant_rating_snapshot=variant_rating_snapshot,
-            ab_evidence_summary=ab_evidence_summary,
             source_task_id=source_task_id,
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
