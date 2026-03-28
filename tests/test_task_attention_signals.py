@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.feedback.signals import list_feedback_signals
-from strata.orchestrator.background import emit_task_execution_attention_signal
+from strata.orchestrator.background import emit_task_execution_attention_signal, queue_task_attention_review
 from strata.schemas.execution import WeakExecutionContext
 from strata.storage.models import Base, AttemptOutcome, TaskState, TaskType
 from strata.storage.services.main import StorageManager
@@ -95,3 +95,57 @@ def test_success_with_degraded_plan_emits_surprise_signal():
 
     assert signal is not None
     assert signal["signal_kind"] == "surprise"
+
+
+def test_task_attention_review_queues_trace_review_for_urgent_signal(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Escalate me",
+        description="Something surprising happened.",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+    )
+    storage.commit()
+    signal = {
+        "signal_id": "signal_demo",
+        "prioritization": {"priority": "urgent"},
+    }
+    captured = {}
+
+    async def fake_queue(storage_arg, **kwargs):
+        captured["storage"] = storage_arg
+        captured["kwargs"] = kwargs
+        return {"status": "queued", "task_id": "judge_123", "kind": kwargs["kind"]}
+
+    monkeypatch.setattr("strata.api.main._queue_eval_system_job", fake_queue)
+
+    result = __import__("asyncio").run(queue_task_attention_review(storage, task=task, signal=signal))
+
+    assert result["task_id"] == "judge_123"
+    assert captured["storage"] is storage
+    assert captured["kwargs"]["kind"] == "trace_review"
+    assert captured["kwargs"]["payload"]["task_id"] == task.task_id
+    assert captured["kwargs"]["payload"]["attention_signal_id"] == "signal_demo"
+
+
+def test_task_attention_review_skips_non_actionable_signal():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Do not escalate",
+        description="Low-priority signal.",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+    )
+    storage.commit()
+
+    result = __import__("asyncio").run(
+        queue_task_attention_review(
+            storage,
+            task=task,
+            signal={"signal_id": "signal_low", "prioritization": {"priority": "batch"}},
+        )
+    )
+
+    assert result is None

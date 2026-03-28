@@ -124,6 +124,42 @@ def emit_task_execution_attention_signal(
         },
     )
 
+
+async def queue_task_attention_review(storage, *, task, signal: dict) -> Optional[dict]:
+    prioritization = dict((signal or {}).get("prioritization") or {})
+    priority = str(prioritization.get("priority") or "").strip().lower()
+    if priority not in {"review_soon", "urgent"}:
+        return None
+    try:
+        from strata.api.main import _queue_eval_system_job
+    except Exception as exc:
+        logger.warning("Unable to import system-job queue helper for task attention review: %s", exc)
+        return None
+
+    session_id = str(task.session_id or "").strip() or None
+    return await _queue_eval_system_job(
+        storage,
+        kind="trace_review",
+        title=f"Task Attention Review: {str(task.title or task.task_id)[:80]}",
+        description=f"Queued task trace review after {priority} task-execution attention signal.",
+        payload={
+            "trace_kind": "task_trace",
+            "task_id": task.task_id,
+            "reviewer_tier": "strong",
+            "emit_followups": True,
+            "persist_to_task": True,
+            "spec_scope": "project",
+            "attention_signal_id": signal.get("signal_id"),
+            "prioritization": prioritization,
+        },
+        session_id=session_id,
+        dedupe_signature={
+            "trace_kind": "task_trace",
+            "reviewer_tier": "strong",
+            "task_id": task.task_id,
+        },
+    )
+
 class BackgroundWorker:
     """
     @summary Managed background loop for asynchronous task execution.
@@ -443,10 +479,16 @@ class BackgroundWorker:
                     error=error,
                 )
                 if attention_signal:
+                    queued_review = await queue_task_attention_review(
+                        storage,
+                        task=task,
+                        signal=attention_signal,
+                    )
                     logger.info(
-                        "Emitted task execution attention signal %s for task %s",
+                        "Emitted task execution attention signal %s for task %s%s",
                         attention_signal.get("signal_kind"),
                         task.task_id,
+                        f" and queued review {queued_review.get('task_id')}" if queued_review else "",
                     )
                 storage.commit()
             except Exception as review_err:
