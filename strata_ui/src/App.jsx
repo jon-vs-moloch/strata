@@ -673,6 +673,9 @@ function App() {
   const [specProposalSnapshot, setSpecProposalSnapshot] = useState([]);
   const [knowledgePagesSnapshot, setKnowledgePagesSnapshot] = useState([]);
   const [retentionSnapshot, setRetentionSnapshot] = useState(null);
+  const [variantRatingsSnapshot, setVariantRatingsSnapshot] = useState(null);
+  const [predictionTrustSnapshot, setPredictionTrustSnapshot] = useState(null);
+  const [operatorNotice, setOperatorNotice] = useState('');
   const [showFinishedTasks, setShowFinishedTasks] = useState(false);
   const API = 'http://localhost:8000';
 
@@ -765,7 +768,7 @@ function App() {
     const gen = ++fetchGenRef.current;
 
     try {
-      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes] = await Promise.all([
+      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes] = await Promise.all([
         axios.get(`${API}/tasks`),
         axios.get(`${API}/messages?session_id=${sessionId}`),
         axios.get(`${API}/sessions`),
@@ -777,7 +780,9 @@ function App() {
         axios.get(`${API}/admin/specs`),
         axios.get(`${API}/admin/spec_proposals?limit=6`),
         axios.get(`${API}/admin/knowledge/pages?limit=6`),
-        axios.get(`${API}/admin/storage/retention`)
+        axios.get(`${API}/admin/storage/retention`),
+        activeNav === 'dashboard' ? axios.get(`${API}/admin/variants/ratings`) : Promise.resolve({ data: null }),
+        activeNav === 'dashboard' ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null })
       ]);
 
       // If a newer fetch was launched while we were awaiting, discard this result
@@ -808,6 +813,8 @@ function App() {
       setSpecProposalSnapshot(specProposalsRes.data.proposals || []);
       setKnowledgePagesSnapshot(knowledgePagesRes.data.pages || []);
       setRetentionSnapshot(retentionRes.data || null);
+      setVariantRatingsSnapshot(variantRatingsRes?.data?.ratings || null);
+      setPredictionTrustSnapshot(predictionTrustRes?.data?.trust || null);
       setApiStatus('ok');
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
@@ -904,6 +911,67 @@ function App() {
     setMessages([]);
     setTasks([]);
   };
+
+  const runOperatorAction = useCallback(async (label, fn) => {
+    setOperatorNotice(`${label}…`);
+    try {
+      await fn();
+      setOperatorNotice(`${label} complete`);
+      await fetchData(true);
+    } catch (err) {
+      console.error(`${label} failed`, err);
+      const detail = err?.response?.data?.detail;
+      setOperatorNotice(typeof detail === 'string' ? `${label} failed: ${detail}` : `${label} failed`);
+    }
+  }, [fetchData]);
+
+  const handleRunRetention = useCallback(() => runOperatorAction('Retention run', () => (
+    axios.post(`${API}/admin/storage/retention/run`, { force: true })
+  )), [API, runOperatorAction]);
+
+  const handleCompactKnowledge = useCallback(() => runOperatorAction('Knowledge compaction', () => (
+    axios.post(`${API}/admin/knowledge/compact`)
+  )), [API, runOperatorAction]);
+
+  const handleContextScan = useCallback(() => runOperatorAction('Context scan', () => (
+    axios.post(`${API}/admin/context/scan`)
+  )), [API, runOperatorAction]);
+
+  const handleQueueBootstrap = useCallback(() => runOperatorAction('Bootstrap cycle', () => (
+    axios.post(`${API}/admin/experiments/bootstrap_cycle`, { queue: true, proposer_tiers: ['strong'], run_count: 1, auto_promote: true })
+  )), [API, runOperatorAction]);
+
+  const handleQueueSampleTick = useCallback(() => runOperatorAction('Sampled eval', () => (
+    axios.post(`${API}/admin/evals/sample_tick`, {
+      queue: true,
+      suite_name: 'mmlu_mini_v1',
+      include_context: false,
+      include_strong: true,
+      include_weak: true,
+      sample_size: 2,
+      profiles: ['raw_model', 'harness_no_capes', 'harness_tools_no_web', 'harness_web_no_tools', 'harness_tools_web'],
+    })
+  )), [API, runOperatorAction]);
+
+  const handleResolveSpecProposal = useCallback(async (proposal, resolution) => {
+    const reviewerNotes = window.prompt(`Reviewer notes for ${resolution}:`, '') ?? '';
+    let clarificationRequest = '';
+    if (resolution === 'needs_clarification') {
+      clarificationRequest = window.prompt('What clarification should Strata request?', '') ?? '';
+      if (!clarificationRequest.trim()) {
+        setOperatorNotice('Clarification cancelled');
+        return;
+      }
+    }
+    await runOperatorAction(`Spec proposal ${resolution}`, () => (
+      axios.post(`${API}/admin/spec_proposals/${proposal.proposal_id}/resolve`, {
+        resolution,
+        reviewer_notes: reviewerNotes,
+        clarification_request: clarificationRequest,
+        reviewer: 'operator_ui',
+      })
+    ));
+  }, [API, runOperatorAction]);
 
   // Derived telemetry from live data
   const completedCount  = tasks.filter(t => t.status === 'complete').length;
@@ -1186,6 +1254,15 @@ function App() {
             specProposalSnapshot={specProposalSnapshot}
             knowledgePagesSnapshot={knowledgePagesSnapshot}
             retentionSnapshot={retentionSnapshot}
+            variantRatingsSnapshot={variantRatingsSnapshot}
+            predictionTrustSnapshot={predictionTrustSnapshot}
+            operatorNotice={operatorNotice}
+            onRunRetention={handleRunRetention}
+            onCompactKnowledge={handleCompactKnowledge}
+            onContextScan={handleContextScan}
+            onQueueBootstrap={handleQueueBootstrap}
+            onQueueSampleTick={handleQueueSampleTick}
+            onResolveSpecProposal={handleResolveSpecProposal}
           />
         ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -1544,7 +1621,33 @@ const Sparkline = ({ values, color = '#8257e5' }) => {
   );
 };
 
-const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext, tiers, routingSummary, specsSnapshot, specProposalSnapshot, knowledgePagesSnapshot, retentionSnapshot }) => (
+const DashboardView = ({
+  telemetry,
+  dashboard,
+  providerTelemetry,
+  loadedContext,
+  tiers,
+  routingSummary,
+  specsSnapshot,
+  specProposalSnapshot,
+  knowledgePagesSnapshot,
+  retentionSnapshot,
+  variantRatingsSnapshot,
+  predictionTrustSnapshot,
+  operatorNotice,
+  onRunRetention,
+  onCompactKnowledge,
+  onContextScan,
+  onQueueBootstrap,
+  onQueueSampleTick,
+  onResolveSpecProposal,
+}) => {
+  const primaryDomainRatings = Object.entries(variantRatingsSnapshot?.by_domain?.['eval_harness_full_eval:bootstrap_mcq_v1'] || {})
+    .sort((a, b) => (b[1]?.rating || 0) - (a[1]?.rating || 0))
+    .slice(0, 5);
+  const strongTrust = predictionTrustSnapshot?.by_tier?.strong;
+
+  return (
   <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
     <DashboardPanel title="SYSTEM STATUS">
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
@@ -1729,6 +1832,78 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
       </div>
     </DashboardPanel>
 
+    <DashboardPanel title="OPERATIONS">
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+        {[
+          ['Queue bootstrap', onQueueBootstrap],
+          ['Queue sample tick', onQueueSampleTick],
+          ['Run retention', onRunRetention],
+          ['Compact knowledge', onCompactKnowledge],
+          ['Scan context', onContextScan],
+        ].map(([label, action]) => (
+          <button
+            key={label}
+            onClick={action}
+            style={{
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              color: '#e7e8ef',
+              borderRadius: '999px',
+              padding: '7px 12px',
+              fontSize: '11px',
+              fontWeight: 700,
+              cursor: 'pointer'
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: '12px', color: operatorNotice ? '#c7c8d6' : '#666' }}>
+        {operatorNotice || 'Operator actions are now available from the dashboard instead of remaining backend-only.'}
+      </div>
+    </DashboardPanel>
+
+    <DashboardPanel title="SPEC REVIEW">
+      {(specProposalSnapshot || []).slice(0, 6).map((proposal) => (
+        <div key={proposal.proposal_id} style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: '#e7e8ef', fontSize: '12px', fontWeight: 600 }}>{proposal.scope} · {proposal.status}</span>
+            <span style={{ color: '#8d8ea1', fontSize: '11px' }}>{proposal.updated_at ? formatAbsoluteTime(proposal.updated_at) : '—'}</span>
+          </div>
+          <div style={{ color: '#a9aaba', fontSize: '12px', lineHeight: 1.5 }}>
+            {proposal.summary || proposal.proposed_change || proposal.proposal_id}
+          </div>
+          {proposal.status !== 'approved' && proposal.status !== 'rejected' && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+              {[
+                ['Approve', 'approved'],
+                ['Reject', 'rejected'],
+                ['Ask clarification', 'needs_clarification'],
+              ].map(([label, resolution]) => (
+                <button
+                  key={label}
+                  onClick={() => onResolveSpecProposal(proposal, resolution)}
+                  style={{
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    color: '#e7e8ef',
+                    borderRadius: '999px',
+                    padding: '6px 10px',
+                    fontSize: '11px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {!specProposalSnapshot.length && <div style={{ fontSize: '12px', color: '#666' }}>No recent spec proposals.</div>}
+    </DashboardPanel>
+
     <DashboardPanel title="RECENT KNOWLEDGE">
       {(knowledgePagesSnapshot || []).slice(0, 6).map((page) => (
         <div key={page.slug} style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1.1fr) 100px 120px', gap: '12px', fontSize: '12px', alignItems: 'center' }}>
@@ -1759,7 +1934,36 @@ const DashboardView = ({ telemetry, dashboard, providerTelemetry, loadedContext,
           : 'No retention run recorded'}
       </div>
     </DashboardPanel>
+
+    <DashboardPanel title="VARIANT RATINGS">
+      {primaryDomainRatings.map(([variantId, rating]) => (
+        <div key={variantId} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 1fr) 90px 80px', gap: '12px', fontSize: '12px', alignItems: 'center' }}>
+          <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{variantId}</span>
+          <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>{Math.round(rating.rating || 0)}</span>
+          <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{rating.matches || 0} m</span>
+        </div>
+      ))}
+      {!primaryDomainRatings.length && <div style={{ fontSize: '12px', color: '#666' }}>No variant ratings loaded.</div>}
+    </DashboardPanel>
+
+    <DashboardPanel title="PREDICTION TRUST">
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+        <TelemetryCell value={strongTrust ? strongTrust.trust.toFixed(3) : '—'} label="STRONG TRUST" />
+        <TelemetryCell value={strongTrust?.count ?? '—'} label="JUDGMENTS" />
+        <TelemetryCell value={Object.keys(predictionTrustSnapshot?.by_failure_family || {}).length || '—'} label="FAIL FAMILIES" />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        {Object.entries(predictionTrustSnapshot?.by_failure_family || {}).slice(0, 5).map(([family, stats]) => (
+          <div key={family} style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 1fr) 90px 80px', gap: '12px', fontSize: '12px', alignItems: 'center' }}>
+            <span style={{ color: '#8d8ea1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{family}</span>
+            <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>{Number(stats.trust || 0).toFixed(3)}</span>
+            <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{stats.count || 0} n</span>
+          </div>
+        ))}
+      </div>
+    </DashboardPanel>
   </div>
-);
+  );
+};
 
 export default App;

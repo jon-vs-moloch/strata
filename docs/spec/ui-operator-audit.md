@@ -21,18 +21,21 @@ The UI should make the system legible enough that an operator does not need priv
 - retention policy/runtime summary
 - active supervision jobs
 - eval snapshots, recent promotion reports, provider transport telemetry, and context pressure
+- operator actions for queueing bootstrap/eval work, running retention, compacting knowledge, and rescanning context
+- lightweight spec proposal review actions from the dashboard
+- variant-rating and prediction-trust readouts
 
 ## Still partially shadowed
 
-- direct creation or resolution of spec proposals
-- manual knowledge compaction and page upsert flows
-- retention maintenance triggers
+- direct creation of spec proposals
+- knowledge page upsert and targeted knowledge-update task creation
 - prediction/calibration and variant-rating inspection
 - context load/unload controls
 - experiment comparison and trace-review workflows
+- tool bootstrap workflows and manual promotion controls
 
 ## Audit conclusion
 
-The UI is now materially better at showing operator-relevant state, but it is not yet a full operator console.
+The UI is now materially better at both showing and triggering operator-relevant workflows, but it is not yet a full operator console.
 
 The next useful pass would be to expose a small "Operations" drawer or admin panel for the remaining backend-only mutation workflows instead of requiring endpoint-level knowledge.
