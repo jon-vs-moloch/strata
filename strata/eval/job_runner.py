@@ -136,7 +136,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             from strata.api.main import _apply_experiment_promotion, _generate_eval_candidate_from_tier
             from strata.storage.models import ParameterModel
 
-            proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
+            proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["strong"])]
             proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
             if not proposer_tiers:
                 raise ValueError("bootstrap_cycle requires at least one proposer tier")

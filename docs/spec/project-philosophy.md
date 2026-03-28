@@ -118,6 +118,12 @@ The intended improvement loop is:
 5. adjust the system based on that telemetry
 6. repeat
 
+In day-to-day operation, this should not collapse into "every tier proposes everything all the time."
+
+- The weak tier should keep doing normal system work, including user-facing tasks and bounded autonomous work inside the harness.
+- The strong tier should primarily supervise the weak tier: diagnose failures, propose harness repairs, run targeted evaluations, and decide which mutations are worth promoting.
+- Extra eval sampling is useful as telemetry, but should stay subordinate to the real goal of improving weak-tier behavior.
+
 The target state is not just "the strong model can improve Strata."
 
 The target state is that repeated system improvements eventually enable the weak model to make a meaningful improvement to the system by itself, such as:

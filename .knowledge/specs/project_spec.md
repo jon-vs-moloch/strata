@@ -11,6 +11,12 @@ Current project intent:
 - treat repo structure, modularity, and progressive disclosure as supports for small models with small context
 - keep bootstrap progress measurable through evals, telemetry, promotion evidence, and explainable provenance
 
+Normal operating mode:
+- weak Strata handles normal user-facing work and bounded autonomous self-improvement activity inside the harness
+- strong Strata acts as supervisor and diagnostician for the weak system: proposing harness mutations, running deliberate diagnostics, and interpreting telemetry
+- the default bootstrap relationship is strong -> weak, not weak/strong symmetry
+- evals should support diagnosis and promotion decisions, not dominate wall-clock activity when the system could be doing useful work
+
 Canonical supporting references:
 - `README.md`
 - `docs/spec/project-philosophy.md`

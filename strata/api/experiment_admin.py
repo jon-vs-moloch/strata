@@ -247,7 +247,7 @@ def register_experiment_routes(
         wait_for_completion = bool(payload.get("wait", False))
         if queue_requested is None:
             queue_requested = not wait_for_completion
-        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak", "strong"])]
+        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["strong"])]
         proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
         if not proposer_tiers:
             raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
@@ -273,7 +273,7 @@ def register_experiment_routes(
                 storage,
                 kind="bootstrap_cycle",
                 title="Bootstrap Cycle",
-                description="Queued strong/weak bootstrap cycle.",
+                description="Queued strong-over-weak bootstrap cycle.",
                 payload=normalized_payload,
                 session_id=payload.get("session_id"),
                 dedupe_signature={

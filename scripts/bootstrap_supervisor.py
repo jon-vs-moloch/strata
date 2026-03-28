@@ -19,10 +19,12 @@ from datetime import datetime, timezone
 
 API_URL = "http://127.0.0.1:8000"
 SUPERVISOR_MODE = os.getenv("SUPERVISOR_MODE", "continuous").strip().lower()
-STANDARD_EVAL_EVERY = 4
+CONTINUOUS_TELEMETRY_EVERY = 3
+CONTEXT_SNAPSHOT_EVERY = 12
 ERROR_BACKOFF_SECONDS = 15
 POLL_INTERVAL_SECONDS = 5
 JOB_TIMEOUT_SECONDS = 60 * 60
+CONTINUOUS_BOOTSTRAP_PROPOSER_TIERS = ["strong"]
 TELEMETRY_PROFILES = [
     "raw_model",
     "harness_no_capes",
@@ -82,9 +84,9 @@ def run_bootstrap_cycle(*, cycle_number: int | None = None, lean: bool = False) 
     proposer_tiers = ["weak", "strong"]
     run_count = 2
     if lean:
-        # Keep the continuous loop moving by evaluating one proposer tier at a time.
-        tier_index = 0 if cycle_number is None else (max(1, int(cycle_number)) - 1) % len(proposer_tiers)
-        proposer_tiers = [proposer_tiers[tier_index]]
+        # Normal supervised operation is strong -> weak: the strong tier proposes
+        # harness changes intended to improve the weak tier's performance.
+        proposer_tiers = list(CONTINUOUS_BOOTSTRAP_PROPOSER_TIERS)
         run_count = 1
     return post_json(
         "/admin/experiments/bootstrap_cycle",
@@ -165,7 +167,7 @@ def main() -> None:
                 matrix_task = eval_result["sampled_matrix"]
                 _log_matrix_result(f"completed telemetry supervision cycle {cycle_number}", matrix_task)
 
-                if cycle_number % STANDARD_EVAL_EVERY == 0:
+                if cycle_number % CONTEXT_SNAPSHOT_EVERY == 0:
                     log(f"starting context-on snapshot after cycle {cycle_number}")
                     context_result = run_context_snapshot(cycle_number)
                     context_task = context_result["sampled_matrix"]
@@ -178,11 +180,12 @@ def main() -> None:
                 promoted = len(bootstrap_result.get("promoted", []))
                 log(f"completed bootstrap phase {cycle_number}; promoted={promoted}")
 
-                eval_result = run_telemetry_cycle(cycle_number)
-                matrix_task = eval_result["sampled_matrix"]
-                _log_matrix_result(f"completed telemetry phase {cycle_number}", matrix_task)
+                if cycle_number % CONTINUOUS_TELEMETRY_EVERY == 0:
+                    eval_result = run_telemetry_cycle(cycle_number)
+                    matrix_task = eval_result["sampled_matrix"]
+                    _log_matrix_result(f"completed telemetry phase {cycle_number}", matrix_task)
 
-                if cycle_number % STANDARD_EVAL_EVERY == 0:
+                if cycle_number % CONTEXT_SNAPSHOT_EVERY == 0:
                     log(f"starting context-on snapshot after cycle {cycle_number}")
                     context_result = run_context_snapshot(cycle_number)
                     context_task = context_result["sampled_matrix"]

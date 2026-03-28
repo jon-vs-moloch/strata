@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # ── Module-level singletons ────────────────────────────────────────────────────
 GLOBAL_SETTINGS = {
     "max_sync_tool_iterations": 3,
-    "automatic_task_generation": False,
+    "automatic_task_generation": True,
     "testing_mode": False,
     "replay_pending_tasks_on_startup": False,
 }
