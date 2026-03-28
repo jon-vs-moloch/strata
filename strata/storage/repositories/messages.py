@@ -69,6 +69,19 @@ class MessageRepository:
         stmt = stmt.order_by(MessageModel.created_at.asc())
         return list(self.session.scalars(stmt).all())
 
+    def get_by_id(self, message_id: str) -> Optional[MessageModel]:
+        """
+        @summary Fetch a single active message by id.
+        @inputs message_id: stable message identifier
+        @outputs matching MessageModel or None
+        """
+        stmt = (
+            select(MessageModel)
+            .filter(MessageModel.is_archived == False, MessageModel.message_id == message_id)
+            .limit(1)
+        )
+        return self.session.scalars(stmt).first()
+
     def get_sessions(self) -> List[str]:
         """
         @summary Fetch a list of all unique session IDs.

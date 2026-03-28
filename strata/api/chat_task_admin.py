@@ -15,6 +15,12 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, HTTPException
 from strata.api.chat_runtime import ChatRuntime
+from strata.api.message_feedback import (
+    build_feedback_event_message,
+    get_message_feedback,
+    list_message_feedback_events,
+    toggle_message_reaction,
+)
 
 
 def register_chat_task_routes(
@@ -81,9 +87,56 @@ def register_chat_task_routes(
                 "content": m.content,
                 "is_intervention": m.is_intervention,
                 "created_at": m.created_at.isoformat(),
+                "reactions": get_message_feedback(storage, m.message_id, viewer_session_id=session_id),
             }
             for m in history
         ]
+
+    @app.post("/messages/{message_id}/react")
+    async def react_to_message(message_id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
+        reaction = str(payload.get("reaction") or "").strip().lower()
+        session_id = str(payload.get("session_id") or "default").strip() or "default"
+        message = storage.messages.get_by_id(message_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        if str(message.role or "") != "assistant":
+            raise HTTPException(status_code=400, detail="Reactions are only supported on assistant messages")
+
+        try:
+            result = toggle_message_reaction(
+                storage,
+                message=message,
+                reaction=reaction,
+                session_id=session_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        feedback_event_message = build_feedback_event_message(
+            action=result.get("action") or "added",
+            reaction=result.get("event", {}).get("reaction") or reaction,
+            message_preview=result.get("event", {}).get("message_preview") or message.content,
+        )
+        storage.messages.create(
+            role="system",
+            content=feedback_event_message,
+            session_id=session_id,
+        )
+        storage.commit()
+        await broadcast_event({"type": "message", "session_id": session_id})
+        return {
+            "status": "ok",
+            "message_id": message_id,
+            "feedback": result.get("feedback") or {},
+            "event": result.get("event") or {},
+        }
+
+    @app.get("/admin/messages/feedback")
+    async def get_message_feedback_events(session_id: Optional[str] = None, limit: int = 100, storage=Depends(get_storage)):
+        return {
+            "status": "ok",
+            "events": list_message_feedback_events(storage, limit=limit, session_id=session_id),
+        }
 
     @app.get("/sessions")
     async def get_sessions(storage=Depends(get_storage)):
@@ -161,6 +214,7 @@ def register_chat_task_routes(
         {
             "list_tasks": list_tasks,
             "get_messages": get_messages,
+            "react_to_message": react_to_message,
             "get_sessions": get_sessions,
             "delete_session": delete_session,
             "post_chat": post_chat,

@@ -9,7 +9,7 @@ import {
   Terminal, AlertCircle, X, Settings,
   Activity, Trash2, Database, LayoutDashboard,
   Pause, Play, Square, ChevronDown, ChevronRight,
-  BookOpen, Search
+  BookOpen, Search, ThumbsUp, ThumbsDown, Heart
 } from 'lucide-react';
 import TaskCard from './components/TaskCard';
 
@@ -106,6 +106,14 @@ const summarizeBootstrapReasons = (items = []) => {
     .slice(0, 3)
     .map(([reason, count]) => `${reason.replace(/_/g, ' ')} ×${count}`);
 };
+
+const REACTION_OPTIONS = [
+  { key: 'thumbs_up', label: 'Helpful', icon: ThumbsUp },
+  { key: 'thumbs_down', label: 'Needs Work', icon: ThumbsDown },
+  { key: 'heart', label: 'Loved It', icon: Heart },
+  { key: 'emphasis', label: 'Important', icon: Zap },
+  { key: 'confused', label: 'Confusing', icon: AlertCircle },
+];
 
 
 // ─── Settings Modal ────────────────────────────────────────────────────────────
@@ -677,6 +685,7 @@ function App() {
   const [inputText, setInputText]     = useState('');
   const [isSending, setIsSending]     = useState(false);
   const [sendError, setSendError]     = useState('');
+  const [reactionBusyKey, setReactionBusyKey] = useState('');
   const [chatLane, setChatLane]       = useState('strong');
   const [laneSessionIds, setLaneSessionIds] = useState({
     strong: defaultSessionIdForLane('strong'),
@@ -961,6 +970,28 @@ function App() {
     setIsSending(false);
     isSendingRef.current = false;
   };
+
+  const handleReactToMessage = useCallback(async (messageId, reactionKey) => {
+    const busyKey = `${messageId}:${reactionKey}`;
+    setReactionBusyKey(busyKey);
+    try {
+      const res = await axios.post(`${API}/messages/${messageId}/react`, {
+        session_id: sessionId,
+        reaction: reactionKey,
+      });
+      const nextFeedback = res?.data?.feedback || null;
+      if (nextFeedback) {
+        setMessages((prev) => prev.map((msg) => (
+          msg.id === messageId ? { ...msg, reactions: nextFeedback } : msg
+        )));
+      }
+      await fetchData(true);
+    } catch (err) {
+      console.error('Failed to react to message', err);
+    } finally {
+      setReactionBusyKey('');
+    }
+  }, [API, fetchData, sessionId]);
 
   const startNewChat = () => {
     const newId = `${chatLane}:session-${Date.now()}`;
@@ -1411,6 +1442,43 @@ function App() {
                 <div title={formatRelativeTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
                   {formatAbsoluteTime(msg.created_at)}
                 </div>
+                {msg.role === 'assistant' && !msg.pending && !msg.failed && (
+                  <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    {REACTION_OPTIONS.map(({ key, label, icon: Icon }) => {
+                      const counts = msg.reactions?.counts || {};
+                      const viewerReactions = msg.reactions?.viewer_reactions || [];
+                      const active = viewerReactions.includes(key);
+                      const count = counts[key] || 0;
+                      const busy = reactionBusyKey === `${msg.id}:${key}`;
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => handleReactToMessage(msg.id, key)}
+                          disabled={busy}
+                          title={label}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '6px 10px',
+                            borderRadius: '999px',
+                            border: active ? '1px solid rgba(130,87,229,0.45)' : '1px solid rgba(255,255,255,0.08)',
+                            background: active ? 'rgba(130,87,229,0.14)' : 'rgba(255,255,255,0.03)',
+                            color: active ? '#d9c7ff' : '#8f93a8',
+                            cursor: busy ? 'default' : 'pointer',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            opacity: busy ? 0.7 : 1,
+                          }}
+                        >
+                          <Icon size={12} />
+                          <span>{count > 0 ? count : label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </MotionDiv>
             )})}
 

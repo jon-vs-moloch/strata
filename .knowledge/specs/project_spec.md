@@ -29,3 +29,4 @@ Operational guidance:
 - when alignment work is triggered, the spec files above are the source of truth and should be cited explicitly
 - if the spec is missing detail, prefer a bounded spec-hardening task over claiming the project vision is unknown
 - when duplicate detection, routing, or mutation selection is ambiguous, prefer a hybrid pipeline: deterministic preflight first, then inference over the reduced ambiguity set
+- user-chat feedback should be gathered as durable evidence and eventually distilled into maintained user knowledge, agent knowledge, project intent, and other reviewable state rather than remaining an isolated UI-side signal

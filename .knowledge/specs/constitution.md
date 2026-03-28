@@ -15,3 +15,4 @@ Current durable guidance:
 - supervision should be deliberate rather than overwhelming; measure enough to steer the system, but do not let eval volume crowd out useful work
 - prefer cheap, deterministic preprocessing before inference whenever possible; use inference after the system has already reduced ambiguity, narrowed the search space, and assembled the best available evidence
 - if a decision can be improved by mixing deterministic checks with model judgment, run the deterministic pass first and feed its output to the model rather than asking the model to rediscover obvious structure from scratch
+- treat user feedback, reactions, audits, and research artifacts as raw evidence that should eventually cash out into durable state changes: user knowledge, agent knowledge, project specs, constitution updates, or other reviewable promoted improvements
