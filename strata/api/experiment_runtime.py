@@ -54,6 +54,13 @@ def default_eval_proposal_config() -> Dict[str, Any]:
             "include_recent_candidates_in_prompt": True,
             "require_material_difference": True,
         },
+        "resolution": {
+            "use_llm_for_ambiguous": True,
+            "adjudicator_tier": "strong",
+            "vote_count": 1,
+            "near_duplicate_overlap": 0.92,
+            "family_overlap": 0.68,
+        },
     }
 
 
@@ -78,6 +85,7 @@ def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> 
     bootstrap_payload = dict(payload.get("bootstrap") or {})
     inference_payload = dict(payload.get("inference") or {})
     novelty_payload = dict(payload.get("novelty") or {})
+    resolution_payload = dict(payload.get("resolution") or {})
 
     def normalize_tiers(raw: Any, fallback: list[str]) -> list[str]:
         if not isinstance(raw, list):
@@ -88,6 +96,7 @@ def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> 
     bootstrap_defaults = defaults["bootstrap"]
     inference_defaults = defaults["inference"]
     novelty_defaults = defaults["novelty"]
+    resolution_defaults = defaults["resolution"]
 
     return {
         "bootstrap": {
@@ -136,6 +145,23 @@ def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> 
             ),
             "require_material_difference": bool(
                 novelty_payload.get("require_material_difference", novelty_defaults["require_material_difference"])
+            ),
+        },
+        "resolution": {
+            "use_llm_for_ambiguous": bool(
+                resolution_payload.get("use_llm_for_ambiguous", resolution_defaults["use_llm_for_ambiguous"])
+            ),
+            "adjudicator_tier": str(
+                resolution_payload.get("adjudicator_tier", resolution_defaults["adjudicator_tier"]) or "strong"
+            ).lower()
+            if str(resolution_payload.get("adjudicator_tier", resolution_defaults["adjudicator_tier"]) or "strong").lower() in {"weak", "strong"}
+            else "strong",
+            "vote_count": max(1, int(resolution_payload.get("vote_count", resolution_defaults["vote_count"]) or 1)),
+            "near_duplicate_overlap": float(
+                resolution_payload.get("near_duplicate_overlap", resolution_defaults["near_duplicate_overlap"]) or 0.92
+            ),
+            "family_overlap": float(
+                resolution_payload.get("family_overlap", resolution_defaults["family_overlap"]) or 0.68
             ),
         },
     }
@@ -309,6 +335,308 @@ def summarize_recent_eval_candidates(recent_reports: Iterable[Dict[str, Any]], *
         if len(summaries) >= limit:
             break
     return summaries
+
+
+def _tokenize_prompt(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9_]+", (text or "").lower()) if len(token) >= 4}
+
+
+def _prompt_tags(text: str) -> list[str]:
+    normalized = (text or "").lower()
+    tag_map = {
+        "proposal_rationale": ["rationale", "expected_gain"],
+        "testability": ["testable", "validate", "validated"],
+        "idle_quiet": ["quiet testing mode", "remain idle", "background activity"],
+        "directness": ["answer directly", "clearly", "concisely"],
+        "tooling_restraint": ["unavailable tooling", "do not rely on background work"],
+        "context_grounding": ["repository philosophy", "harness intent", "context"],
+    }
+    tags = [name for name, needles in tag_map.items() if all(needle in normalized for needle in needles)]
+    return sorted(tags)
+
+
+def describe_eval_mutation(current_config: Dict[str, Any], override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    base = canonical_eval_override(current_config)
+    candidate = canonical_eval_override(override)
+    base_context = set(base.get("context_files") or [])
+    candidate_context = set(candidate.get("context_files") or [])
+    prompt = candidate.get("system_prompt") or ""
+    prompt_tokens = _tokenize_prompt(prompt)
+    tags = _prompt_tags(prompt)
+    context_added = sorted(candidate_context - base_context)
+    context_removed = sorted(base_context - candidate_context)
+    axes_changed: list[str] = []
+    if context_added or context_removed:
+        axes_changed.append("context")
+    if prompt.strip() != (base.get("system_prompt") or "").strip():
+        axes_changed.append("prompt")
+    family_parts: list[str] = []
+    if context_added:
+        family_parts.append("add_ctx:" + ",".join(context_added[:3]))
+    if context_removed:
+        family_parts.append("drop_ctx:" + ",".join(context_removed[:3]))
+    if tags:
+        family_parts.append("tags:" + ",".join(tags[:3]))
+    if "prompt" in axes_changed and not tags:
+        family_parts.append("prompt:generic")
+    if not family_parts:
+        family_parts.append("no_change")
+    return {
+        "axes_changed": axes_changed,
+        "context_added": context_added,
+        "context_removed": context_removed,
+        "prompt_tags": tags,
+        "prompt_token_count": len(prompt_tokens),
+        "prompt_token_set": prompt_tokens,
+        "family": "|".join(family_parts),
+        "override": candidate,
+    }
+
+
+def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def preflight_eval_proposal_relationship(
+    current_config: Dict[str, Any],
+    proposal_override: Optional[Dict[str, Any]],
+    existing_override: Optional[Dict[str, Any]],
+    *,
+    proposal_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    proposal_config = normalize_eval_proposal_config(proposal_config)
+    proposal_desc = describe_eval_mutation(current_config, proposal_override)
+    existing_desc = describe_eval_mutation(current_config, existing_override)
+    proposal_signature = eval_override_signature(proposal_override)
+    existing_signature = eval_override_signature(existing_override)
+    token_overlap = _jaccard_similarity(
+        set(proposal_desc.get("prompt_token_set") or set()),
+        set(existing_desc.get("prompt_token_set") or set()),
+    )
+    same_family = proposal_desc.get("family") == existing_desc.get("family")
+    same_context_delta = (
+        proposal_desc.get("context_added") == existing_desc.get("context_added")
+        and proposal_desc.get("context_removed") == existing_desc.get("context_removed")
+    )
+    near_duplicate_overlap = float((proposal_config.get("resolution") or {}).get("near_duplicate_overlap", 0.92) or 0.92)
+    family_overlap = float((proposal_config.get("resolution") or {}).get("family_overlap", 0.68) or 0.68)
+    if proposal_signature == existing_signature:
+        decision = "exact_duplicate"
+        score = 1.0
+    elif same_context_delta and proposal_desc.get("prompt_tags") == existing_desc.get("prompt_tags") and token_overlap >= near_duplicate_overlap:
+        decision = "near_duplicate"
+        score = token_overlap
+    elif same_family and token_overlap >= family_overlap:
+        decision = "same_family_retry"
+        score = token_overlap
+    elif same_family or same_context_delta:
+        decision = "ambiguous"
+        score = token_overlap
+    else:
+        decision = "keep_both_distinct"
+        score = token_overlap
+    return {
+        "decision": decision,
+        "score": round(score, 4),
+        "same_family": same_family,
+        "same_context_delta": same_context_delta,
+        "token_overlap": round(token_overlap, 4),
+        "proposal_family": proposal_desc.get("family"),
+        "existing_family": existing_desc.get("family"),
+        "proposal_features": {
+            key: value
+            for key, value in proposal_desc.items()
+            if key != "prompt_token_set"
+        },
+        "existing_features": {
+            key: value
+            for key, value in existing_desc.items()
+            if key != "prompt_token_set"
+        },
+    }
+
+
+async def adjudicate_eval_proposal_relationship(
+    proposal: Dict[str, Any],
+    existing_candidate: Dict[str, Any],
+    current_config: Dict[str, Any],
+    *,
+    preflight: Dict[str, Any],
+    proposal_config: Optional[Dict[str, Any]],
+    model_adapter_factory,
+) -> Dict[str, Any]:
+    proposal_config = normalize_eval_proposal_config(proposal_config)
+    resolution_config = dict(proposal_config.get("resolution") or {})
+    adjudicator_tier = str(resolution_config.get("adjudicator_tier", "strong") or "strong")
+    vote_count = max(1, int(resolution_config.get("vote_count", 1) or 1))
+
+    from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+
+    adapter = model_adapter_factory()
+    if adjudicator_tier == "weak":
+        adapter.bind_execution_context(WeakExecutionContext(run_id=f"proposal_resolution_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+    else:
+        adapter.bind_execution_context(StrongExecutionContext(run_id=f"proposal_resolution_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+
+    adjudication_prompt = f"""
+You are resolving whether two Strata harness-mutation proposals are duplicates, mergeable refinements, or distinct.
+Return only JSON with this schema:
+{{
+  "decision": "exact_duplicate|near_duplicate|same_family_retry|merge_with_existing|supersedes_existing|keep_both_distinct",
+  "confidence": 0.0,
+  "reason": "short explanation",
+  "merge_strategy": "optional short merge recommendation"
+}}
+
+Current harness config:
+{json.dumps(canonical_eval_override(current_config), indent=2)}
+
+New proposal:
+{json.dumps({
+    "candidate_change_id": proposal.get("candidate_change_id"),
+    "rationale": proposal.get("rationale"),
+    "expected_gain": proposal.get("expected_gain"),
+    "override": canonical_eval_override(proposal.get("eval_harness_config_override")),
+}, indent=2)}
+
+Existing candidate:
+{json.dumps(existing_candidate, indent=2)}
+
+Deterministic preflight:
+{json.dumps(preflight, indent=2)}
+
+Use the deterministic preflight as strong evidence. Prefer merge/same-family outcomes over claiming novelty when the changes are mostly restatements of the same intervention.
+""".strip()
+
+    votes: list[Dict[str, Any]] = []
+    for _ in range(vote_count):
+        response = await adapter.chat(
+            [{"role": "user", "content": adjudication_prompt}],
+            temperature=0.0,
+        )
+        try:
+            parsed = extract_json_object(response.get("content", ""))
+        except Exception:
+            continue
+        decision = str(parsed.get("decision") or "keep_both_distinct")
+        if decision not in {
+            "exact_duplicate",
+            "near_duplicate",
+            "same_family_retry",
+            "merge_with_existing",
+            "supersedes_existing",
+            "keep_both_distinct",
+        }:
+            decision = "keep_both_distinct"
+        votes.append(
+            {
+                "decision": decision,
+                "confidence": float(parsed.get("confidence", 0.5) or 0.5),
+                "reason": str(parsed.get("reason") or "").strip(),
+                "merge_strategy": str(parsed.get("merge_strategy") or "").strip(),
+            }
+        )
+    if not votes:
+        return {
+            "decision": "keep_both_distinct",
+            "confidence": 0.0,
+            "reason": "LLM adjudication failed; defaulting to keep both distinct.",
+            "merge_strategy": "",
+            "votes": [],
+        }
+    tallies: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+    for vote in votes:
+        tallies[vote["decision"]].append(vote)
+    ranked = sorted(
+        tallies.items(),
+        key=lambda item: (
+            len(item[1]),
+            sum(v.get("confidence", 0.0) for v in item[1]) / max(1, len(item[1])),
+        ),
+        reverse=True,
+    )
+    winner, winner_votes = ranked[0]
+    avg_confidence = sum(v.get("confidence", 0.0) for v in winner_votes) / max(1, len(winner_votes))
+    return {
+        "decision": winner,
+        "confidence": round(avg_confidence, 4),
+        "reason": next((v.get("reason") for v in winner_votes if v.get("reason")), ""),
+        "merge_strategy": next((v.get("merge_strategy") for v in winner_votes if v.get("merge_strategy")), ""),
+        "votes": votes,
+    }
+
+
+async def resolve_eval_proposal_against_history(
+    proposal: Dict[str, Any],
+    *,
+    current_config: Dict[str, Any],
+    recent_candidates: list[Dict[str, Any]],
+    seen_candidates: Optional[list[Dict[str, Any]]] = None,
+    proposal_config: Optional[Dict[str, Any]] = None,
+    model_adapter_factory=None,
+) -> Dict[str, Any]:
+    proposal_config = normalize_eval_proposal_config(proposal_config)
+    current_signature = eval_override_signature(current_config)
+    proposal_signature = eval_override_signature(proposal.get("eval_harness_config_override"))
+    if proposal_signature == current_signature:
+        return {"decision": "matches_current_config", "should_evaluate": False, "reason": "matches_current_config"}
+
+    candidates = list(recent_candidates or []) + list(seen_candidates or [])
+    best_match = None
+    best_preflight = None
+    best_score = -1.0
+    for candidate in candidates:
+        preflight = preflight_eval_proposal_relationship(
+            current_config,
+            proposal.get("eval_harness_config_override"),
+            candidate.get("eval_harness_config_override"),
+            proposal_config=proposal_config,
+        )
+        score = float(preflight.get("score", 0.0) or 0.0)
+        if score > best_score:
+            best_score = score
+            best_match = candidate
+            best_preflight = preflight
+    if not best_match or not best_preflight:
+        return {"decision": "keep_both_distinct", "should_evaluate": True, "reason": "no_similar_candidate"}
+    decision = str(best_preflight.get("decision") or "keep_both_distinct")
+    if decision in {"exact_duplicate", "near_duplicate", "same_family_retry"}:
+        return {
+            "decision": decision,
+            "should_evaluate": False,
+            "reason": "deterministic_preflight",
+            "compared_candidate_change_id": best_match.get("candidate_change_id"),
+            "preflight": best_preflight,
+        }
+    if decision == "ambiguous" and bool((proposal_config.get("resolution") or {}).get("use_llm_for_ambiguous", True)) and model_adapter_factory is not None:
+        adjudication = await adjudicate_eval_proposal_relationship(
+            proposal,
+            best_match,
+            current_config,
+            preflight=best_preflight,
+            proposal_config=proposal_config,
+            model_adapter_factory=model_adapter_factory,
+        )
+        final_decision = str(adjudication.get("decision") or "keep_both_distinct")
+        return {
+            "decision": final_decision,
+            "should_evaluate": final_decision in {"supersedes_existing", "keep_both_distinct"},
+            "reason": "llm_adjudicated",
+            "compared_candidate_change_id": best_match.get("candidate_change_id"),
+            "preflight": best_preflight,
+            "adjudication": adjudication,
+        }
+    return {
+        "decision": "keep_both_distinct",
+        "should_evaluate": True,
+        "reason": "deterministic_distinct",
+        "compared_candidate_change_id": best_match.get("candidate_change_id"),
+        "preflight": best_preflight,
+    }
 
 
 def _proposal_prompt(

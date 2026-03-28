@@ -23,6 +23,7 @@ def register_eval_admin_routes(
     build_dashboard_snapshot,
     apply_experiment_promotion,
     generate_eval_candidate_from_tier,
+    resolve_eval_proposal_against_history,
     generate_tool_candidate_from_tier,
     eval_override_signature,
     get_provider_telemetry_snapshot,
@@ -45,6 +46,7 @@ def register_eval_admin_routes(
             queue_eval_system_job=queue_eval_system_job,
             apply_experiment_promotion=apply_experiment_promotion,
             generate_eval_candidate_from_tier=generate_eval_candidate_from_tier,
+            resolve_eval_proposal_against_history=resolve_eval_proposal_against_history,
             generate_tool_candidate_from_tier=generate_tool_candidate_from_tier,
             eval_override_signature=eval_override_signature,
         )

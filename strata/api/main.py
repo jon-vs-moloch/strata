@@ -42,6 +42,7 @@ from strata.api.experiment_runtime import (
     eval_override_signature,
     generate_eval_candidate_from_tier,
     generate_tool_candidate_from_tier,
+    resolve_eval_proposal_against_history,
 )
 from strata.knowledge.pages import KnowledgePageStore, slugify_page_title
 from strata.specs.bootstrap import (
@@ -125,6 +126,24 @@ async def _generate_eval_candidate_from_tier(
         current_config,
         model_adapter_factory=ModelAdapter,
         **kwargs,
+    )
+
+
+async def _resolve_eval_proposal_against_history(
+    proposal: Dict[str, Any],
+    *,
+    current_config: Dict[str, Any],
+    recent_candidates: list[Dict[str, Any]],
+    seen_candidates: Optional[list[Dict[str, Any]]] = None,
+    proposal_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return await resolve_eval_proposal_against_history(
+        proposal,
+        current_config=current_config,
+        recent_candidates=recent_candidates,
+        seen_candidates=seen_candidates,
+        proposal_config=proposal_config,
+        model_adapter_factory=ModelAdapter,
     )
 
 
@@ -369,6 +388,11 @@ globals().update(register_eval_admin_routes(
     generate_eval_candidate_from_tier=lambda proposer_tier, current_config, **kwargs: generate_eval_candidate_from_tier(
         proposer_tier,
         current_config,
+        model_adapter_factory=ModelAdapter,
+        **kwargs,
+    ),
+    resolve_eval_proposal_against_history=lambda proposal, **kwargs: resolve_eval_proposal_against_history(
+        proposal,
         model_adapter_factory=ModelAdapter,
         **kwargs,
     ),

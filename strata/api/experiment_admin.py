@@ -21,6 +21,7 @@ from strata.eval.harness_eval import (
 from strata.api.experiment_runtime import (
     EVAL_PROPOSAL_CONFIG_DESCRIPTION,
     EVAL_PROPOSAL_CONFIG_KEY,
+    canonical_eval_override,
     default_eval_proposal_config,
     get_active_eval_proposal_config,
     normalize_eval_proposal_config,
@@ -46,6 +47,7 @@ def register_experiment_routes(
     queue_eval_system_job,
     apply_experiment_promotion,
     generate_eval_candidate_from_tier,
+    resolve_eval_proposal_against_history,
     generate_tool_candidate_from_tier,
     eval_override_signature,
 ) -> Dict[str, Any]:
@@ -257,6 +259,10 @@ def register_experiment_routes(
                     **dict(payload.get("inference") or {}),
                 },
                 "novelty": {**dict(current_config.get("novelty") or {}), **dict(payload.get("novelty") or {})},
+                "resolution": {
+                    **dict(current_config.get("resolution") or {}),
+                    **dict(payload.get("resolution") or {}),
+                },
             }
         )
         storage.parameters.set_parameter(
@@ -357,6 +363,7 @@ def register_experiment_routes(
             ]
         )
         seen_signatures = set()
+        seen_candidates: list[Dict[str, Any]] = []
 
         runner = ExperimentRunner(storage, model_adapter)
         evaluated = []
@@ -365,16 +372,29 @@ def register_experiment_routes(
 
         for proposal in proposals:
             proposal_signature = eval_override_signature(proposal["eval_harness_config_override"])
-            if proposal_signature == current_signature:
-                skipped.append({"proposal": proposal, "reason": "matches_current_config"})
-                continue
             if proposal_signature in recent_signatures:
-                skipped.append({"proposal": proposal, "reason": "recent_duplicate"})
+                skipped.append({"proposal": proposal, "reason": "recent_duplicate_signature"})
                 continue
-            if proposal_signature in seen_signatures:
-                skipped.append({"proposal": proposal, "reason": "duplicate_in_cycle"})
+            resolution = await resolve_eval_proposal_against_history(
+                proposal,
+                current_config=current_config,
+                recent_candidates=recent_candidate_hints,
+                seen_candidates=seen_candidates,
+                proposal_config=proposal_config,
+            )
+            if not resolution.get("should_evaluate", False):
+                skipped.append({"proposal": proposal, "reason": resolution.get("decision"), "resolution": resolution})
                 continue
             seen_signatures.add(proposal_signature)
+            seen_candidates.append(
+                {
+                    "candidate_change_id": proposal.get("candidate_change_id"),
+                    "proposer_tier": proposal.get("proposer_tier"),
+                    "rationale": proposal.get("rationale"),
+                    "expected_gain": proposal.get("expected_gain"),
+                    "eval_harness_config_override": canonical_eval_override(proposal.get("eval_harness_config_override")),
+                }
+            )
             result = await runner.run_full_eval_gate(
                 proposal["candidate_change_id"],
                 api_url="http://127.0.0.1:8000",
