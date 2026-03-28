@@ -46,9 +46,21 @@ const displaySessionId = (sessionId) => {
   return sessionId;
 };
 
+const parseTimestamp = (dateString) => {
+  if (!dateString) return null;
+  const raw = String(dateString).trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
 const formatRelativeTime = (dateString) => {
   if (!dateString) return 'never';
-  const deltaMs = Date.now() - new Date(dateString).getTime();
+  const date = parseTimestamp(dateString);
+  if (!date) return 'unknown';
+  const deltaMs = Date.now() - date.getTime();
   const minutes = Math.max(0, Math.floor(deltaMs / 60000));
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
@@ -60,7 +72,9 @@ const formatRelativeTime = (dateString) => {
 
 const formatAbsoluteTime = (dateString) => {
   if (!dateString) return '—';
-  return new Date(dateString).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const date = parseTimestamp(dateString);
+  if (!date) return '—';
+  return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
 const formatAbsoluteWithRelative = (dateString) => {

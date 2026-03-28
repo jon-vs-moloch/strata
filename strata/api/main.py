@@ -115,11 +115,16 @@ def _apply_experiment_promotion(storage: StorageManager, candidate_change_id: st
     return apply_experiment_promotion(storage, candidate_change_id, force=force, model_adapter=_model)
 
 
-async def _generate_eval_candidate_from_tier(proposer_tier: str, current_config: Dict[str, Any]) -> Dict[str, Any]:
+async def _generate_eval_candidate_from_tier(
+    proposer_tier: str,
+    current_config: Dict[str, Any],
+    **kwargs,
+) -> Dict[str, Any]:
     return await generate_eval_candidate_from_tier(
         proposer_tier,
         current_config,
         model_adapter_factory=ModelAdapter,
+        **kwargs,
     )
 
 
@@ -361,10 +366,11 @@ globals().update(register_eval_admin_routes(
         force=force,
         model_adapter=_model,
     ),
-    generate_eval_candidate_from_tier=lambda proposer_tier, current_config: generate_eval_candidate_from_tier(
+    generate_eval_candidate_from_tier=lambda proposer_tier, current_config, **kwargs: generate_eval_candidate_from_tier(
         proposer_tier,
         current_config,
         model_adapter_factory=ModelAdapter,
+        **kwargs,
     ),
     generate_tool_candidate_from_tier=lambda proposer_tier, tool_name, task_description: generate_tool_candidate_from_tier(
         proposer_tier,

@@ -13,7 +13,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from fastapi import HTTPException
 
@@ -165,19 +165,58 @@ def extract_json_object(raw: str) -> Dict[str, Any]:
     return json.loads(match.group(0))
 
 
-async def generate_eval_candidate_from_tier(proposer_tier: str, current_config: Dict[str, Any], model_adapter_factory) -> Dict[str, Any]:
-    adapter = model_adapter_factory()
-    if proposer_tier == "weak":
-        from strata.schemas.execution import WeakExecutionContext
+def summarize_recent_eval_candidates(recent_reports: Iterable[Dict[str, Any]], *, limit: int = 6) -> list[Dict[str, Any]]:
+    summaries: list[Dict[str, Any]] = []
+    for report in recent_reports:
+        proposal_metadata = dict(report.get("proposal_metadata") or {})
+        override = canonical_eval_override(report.get("eval_harness_config_override"))
+        if not override.get("system_prompt") and not override.get("context_files"):
+            continue
+        summaries.append(
+            {
+                "candidate_change_id": str(report.get("candidate_change_id") or ""),
+                "proposer_tier": str(proposal_metadata.get("proposer_tier") or ""),
+                "rationale": str(proposal_metadata.get("rationale") or ""),
+                "expected_gain": str(proposal_metadata.get("expected_gain") or ""),
+                "eval_harness_config_override": override,
+            }
+        )
+        if len(summaries) >= limit:
+            break
+    return summaries
 
-        context = WeakExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
-    else:
-        from strata.schemas.execution import StrongExecutionContext
 
-        context = StrongExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
-    adapter.bind_execution_context(context)
+def _proposal_prompt(
+    proposer_tier: str,
+    current_config: Dict[str, Any],
+    *,
+    recent_candidates: Optional[list[Dict[str, Any]]] = None,
+    retry_reason: Optional[str] = None,
+) -> str:
+    recent_candidates = recent_candidates or []
+    recent_block = ""
+    if recent_candidates:
+        serialized = json.dumps(recent_candidates, indent=2)
+        recent_block = f"""
 
-    proposal_prompt = f"""
+Recent candidate families already explored:
+{serialized}
+
+Novelty requirement:
+- Do not repeat or lightly restate one of the recent candidate families above.
+- Prefer a different intervention class if possible, such as context selection, evaluation rubric, prompt framing, or proposal-selection criteria.
+""".rstrip()
+
+    retry_block = ""
+    if retry_reason:
+        retry_block = f"""
+
+Your previous draft was rejected before evaluation because it was too similar to the current or recent harness config.
+Retry with a materially different idea.
+Duplicate reason: {retry_reason}
+""".rstrip()
+
+    return f"""
 You are proposing one small harness-side change to improve weak-model self-improvement in Strata.
 Return only JSON with this schema:
 {{
@@ -193,29 +232,22 @@ Constraints:
 - The change must be safe to apply to future eval runs from either proposer tier.
 - Keep context_files short and repository-local.
 - Optimize for the real goal: the weak model proposing and surviving system improvements.
+- Avoid duplicates of the current harness config or recent already-tested mutations.{recent_block}{retry_block}
 
 Current eval harness config:
 {json.dumps(current_config, indent=2)}
 """.strip()
 
-    response = await adapter.chat(
-        [{"role": "user", "content": proposal_prompt}],
-        temperature=0.2 if proposer_tier == "weak" else 0.1,
-    )
-    raw_content = response.get("content", "")
-    try:
-        proposal = extract_json_object(raw_content)
-    except Exception:
-        proposal = {
-            "candidate_suffix": f"{proposer_tier}_fallback",
-            "system_prompt": current_config.get("system_prompt") or "",
-            "context_files": current_config.get("context_files") or [],
-            "rationale": "Proposal generation returned malformed JSON; preserving the current config instead of failing the cycle.",
-            "expected_gain": "No-op fallback to keep the bootstrap cycle alive while capturing malformed proposer output.",
-            "parse_error": str(raw_content or "")[:2000],
-        }
+
+def _normalize_eval_candidate(
+    proposer_tier: str,
+    proposal: Dict[str, Any],
+    current_config: Dict[str, Any],
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     suffix = slugify_candidate_suffix(str(proposal.get("candidate_suffix", proposer_tier)))
-    return {
+    result = {
         "proposer_tier": proposer_tier,
         "candidate_change_id": f"{proposer_tier}_{suffix}_{int(datetime.now(timezone.utc).timestamp())}",
         "eval_harness_config_override": {
@@ -226,6 +258,78 @@ Current eval harness config:
         "expected_gain": str(proposal.get("expected_gain") or ""),
         "raw_proposal": proposal,
     }
+    if metadata:
+        result["generation_metadata"] = metadata
+    return result
+
+
+async def generate_eval_candidate_from_tier(
+    proposer_tier: str,
+    current_config: Dict[str, Any],
+    model_adapter_factory,
+    *,
+    recent_candidates: Optional[list[Dict[str, Any]]] = None,
+    recent_signatures: Optional[set[str]] = None,
+    current_signature: Optional[str] = None,
+) -> Dict[str, Any]:
+    adapter = model_adapter_factory()
+    if proposer_tier == "weak":
+        from strata.schemas.execution import WeakExecutionContext
+
+        context = WeakExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+    else:
+        from strata.schemas.execution import StrongExecutionContext
+
+        context = StrongExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+    adapter.bind_execution_context(context)
+
+    recent_signatures = recent_signatures or set()
+    current_signature = current_signature or eval_override_signature(current_config)
+    base_temperature = 0.2 if proposer_tier == "weak" else 0.1
+    latest_raw_content = ""
+    latest_metadata: Dict[str, Any] = {"novelty_retry_count": 0}
+
+    for attempt_index in range(2):
+        retry_reason = None if attempt_index == 0 else "proposal matched current or recent eval override signature"
+        proposal_prompt = _proposal_prompt(
+            proposer_tier,
+            current_config,
+            recent_candidates=recent_candidates,
+            retry_reason=retry_reason,
+        )
+        response = await adapter.chat(
+            [{"role": "user", "content": proposal_prompt}],
+            temperature=base_temperature if attempt_index == 0 else min(base_temperature + 0.15, 0.35),
+        )
+        latest_raw_content = response.get("content", "")
+        try:
+            proposal = extract_json_object(latest_raw_content)
+        except Exception:
+            continue
+        normalized = _normalize_eval_candidate(
+            proposer_tier,
+            proposal,
+            current_config,
+            metadata={**latest_metadata, "novelty_retry_count": attempt_index},
+        )
+        signature = eval_override_signature(normalized["eval_harness_config_override"])
+        if signature != current_signature and signature not in recent_signatures:
+            return normalized
+
+    fallback = {
+        "candidate_suffix": f"{proposer_tier}_fallback",
+        "system_prompt": current_config.get("system_prompt") or "",
+        "context_files": current_config.get("context_files") or [],
+        "rationale": "Proposal generation returned malformed JSON or repeated a recent harness change; preserving the current config instead of failing the cycle.",
+        "expected_gain": "No-op fallback to keep the bootstrap cycle alive while capturing proposer output for debugging.",
+        "parse_error": str(latest_raw_content or "")[:2000],
+    }
+    return _normalize_eval_candidate(
+        proposer_tier,
+        fallback,
+        current_config,
+        metadata={"novelty_retry_count": 1, "fallback_reason": "duplicate_or_malformed"},
+    )
 
 
 async def generate_tool_candidate_from_tier(proposer_tier: str, *, tool_name: str, task_description: str, model_adapter_factory) -> Dict[str, Any]:

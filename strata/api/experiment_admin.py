@@ -29,6 +29,7 @@ from strata.specs.bootstrap import get_active_spec_record
 from strata.experimental.calibration import JUDGE_TRUST_KEY
 from strata.experimental.variants import get_variant_rating_snapshot
 from strata.storage.models import ParameterModel
+from strata.api.experiment_runtime import summarize_recent_eval_candidates
 
 
 def register_experiment_routes(
@@ -283,9 +284,6 @@ def register_experiment_routes(
                 },
             )
             return {"status": "ok", **queued}
-        current_config = get_active_eval_harness_config()
-        proposals = await asyncio.gather(*[generate_eval_candidate_from_tier(tier, current_config) for tier in proposer_tiers])
-
         recent_reports = (
             storage.session.query(ParameterModel)
             .filter(ParameterModel.key.like("experiment_report:%"))
@@ -293,12 +291,27 @@ def register_experiment_routes(
             .limit(50)
             .all()
         )
+        recent_report_payloads = list(iter_experiment_reports(recent_reports))
         recent_signatures = {
             eval_override_signature(report.get("eval_harness_config_override"))
-            for report in iter_experiment_reports(recent_reports)
+            for report in recent_report_payloads
             if report.get("eval_harness_config_override")
         }
+        recent_candidate_hints = summarize_recent_eval_candidates(recent_report_payloads)
+        current_config = get_active_eval_harness_config()
         current_signature = eval_override_signature(current_config)
+        proposals = await asyncio.gather(
+            *[
+                generate_eval_candidate_from_tier(
+                    tier,
+                    current_config,
+                    recent_candidates=recent_candidate_hints,
+                    recent_signatures=recent_signatures,
+                    current_signature=current_signature,
+                )
+                for tier in proposer_tiers
+            ]
+        )
         seen_signatures = set()
 
         runner = ExperimentRunner(storage, model_adapter)

@@ -27,15 +27,28 @@ const TYPE_MAP = {
 
 const TERMINAL_STATUSES = new Set(['complete', 'abandoned', 'cancelled']);
 
+function parseTimestamp(dateString) {
+  if (!dateString) return null;
+  const raw = String(dateString).trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function formatAbsolute(dateString) {
   if (!dateString) return '—';
-  const date = new Date(dateString);
+  const date = parseTimestamp(dateString);
+  if (!date) return '—';
   return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function formatRelative(dateString) {
   if (!dateString) return 'unknown';
-  const deltaMs = Date.now() - new Date(dateString).getTime();
+  const date = parseTimestamp(dateString);
+  if (!date) return 'unknown';
+  const deltaMs = Date.now() - date.getTime();
   const minutes = Math.max(0, Math.floor(deltaMs / 60000));
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
@@ -52,8 +65,11 @@ function formatAbsoluteWithRelative(dateString) {
 
 function formatElapsed(startedAt, endedAt = null) {
   if (!startedAt) return 'unknown';
-  const start = new Date(startedAt).getTime();
-  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  const startDate = parseTimestamp(startedAt);
+  const endDate = endedAt ? parseTimestamp(endedAt) : null;
+  if (!startDate) return 'unknown';
+  const start = startDate.getTime();
+  const end = endDate ? endDate.getTime() : Date.now();
   const totalSeconds = Math.max(0, Math.floor((end - start) / 1000));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -314,7 +330,8 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
   const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
   const isActive = !attempt.ended_at && !attempt.outcome;
   const lastActivityAt = taskUpdatedAt || attempt.started_at;
-  const recentlyActive = lastActivityAt ? (nowMs - new Date(lastActivityAt).getTime()) < 90000 : false;
+  const parsedLastActivityAt = parseTimestamp(lastActivityAt);
+  const recentlyActive = parsedLastActivityAt ? (nowMs - parsedLastActivityAt.getTime()) < 90000 : false;
   const artifacts = attempt.artifacts && typeof attempt.artifacts === 'object' ? attempt.artifacts : null;
   const summaryBits = [];
   if (artifacts?.job_kind) summaryBits.push(`job ${artifacts.job_kind}`);

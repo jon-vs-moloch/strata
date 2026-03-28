@@ -11,7 +11,7 @@ import json
 import asyncio
 from typing import Any, Dict
 
-from strata.api.experiment_runtime import eval_override_signature
+from strata.api.experiment_runtime import eval_override_signature, summarize_recent_eval_candidates
 from strata.eval.benchmark import persist_benchmark_report, run_benchmark
 from strata.eval.matrix import run_eval_matrix
 from strata.eval.harness_eval import get_active_eval_harness_config
@@ -145,11 +145,6 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             suite_name = str(payload.get("suite_name") or "bootstrap_mcq_v1")
             run_count = max(1, int(payload.get("run_count", 2) or 2))
             baseline_change_id = str(payload.get("baseline_change_id") or "baseline")
-            current_config = get_active_eval_harness_config()
-            proposals = await asyncio.gather(
-                *[_generate_eval_candidate_from_tier(tier, current_config) for tier in proposer_tiers]
-            )
-
             recent_reports = (
                 storage.session.query(ParameterModel)
                 .filter(ParameterModel.key.like("experiment_report:%"))
@@ -157,12 +152,27 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 .limit(50)
                 .all()
             )
+            recent_report_payloads = list(iter_experiment_reports(recent_reports))
             recent_signatures = {
                 eval_override_signature(report.get("eval_harness_config_override"))
-                for report in iter_experiment_reports(recent_reports)
+                for report in recent_report_payloads
                 if report.get("eval_harness_config_override")
             }
+            recent_candidate_hints = summarize_recent_eval_candidates(recent_report_payloads)
+            current_config = get_active_eval_harness_config()
             current_signature = eval_override_signature(current_config)
+            proposals = await asyncio.gather(
+                *[
+                    _generate_eval_candidate_from_tier(
+                        tier,
+                        current_config,
+                        recent_candidates=recent_candidate_hints,
+                        recent_signatures=recent_signatures,
+                        current_signature=current_signature,
+                    )
+                    for tier in proposer_tiers
+                ]
+            )
             seen_signatures = set()
 
             runner = ExperimentRunner(storage, model_adapter)
