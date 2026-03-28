@@ -213,6 +213,9 @@ Strata now treats raw note accumulation and current synthesized knowledge as sep
 - raw archive: `.knowledge/`
 - synthesized page store: parameter-backed pages mirrored to `docs/spec/kb/`
 - provenance map: `.knowledge/provenance_index.json`
+- current-facing wiki index: `docs/spec/current_knowledge_base.md`
+
+`POST /admin/knowledge/compact` is the bridge between those layers. It now seeds the page store from durable specs/docs, mirrors the resulting pages into `docs/spec/kb/`, writes a current wiki index, and preserves per-page provenance in `.knowledge/provenance_index.json`. The intended steady state is that research and operators cite the synthesized knowledge pages first, and older raw note dumps can be aged out once their content has been integrated into the wiki.
 
 Knowledge pages also carry first-class scope and disclosure metadata so the system can decide what it may use or reveal:
 

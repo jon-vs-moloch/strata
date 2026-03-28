@@ -1,0 +1,232 @@
+{
+  "generated_at": "2026-03-28T07:11:38.225173+00:00",
+  "current_kb_path": "docs/spec/current_knowledge_base.md",
+  "page_count": 10,
+  "pages": {
+    "constitution": {
+      "title": "Constitution",
+      "domain": "system",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": ".knowledge/specs/constitution.md",
+          "path": ".knowledge/specs/constitution.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:36:47.616060+00:00",
+          "snippet": "# Constitution This file stores persistent, cross-project instructions and preferences for Strata. Canonical location: `.knowledge/specs/constitution.md` Current durable guidance: - prefer explicit evaluation over vague hope; if we want an "
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "project-spec": {
+      "title": "Project Spec",
+      "domain": "project",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": ".knowledge/specs/project_spec.md",
+          "path": ".knowledge/specs/project_spec.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:36:47.616681+00:00",
+          "snippet": "# Project Spec This file stores the current high-level vision for the active Strata project. Canonical location: `.knowledge/specs/project_spec.md` Current project intent: - extract useful work from small local models by pushing rigor into "
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "strata-system-philosophy": {
+      "title": "Strata System Philosophy",
+      "domain": "system",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": "docs/spec/project-philosophy.md",
+          "path": "docs/spec/project-philosophy.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:36:47.617658+00:00",
+          "snippet": "# Strata Project Philosophy ## Purpose Strata exists to answer a practical question: Can a modest local model become genuinely useful if the system around it supplies the rigor, memory, validation, and iterative structure that the model its"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "codemap": {
+      "title": "Codemap",
+      "domain": "project",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": "docs/spec/codemap.md",
+          "path": "docs/spec/codemap.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-27T23:24:33.872113+00:00",
+          "snippet": "# Strata Codemap This file is the fast path to understanding the repository. The goal is not to list every file. The goal is to help humans and small-context models find the right module quickly, inspect the narrowest relevant surface first"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "eval-brief": {
+      "title": "Eval Brief",
+      "domain": "project",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": "docs/spec/eval-brief.md",
+          "path": "docs/spec/eval-brief.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-27T23:24:30.564410+00:00",
+          "snippet": "# Eval Brief This file is the compact eval-facing summary for Strata. Use it when you need the project\u2019s intent and current operating model without loading the full README. ## Core Thesis Strata is designed to extract useful work from small"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "eval-catalog": {
+      "title": "Eval Catalog",
+      "domain": "project",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": "docs/spec/eval-catalog.md",
+          "path": "docs/spec/eval-catalog.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-26T21:20:05.727243+00:00",
+          "snippet": "# Eval Catalog This catalog lists the standard benchmark suites currently checked into Strata's structured-eval lane. These suites are meant to support apples-to-apples, no-context comparisons between: - raw model - harness without tools/we"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "task-attempt-ontology": {
+      "title": "Task Attempt Ontology",
+      "domain": "project",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": "docs/spec/task-attempt-ontology.md",
+          "path": "docs/spec/task-attempt-ontology.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-24T10:44:02.115831+00:00",
+          "snippet": "Task + Attempt Ontology Spec Minimal recursive work model for agentic systems 1. Purpose Define a simple, consistent model for representing work in a recursive system where: \u2022 all work units are Tasks \u2022 all execution happens through Attempt"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "ui-operator-audit": {
+      "title": "UI Operator Audit",
+      "domain": "project",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": "docs/spec/ui-operator-audit.md",
+          "path": "docs/spec/ui-operator-audit.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:55:14.689084+00:00",
+          "snippet": "# UI Operator Audit This note tracks which important operator-facing Strata surfaces are visible in the UI and which still remain mostly backend-driven. ## Current intent The UI should make the system legible enough that an operator does no"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "model-performance-intel": {
+      "title": "Model Performance Intel",
+      "domain": "system",
+      "source_count": 1,
+      "provenance": [
+        {
+          "label": ".knowledge/model_performance_intel.md",
+          "path": ".knowledge/model_performance_intel.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T05:40:56.828380+00:00",
+          "snippet": "# Strata Fitness Signal Report *Generated on: 2026-03-28T05:40:56.827940* ## Global Stats - **Total Attempts:** 164 - **Success Rate:** 76.22% - **Failed Attempts:** 39 - **Decomposition Successes:** 0 ## Model Breakdown ## Weak-Model Optim"
+        }
+      ],
+      "archived_provenance_summary": {}
+    },
+    "current-knowledge-base": {
+      "title": "Current Knowledge Base",
+      "domain": "project",
+      "source_count": 9,
+      "provenance": [
+        {
+          "label": ".knowledge/specs/constitution.md",
+          "path": ".knowledge/specs/constitution.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:36:47.616060+00:00",
+          "snippet": "# Constitution This file stores persistent, cross-project instructions and preferences for Strata. Canonical location: `.knowledge/specs/constitution.md` Current durable guidance: - prefer explicit evaluation over vague hope; if we want an "
+        },
+        {
+          "label": ".knowledge/specs/project_spec.md",
+          "path": ".knowledge/specs/project_spec.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:36:47.616681+00:00",
+          "snippet": "# Project Spec This file stores the current high-level vision for the active Strata project. Canonical location: `.knowledge/specs/project_spec.md` Current project intent: - extract useful work from small local models by pushing rigor into "
+        },
+        {
+          "label": "docs/spec/project-philosophy.md",
+          "path": "docs/spec/project-philosophy.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:36:47.617658+00:00",
+          "snippet": "# Strata Project Philosophy ## Purpose Strata exists to answer a practical question: Can a modest local model become genuinely useful if the system around it supplies the rigor, memory, validation, and iterative structure that the model its"
+        },
+        {
+          "label": "docs/spec/codemap.md",
+          "path": "docs/spec/codemap.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-27T23:24:33.872113+00:00",
+          "snippet": "# Strata Codemap This file is the fast path to understanding the repository. The goal is not to list every file. The goal is to help humans and small-context models find the right module quickly, inspect the narrowest relevant surface first"
+        },
+        {
+          "label": "docs/spec/eval-brief.md",
+          "path": "docs/spec/eval-brief.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-27T23:24:30.564410+00:00",
+          "snippet": "# Eval Brief This file is the compact eval-facing summary for Strata. Use it when you need the project\u2019s intent and current operating model without loading the full README. ## Core Thesis Strata is designed to extract useful work from small"
+        },
+        {
+          "label": "docs/spec/eval-catalog.md",
+          "path": "docs/spec/eval-catalog.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-26T21:20:05.727243+00:00",
+          "snippet": "# Eval Catalog This catalog lists the standard benchmark suites currently checked into Strata's structured-eval lane. These suites are meant to support apples-to-apples, no-context comparisons between: - raw model - harness without tools/we"
+        },
+        {
+          "label": "docs/spec/task-attempt-ontology.md",
+          "path": "docs/spec/task-attempt-ontology.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-24T10:44:02.115831+00:00",
+          "snippet": "Task + Attempt Ontology Spec Minimal recursive work model for agentic systems 1. Purpose Define a simple, consistent model for representing work in a recursive system where: \u2022 all work units are Tasks \u2022 all execution happens through Attempt"
+        },
+        {
+          "label": "docs/spec/ui-operator-audit.md",
+          "path": "docs/spec/ui-operator-audit.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T06:55:14.689084+00:00",
+          "snippet": "# UI Operator Audit This note tracks which important operator-facing Strata surfaces are visible in the UI and which still remain mostly backend-driven. ## Current intent The UI should make the system legible enough that an operator does no"
+        },
+        {
+          "label": ".knowledge/model_performance_intel.md",
+          "path": ".knowledge/model_performance_intel.md",
+          "kind": "durable_doc",
+          "recorded_at": "2026-03-28T07:11:38.225173+00:00",
+          "modified_at": "2026-03-28T05:40:56.828380+00:00",
+          "snippet": "# Strata Fitness Signal Report *Generated on: 2026-03-28T05:40:56.827940* ## Global Stats - **Total Attempts:** 164 - **Success Rate:** 76.22% - **Failed Attempts:** 39 - **Decomposition Successes:** 0 ## Model Breakdown ## Weak-Model Optim"
+        }
+      ],
+      "archived_provenance_summary": {}
+    }
+  },
+  "archived_files": []
+}

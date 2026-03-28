@@ -784,7 +784,7 @@ function App() {
         axios.get(`${API}/admin/routing`),
         axios.get(`${API}/admin/specs`),
         axios.get(`${API}/admin/spec_proposals?limit=6`),
-        axios.get(`${API}/admin/knowledge/pages?limit=6`),
+        axios.get(`${API}/admin/knowledge/pages?limit=6&audience=operator`),
         axios.get(`${API}/admin/storage/retention`),
         activeNav === 'dashboard' ? axios.get(`${API}/admin/variants/ratings`) : Promise.resolve({ data: null }),
         activeNav === 'dashboard' ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null })
@@ -863,6 +863,7 @@ function App() {
         const pagesRes = await axios.get(`${API}/admin/knowledge/pages`, {
           params: {
             limit: 50,
+            audience: 'operator',
             query: knowledgeQuery || undefined,
           },
         });
@@ -879,7 +880,9 @@ function App() {
           return;
         }
 
-        const pageRes = await axios.get(`${API}/admin/knowledge/pages/${nextSlug}`);
+        const pageRes = await axios.get(`${API}/admin/knowledge/pages/${nextSlug}`, {
+          params: { audience: 'operator' },
+        });
         if (cancelled) return;
         setSelectedKnowledgePage(pageRes.data.page || null);
       } catch (err) {

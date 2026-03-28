@@ -3,13 +3,22 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from strata.knowledge.page_payloads import slugify_page_title
+from strata.knowledge.pages import KnowledgePageStore
+from strata.storage.services.main import StorageManager
+
+
 KNOWLEDGE_DIR = ROOT / ".knowledge"
 SPEC_DIR = ROOT / "docs" / "spec"
 CURRENT_KB_PATH = SPEC_DIR / "current_knowledge_base.md"
@@ -17,6 +26,90 @@ PROVENANCE_PATH = KNOWLEDGE_DIR / "provenance_index.json"
 ARCHIVE_DIR = KNOWLEDGE_DIR / "archive"
 MAX_HOT_FINAL = 8
 MAX_HOT_WIP = 12
+
+SOURCE_BLUEPRINTS = [
+    {
+        "path": Path(".knowledge/specs/constitution.md"),
+        "slug": "constitution",
+        "title": "Constitution",
+        "domain": "system",
+        "visibility_policy": "project_scoped",
+        "tags": ["constitution", "durable", "alignment"],
+        "related_pages": ["project-spec", "strata-system-philosophy", "codemap"],
+    },
+    {
+        "path": Path(".knowledge/specs/project_spec.md"),
+        "slug": "project-spec",
+        "title": "Project Spec",
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "tags": ["project", "durable", "alignment"],
+        "related_pages": ["constitution", "strata-system-philosophy", "codemap"],
+    },
+    {
+        "path": Path("docs/spec/project-philosophy.md"),
+        "slug": "strata-system-philosophy",
+        "title": "Strata System Philosophy",
+        "domain": "system",
+        "visibility_policy": "project_scoped",
+        "tags": ["philosophy", "bootstrap", "system"],
+        "related_pages": ["constitution", "project-spec", "codemap"],
+    },
+    {
+        "path": Path("docs/spec/codemap.md"),
+        "slug": "codemap",
+        "title": "Codemap",
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "tags": ["architecture", "navigation", "repo"],
+        "related_pages": ["project-spec", "strata-system-philosophy", "ui-operator-audit"],
+    },
+    {
+        "path": Path("docs/spec/eval-brief.md"),
+        "slug": "eval-brief",
+        "title": "Eval Brief",
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "tags": ["eval", "telemetry"],
+        "related_pages": ["eval-catalog", "project-spec", "model-performance-intel"],
+    },
+    {
+        "path": Path("docs/spec/eval-catalog.md"),
+        "slug": "eval-catalog",
+        "title": "Eval Catalog",
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "tags": ["eval", "catalog"],
+        "related_pages": ["eval-brief", "model-performance-intel"],
+    },
+    {
+        "path": Path("docs/spec/task-attempt-ontology.md"),
+        "slug": "task-attempt-ontology",
+        "title": "Task Attempt Ontology",
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "tags": ["tasks", "ontology", "storage"],
+        "related_pages": ["codemap", "project-spec"],
+    },
+    {
+        "path": Path("docs/spec/ui-operator-audit.md"),
+        "slug": "ui-operator-audit",
+        "title": "UI Operator Audit",
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "tags": ["ui", "operator", "audit"],
+        "related_pages": ["codemap", "project-spec", "current-knowledge-base"],
+    },
+    {
+        "path": Path(".knowledge/model_performance_intel.md"),
+        "slug": "model-performance-intel",
+        "title": "Model Performance Intel",
+        "domain": "system",
+        "visibility_policy": "project_scoped",
+        "tags": ["telemetry", "performance", "models"],
+        "related_pages": ["eval-brief", "eval-catalog", "current-knowledge-base"],
+    },
+]
 
 
 def _classify(path: Path) -> str:
@@ -54,16 +147,172 @@ def _archive_file(path: Path) -> Path:
     return target
 
 
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _split_frontmatter(raw: str) -> tuple[Dict[str, str], str]:
+    if not raw.startswith("---\n"):
+        return {}, raw
+    parts = raw.split("\n---\n", 1)
+    if len(parts) != 2:
+        return {}, raw
+    meta_raw = parts[0].splitlines()[1:]
+    meta: Dict[str, str] = {}
+    for line in meta_raw:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        meta[key.strip()] = value.strip()
+    return meta, parts[1].lstrip()
+
+
+def _extract_title(body: str, fallback: str) -> str:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return fallback
+
+
+def _provenance_entry(path: Path, *, kind: str, body: str, recorded_at: str) -> Dict[str, Any]:
+    stat = path.stat()
+    rel = str(path.relative_to(ROOT))
+    return {
+        "label": rel,
+        "path": rel,
+        "kind": kind,
+        "recorded_at": recorded_at,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "snippet": _snippet(body, limit=240),
+    }
+
+
+def _iter_blueprint_pages(recorded_at: str) -> List[Dict[str, Any]]:
+    pages: List[Dict[str, Any]] = []
+    for blueprint in SOURCE_BLUEPRINTS:
+        path = ROOT / blueprint["path"]
+        if not path.exists():
+            continue
+        raw = _read_text(path)
+        frontmatter, body = _split_frontmatter(raw)
+        title = str(frontmatter.get("title") or blueprint["title"] or _extract_title(body, path.stem.replace("_", " ").title()))
+        slug = str(frontmatter.get("slug") or blueprint["slug"] or slugify_page_title(title))
+        pages.append(
+            {
+                "slug": slug,
+                "title": title,
+                "body": body.strip(),
+                "summary": frontmatter.get("summary"),
+                "tags": blueprint.get("tags") or [],
+                "aliases": blueprint.get("aliases") or [],
+                "related_pages": blueprint.get("related_pages") or [],
+                "domain": frontmatter.get("domain") or blueprint.get("domain") or "project",
+                "visibility_policy": frontmatter.get("visibility_policy") or blueprint.get("visibility_policy"),
+                "confidence": float(frontmatter.get("confidence") or 0.75),
+                "created_by": "knowledge_compactor",
+                "updated_reason": "knowledge_compaction",
+                "project_id": "strata",
+                "retention_policy": "persistent",
+                "provenance": [_provenance_entry(path, kind="durable_doc", body=body, recorded_at=recorded_at)],
+            }
+        )
+    return pages
+
+
+def _iter_hot_research_pages(raw_files: List[Path], recorded_at: str) -> List[Dict[str, Any]]:
+    pages: List[Dict[str, Any]] = []
+    for path in raw_files:
+        if path.parent != KNOWLEDGE_DIR:
+            continue
+        if path.name == "model_performance_intel.md":
+            continue
+        raw = _read_text(path)
+        frontmatter, body = _split_frontmatter(raw)
+        title = str(frontmatter.get("title") or _extract_title(body, path.stem.replace("_", " ").title()))
+        kind = _classify(path)
+        pages.append(
+            {
+                "slug": str(frontmatter.get("slug") or slugify_page_title(title)),
+                "title": title,
+                "body": body.strip(),
+                "summary": frontmatter.get("summary"),
+                "tags": [kind, "research"],
+                "aliases": [],
+                "related_pages": ["current-knowledge-base"],
+                "domain": "project",
+                "visibility_policy": "project_scoped",
+                "confidence": 0.55 if kind == "wip_research" else 0.65,
+                "created_by": "knowledge_compactor",
+                "updated_reason": "knowledge_compaction",
+                "project_id": "strata",
+                "retention_policy": "ephemeral" if kind == "wip_research" else "persistent",
+                "provenance": [_provenance_entry(path, kind=kind, body=body, recorded_at=recorded_at)],
+            }
+        )
+    return pages
+
+
+def _build_index_page(page_specs: List[Dict[str, Any]], archived_entries: List[Dict[str, str]], recorded_at: str) -> Dict[str, Any]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for page in page_specs:
+        grouped[str(page.get("domain") or "project")].append(page)
+    lines = [
+        "# Current Knowledge Base",
+        "",
+        "This page is the current-facing knowledge index for Strata.",
+        "Durable docs and synthesized pages are kept here so research and operations can cite a stable wiki instead of scraping transient note dumps.",
+        "",
+        f"Generated: {recorded_at}",
+        "",
+        "## Index",
+    ]
+    for domain, entries in sorted(grouped.items()):
+        lines.append(f"### {domain.title()}")
+        for page in sorted(entries, key=lambda item: str(item.get('title') or item.get('slug') or '')):
+            summary = str(page.get("summary") or _snippet(str(page.get("body") or ""), limit=180))
+            lines.append(f"- **{page['title']}** (`{page['slug']}`): {summary}")
+        lines.append("")
+    if archived_entries:
+        lines.extend(
+            [
+                "## Archived Research",
+                "",
+                f"- {len(archived_entries)} older research notes were archived after synthesis to keep the hot knowledge thread bounded.",
+                "",
+            ]
+        )
+    provenance = []
+    for page in page_specs:
+        provenance.extend(page.get("provenance") or [])
+    return {
+        "slug": "current-knowledge-base",
+        "title": "Current Knowledge Base",
+        "body": "\n".join(lines).strip(),
+        "tags": ["knowledge", "index", "wiki"],
+        "aliases": ["knowledge base", "wiki"],
+        "related_pages": [page["slug"] for page in page_specs[:20]],
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "confidence": 0.9,
+        "created_by": "knowledge_compactor",
+        "updated_reason": "knowledge_compaction",
+        "project_id": "strata",
+        "retention_policy": "persistent",
+        "provenance": provenance,
+    }
+
+
 def build_knowledge_snapshot() -> Dict[str, object]:
+    recorded_at = datetime.now(timezone.utc).isoformat()
     KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
     SPEC_DIR.mkdir(parents=True, exist_ok=True)
-    files = sorted([path for path in KNOWLEDGE_DIR.glob("*.md") if path.is_file()])
-    files, archived_candidates = _archive_plan(files)
-    grouped: Dict[str, List[Dict[str, str]]] = defaultdict(list)
-    provenance: List[Dict[str, str]] = []
+
+    raw_files = sorted([path for path in KNOWLEDGE_DIR.glob("*.md") if path.is_file()])
+    hot_files, archived_candidates = _archive_plan(raw_files)
     archived_entries: List[Dict[str, str]] = []
     for path in archived_candidates:
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        text = _read_text(path)
         target = _archive_file(path)
         archived_entries.append(
             {
@@ -73,64 +322,92 @@ def build_knowledge_snapshot() -> Dict[str, object]:
                 "snippet": _snippet(text),
             }
         )
-    for path in files:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        kind = _classify(path)
-        entry = {
-            "filename": path.name,
-            "kind": kind,
-            "modified_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
-            "snippet": _snippet(text),
-        }
-        grouped[kind].append(entry)
-        provenance.append(entry)
 
-    lines = [
-        "# Current Knowledge Base",
-        "",
-        "This is the compacted, current-facing knowledge view for Strata.",
-        "Raw `.knowledge/` notes remain the archival provenance layer.",
-        "",
-        f"Generated: {datetime.now(timezone.utc).isoformat()}",
-        "",
-        "## Sections",
-    ]
-    for kind, entries in sorted(grouped.items()):
-        lines.append(f"### {kind.replace('_', ' ').title()}")
-        for entry in entries[-12:]:
-            lines.append(f"- **{entry['filename']}**: {entry['snippet']}")
-        lines.append("")
-    if archived_entries:
-        lines.extend(
-            [
-                "## Archived Research",
-                "",
-                f"- {len(archived_entries)} older research notes were archived after synthesis to avoid unbounded hot-note growth.",
-                "",
-            ]
+    page_specs = _iter_blueprint_pages(recorded_at)
+    page_specs.extend(_iter_hot_research_pages(hot_files, recorded_at))
+    page_specs.append(_build_index_page(page_specs, archived_entries, recorded_at))
+
+    storage = StorageManager()
+    mirrored_pages: List[Dict[str, Any]] = []
+    try:
+        store = KnowledgePageStore(storage)
+        for page in page_specs:
+            mirrored_pages.append(
+                store.upsert_page(
+                    slug=page["slug"],
+                    title=page["title"],
+                    body=page["body"],
+                    summary=page.get("summary"),
+                    tags=page.get("tags"),
+                    aliases=page.get("aliases"),
+                    related_pages=page.get("related_pages"),
+                    provenance=page.get("provenance"),
+                    confidence=float(page.get("confidence", 0.5) or 0.5),
+                    created_by=str(page.get("created_by") or "knowledge_compactor"),
+                    updated_reason=str(page.get("updated_reason") or "knowledge_compaction"),
+                    domain=str(page.get("domain") or "project"),
+                    visibility_policy=page.get("visibility_policy"),
+                    disclosure_rules=page.get("disclosure_rules"),
+                    scope_id=str(page.get("scope_id") or ""),
+                    project_id=str(page.get("project_id") or "strata"),
+                    owner_id=str(page.get("owner_id") or ""),
+                    retention_policy=str(page.get("retention_policy") or "persistent"),
+                )
+            )
+        storage.commit()
+    finally:
+        storage.close()
+
+    current_page = next((page for page in mirrored_pages if page.get("slug") == "current-knowledge-base"), None)
+    if current_page:
+        CURRENT_KB_PATH.write_text(
+            "\n".join(
+                [
+                    f"# {current_page['title']}",
+                    "",
+                    current_page["body"],
+                    "",
+                ]
+            ),
+            encoding="utf-8",
         )
 
-    CURRENT_KB_PATH.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
     PROVENANCE_PATH.write_text(
         json.dumps(
             {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "hot_files": provenance,
-                "archived_files": archived_entries,
+                "generated_at": recorded_at,
                 "current_kb_path": str(CURRENT_KB_PATH.relative_to(ROOT)),
+                "page_count": len(mirrored_pages),
+                "pages": {
+                    page["slug"]: {
+                        "title": page["title"],
+                        "domain": page.get("domain"),
+                        "source_count": page.get("source_count", len(page.get("provenance") or [])),
+                        "provenance": page.get("provenance") or [],
+                        "archived_provenance_summary": page.get("archived_provenance_summary") or {},
+                    }
+                    for page in mirrored_pages
+                },
+                "archived_files": archived_entries,
             },
             indent=2,
         )
         + "\n",
         encoding="utf-8",
     )
+
+    sections: Dict[str, int] = defaultdict(int)
+    for page in mirrored_pages:
+        sections[str(page.get("domain") or "project")] += 1
+
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "file_count": len(provenance),
+        "generated_at": recorded_at,
+        "page_count": len(mirrored_pages),
         "archived_file_count": len(archived_entries),
         "current_kb_path": str(CURRENT_KB_PATH.relative_to(ROOT)),
         "provenance_path": str(PROVENANCE_PATH.relative_to(ROOT)),
-        "sections": {kind: len(entries) for kind, entries in grouped.items()},
+        "sections": dict(sections),
+        "page_slugs": [page["slug"] for page in mirrored_pages],
     }
 
 
