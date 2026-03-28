@@ -20,5 +20,4 @@ strata/attic/
 .knowledge/*
 !.knowledge/specs/
 !.knowledge/specs/*.md
-!.knowledge/model_performance_intel.md
 !.knowledge/provenance_index.json
