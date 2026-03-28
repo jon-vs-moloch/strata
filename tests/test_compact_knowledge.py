@@ -90,10 +90,11 @@ def test_compaction_materializes_pages_and_provenance(tmp_path, monkeypatch):
     index = storage.parameters.values["knowledge_pages:index"]
     slugs = {row["slug"] for row in index}
 
-    assert snapshot["page_count"] >= 5
+    assert snapshot["page_count"] >= 6
     assert "constitution" in slugs
     assert "project-spec" in slugs
     assert "current-knowledge-base" in slugs
+    assert "knowledge-maintenance-report" in slugs
     assert (root / "docs" / "spec" / "current_knowledge_base.md").exists()
     assert (root / ".knowledge" / "provenance_index.json").exists()
 
@@ -103,3 +104,6 @@ def test_compaction_materializes_pages_and_provenance(tmp_path, monkeypatch):
     current_kb = storage.parameters.values["knowledge_page:current-knowledge-base"]
     assert current_kb["source_count"] >= 3
     assert "stable wiki" in current_kb["body"]
+
+    maintenance_report = storage.parameters.values["knowledge_page:knowledge-maintenance-report"]
+    assert "Knowledge Maintenance Report" in maintenance_report["title"]

@@ -217,6 +217,8 @@ Strata now treats raw note accumulation and current synthesized knowledge as sep
 
 `POST /admin/knowledge/compact` is the bridge between those layers. It now seeds the page store from durable specs/docs, mirrors the resulting pages into `docs/spec/kb/`, writes a current wiki index, and preserves per-page provenance in `.knowledge/provenance_index.json`. The intended steady state is that research and operators cite the synthesized knowledge pages first, and older raw note dumps can be aged out once their content has been integrated into the wiki.
 
+The compaction pass also emits maintenance signals. Each page carries freshness and duplicate-candidate metadata, and the wiki now includes a `knowledge-maintenance-report` page so operators can see where pages may need merge, refresh, or review work instead of letting the knowledge base quietly fork.
+
 Knowledge pages also carry first-class scope and disclosure metadata so the system can decide what it may use or reveal:
 
 - `domain`: `system`, `agent`, `user`, `contacts`, `project`, or `world`

@@ -1,7 +1,7 @@
 ---
 title: UI Operator Audit
 slug: ui-operator-audit
-last_updated: 2026-03-28T07:11:48.492413+00:00
+last_updated: 2026-03-28T07:35:01.145315+00:00
 confidence: 0.75
 domain: project
 visibility_policy: project_scoped

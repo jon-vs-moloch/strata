@@ -1,7 +1,7 @@
 ---
 title: Constitution
 slug: constitution
-last_updated: 2026-03-28T07:11:48.491378+00:00
+last_updated: 2026-03-28T07:35:01.144262+00:00
 confidence: 0.75
 domain: system
 visibility_policy: project_scoped

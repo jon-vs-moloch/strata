@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -126,6 +127,67 @@ def normalize_links(slugs: Optional[List[str]]) -> List[str]:
     return normalized
 
 
+def build_content_fingerprint(content: str) -> str:
+    return hashlib.sha1(str(content or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_duplicate_candidates(raw: Any) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        slug = slugify_page_title(str(item.get("slug") or ""))
+        if not slug:
+            continue
+        candidates.append(
+            {
+                "slug": slug,
+                "reason": str(item.get("reason") or "possible_duplicate"),
+                "score": float(item.get("score", 0.0) or 0.0),
+            }
+        )
+    candidates.sort(key=lambda item: (-item["score"], item["slug"]))
+    return candidates[:12]
+
+
+def normalize_maintenance(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    source_paths = []
+    seen_paths = set()
+    for item in raw.get("source_paths") or []:
+        cleaned = str(item).strip()
+        if not cleaned or cleaned in seen_paths:
+            continue
+        source_paths.append(cleaned)
+        seen_paths.add(cleaned)
+    source_fingerprints = []
+    seen_fingerprints = set()
+    for item in raw.get("source_fingerprints") or []:
+        cleaned = str(item).strip()
+        if not cleaned or cleaned in seen_fingerprints:
+            continue
+        source_fingerprints.append(cleaned)
+        seen_fingerprints.add(cleaned)
+    freshness_status = str(raw.get("freshness_status") or "unknown").strip().lower()
+    if freshness_status not in {"fresh", "stale", "mixed", "unknown"}:
+        freshness_status = "unknown"
+    review_status = str(raw.get("review_status") or "unreviewed").strip().lower()
+    if review_status not in {"unreviewed", "confirmed", "contested", "rejected"}:
+        review_status = "unreviewed"
+    return {
+        "freshness_status": freshness_status,
+        "stale_source_count": int(raw.get("stale_source_count", 0) or 0),
+        "source_paths": source_paths,
+        "source_fingerprints": source_fingerprints,
+        "duplicate_candidates": _normalize_duplicate_candidates(raw.get("duplicate_candidates")),
+        "review_status": review_status,
+        "last_compacted_at": str(raw.get("last_compacted_at") or ""),
+        "last_reviewed_at": str(raw.get("last_reviewed_at") or ""),
+        "evidence_status": str(raw.get("evidence_status") or "seeded"),
+    }
+
+
 def compact_provenance(provenance: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     if len(provenance) <= MAX_INLINE_PROVENANCE:
         return provenance, {}
@@ -150,6 +212,7 @@ def normalize_page_payload(payload: Any, *, slug: Optional[str] = None) -> Dict[
     provenance, archived_provenance_summary = compact_provenance(provenance)
     domain = normalize_domain(payload.get("domain"))
     visibility_policy = str(payload.get("visibility_policy") or DEFAULT_VISIBILITY_BY_DOMAIN[domain])
+    maintenance = normalize_maintenance(payload.get("maintenance"))
     return {
         "slug": normalized_slug,
         "title": title,
@@ -172,6 +235,7 @@ def normalize_page_payload(payload: Any, *, slug: Optional[str] = None) -> Dict[
             domain=domain,
             visibility_policy=visibility_policy,
         ),
+        "maintenance": maintenance,
         "scope_id": str(payload.get("scope_id") or ""),
         "project_id": str(payload.get("project_id") or ""),
         "owner_id": str(payload.get("owner_id") or ""),

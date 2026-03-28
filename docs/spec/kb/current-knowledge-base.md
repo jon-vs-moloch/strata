@@ -1,7 +1,7 @@
 ---
 title: Current Knowledge Base
 slug: current-knowledge-base
-last_updated: 2026-03-28T07:11:48.492636+00:00
+last_updated: 2026-03-28T07:35:01.145582+00:00
 confidence: 0.9
 domain: project
 visibility_policy: project_scoped
@@ -35,7 +35,7 @@ related_pages: ['constitution', 'project-spec', 'strata-system-philosophy', 'cod
 This page is the current-facing knowledge index for Strata.
 Durable docs and synthesized pages are kept here so research and operations can cite a stable wiki instead of scraping transient note dumps.
 
-Generated: 2026-03-28T07:11:48.490686+00:00
+Generated: 2026-03-28T07:35:01.143270+00:00
 
 ## Index
 ### Project

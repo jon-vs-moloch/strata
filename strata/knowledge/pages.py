@@ -17,16 +17,18 @@ from strata.knowledge.page_access import build_access_state, sanitize_for_audien
 from strata.knowledge.page_payloads import (
     DEFAULT_DOMAIN,
     MAX_INLINE_PROVENANCE,
+    build_content_fingerprint,
     normalize_domain,
     normalize_page_payload,
     slugify_page_title,
     split_sections,
 )
-from strata.storage.models import TaskState, TaskType
+from strata.storage.models import ParameterModel, TaskState, TaskType
 
 
 KNOWLEDGE_PAGE_INDEX_KEY = "knowledge_pages:index"
 KNOWLEDGE_PAGE_KEY_PREFIX = "knowledge_page:"
+KNOWLEDGE_PAGE_MAINTENANCE_REPORT_KEY = "knowledge_pages:maintenance_report"
 KNOWLEDGE_PAGE_MIRROR_DIR = Path("docs/spec/kb")
 
 
@@ -58,9 +60,12 @@ class KnowledgePageStore:
             description="Metadata-first index of synthesized knowledge pages.",
         )
 
-    def get_page_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
+    def _load_page_payload(self, slug: str) -> Dict[str, Any]:
         payload = self.storage.parameters.peek_parameter(_page_key(slug), default_value={}) or {}
-        page = normalize_page_payload(payload, slug=slug)
+        return normalize_page_payload(payload, slug=slug)
+
+    def get_page_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
+        page = self._load_page_payload(slug)
         view = build_access_state(page=page, audience=audience, include_body=True)
         if view.get("status") in {"ok", "redacted"}:
             loaded_page = view.get("page") or {}
@@ -75,8 +80,7 @@ class KnowledgePageStore:
         return view
 
     def get_page_metadata_view(self, slug: str, *, audience: str = "operator") -> Dict[str, Any]:
-        payload = self.storage.parameters.peek_parameter(_page_key(slug), default_value={}) or {}
-        page = normalize_page_payload(payload, slug=slug)
+        page = self._load_page_payload(slug)
         view = build_access_state(page=page, audience=audience, include_body=False)
         if view.get("status") in {"ok", "redacted"}:
             loaded_page = view.get("page") or {}
@@ -169,6 +173,113 @@ class KnowledgePageStore:
     def get_page_section(self, slug: str, heading: str, *, audience: str = "operator") -> Dict[str, Any]:
         return self.get_page_section_view(slug, heading, audience=audience).get("section", {})
 
+    def _build_duplicate_candidates(
+        self,
+        *,
+        normalized_slug: str,
+        title: str,
+        aliases: Optional[List[str]],
+        body: str,
+    ) -> List[Dict[str, Any]]:
+        page_fingerprint = build_content_fingerprint(body)
+        title_key = slugify_page_title(title)
+        alias_keys = {slugify_page_title(alias) for alias in aliases or [] if str(alias).strip()}
+        candidates: List[Dict[str, Any]] = []
+        for row in self._load_index():
+            candidate_slug = str(row.get("slug") or "")
+            if not candidate_slug or candidate_slug == normalized_slug:
+                continue
+            candidate_title_key = slugify_page_title(str(row.get("title") or candidate_slug))
+            candidate_alias_keys = {slugify_page_title(alias) for alias in row.get("aliases") or []}
+            candidate_fingerprint = build_content_fingerprint(
+                " ".join(
+                    [
+                        str(row.get("summary") or ""),
+                        str(row.get("title") or ""),
+                    ]
+                )
+            )
+            score = 0.0
+            reason = ""
+            if candidate_title_key == title_key:
+                score = 1.0
+                reason = "matching_title"
+            elif candidate_slug in alias_keys or candidate_title_key in alias_keys:
+                score = 0.9
+                reason = "alias_overlap"
+            elif candidate_alias_keys & ({title_key} | alias_keys):
+                score = 0.75
+                reason = "alias_crosslink"
+            elif candidate_fingerprint == page_fingerprint:
+                score = 0.65
+                reason = "similar_summary_fingerprint"
+            if score > 0:
+                candidates.append({"slug": candidate_slug, "reason": reason, "score": score})
+        candidates.sort(key=lambda item: (-float(item.get("score", 0.0)), str(item.get("slug") or "")))
+        return candidates[:12]
+
+    def _write_maintenance_report(self, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        duplicates = []
+        stale = []
+        contested = []
+        for page in pages:
+            maintenance = page.get("maintenance") or {}
+            duplicate_candidates = maintenance.get("duplicate_candidates") or []
+            if duplicate_candidates:
+                duplicates.append(
+                    {
+                        "slug": page.get("slug"),
+                        "title": page.get("title"),
+                        "candidates": duplicate_candidates[:5],
+                    }
+                )
+            if maintenance.get("freshness_status") == "stale":
+                stale.append(page.get("slug"))
+            if maintenance.get("review_status") == "contested":
+                contested.append(page.get("slug"))
+        report = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "page_count": len(pages),
+            "duplicate_page_count": len(duplicates),
+            "stale_page_count": len(stale),
+            "contested_page_count": len(contested),
+            "duplicates": duplicates[:20],
+            "stale_pages": stale[:20],
+            "contested_pages": contested[:20],
+        }
+        self.storage.parameters.set_parameter(
+            KNOWLEDGE_PAGE_MAINTENANCE_REPORT_KEY,
+            report,
+            description="Maintenance report for synthesized knowledge pages, including freshness and deduplication signals.",
+        )
+        return report
+
+    def refresh_maintenance_report(self) -> Dict[str, Any]:
+        pages = []
+        for row in self._load_index():
+            slug = str(row.get("slug") or "")
+            if not slug:
+                continue
+            page = self._load_page_payload(slug)
+            if page:
+                pages.append(page)
+        return self._write_maintenance_report(pages)
+
+    def delete_page(self, slug: str) -> bool:
+        normalized_slug = slugify_page_title(slug)
+        existing = self._load_page_payload(normalized_slug)
+        if not existing:
+            return False
+        row = self.storage.session.query(ParameterModel).filter_by(key=_page_key(normalized_slug)).first()
+        if row is not None:
+            self.storage.session.delete(row)
+        index = [row for row in self._load_index() if row.get("slug") != normalized_slug]
+        self._save_index(index)
+        target = KNOWLEDGE_PAGE_MIRROR_DIR / f"{normalized_slug}.md"
+        if target.exists():
+            target.unlink()
+        return True
+
     def upsert_page(
         self,
         *,
@@ -186,22 +297,52 @@ class KnowledgePageStore:
         domain: str = DEFAULT_DOMAIN,
         visibility_policy: Optional[str] = None,
         disclosure_rules: Optional[Dict[str, Any]] = None,
+        maintenance: Optional[Dict[str, Any]] = None,
         scope_id: str = "",
         project_id: str = "",
         owner_id: str = "",
         retention_policy: str = "persistent",
     ) -> Dict[str, Any]:
         normalized_slug = slugify_page_title(slug or title)
-        existing = self.get_page(normalized_slug)
+        existing = self._load_page_payload(normalized_slug)
         normalized_domain = domain or existing.get("domain") or DEFAULT_DOMAIN
+        next_aliases = aliases if aliases is not None else existing.get("aliases")
+        next_body = body or existing.get("body") or ""
+        default_maintenance = {
+            "source_paths": [
+                str(item.get("path") or item.get("label") or "")
+                for item in (provenance if provenance is not None else existing.get("provenance") or [])
+                if str(item.get("path") or item.get("label") or "").strip()
+            ],
+            "source_fingerprints": [
+                str(item.get("content_fingerprint") or "")
+                for item in (provenance if provenance is not None else existing.get("provenance") or [])
+                if str(item.get("content_fingerprint") or "").strip()
+            ],
+            "freshness_status": "fresh",
+            "stale_source_count": 0,
+            "duplicate_candidates": self._build_duplicate_candidates(
+                normalized_slug=normalized_slug,
+                title=title or existing.get("title") or normalized_slug.replace("-", " ").title(),
+                aliases=next_aliases,
+                body=next_body,
+            ),
+            "review_status": "unreviewed",
+            "last_compacted_at": datetime.now(timezone.utc).isoformat(),
+            "evidence_status": "seeded",
+        }
+        if existing.get("maintenance"):
+            default_maintenance.update(existing.get("maintenance") or {})
+        if maintenance:
+            default_maintenance.update(maintenance)
         payload = normalize_page_payload(
             {
                 "slug": normalized_slug,
                 "title": title or existing.get("title") or normalized_slug.replace("-", " ").title(),
-                "body": body,
+                "body": next_body,
                 "summary": summary or existing.get("summary"),
                 "tags": tags if tags is not None else existing.get("tags"),
-                "aliases": aliases if aliases is not None else existing.get("aliases"),
+                "aliases": next_aliases,
                 "related_pages": related_pages if related_pages is not None else existing.get("related_pages"),
                 "provenance": provenance if provenance is not None else existing.get("provenance"),
                 "confidence": confidence if confidence is not None else existing.get("confidence", 0.5),
@@ -210,6 +351,7 @@ class KnowledgePageStore:
                 "domain": normalized_domain,
                 "visibility_policy": visibility_policy or existing.get("visibility_policy"),
                 "disclosure_rules": disclosure_rules if disclosure_rules is not None else existing.get("disclosure_rules"),
+                "maintenance": default_maintenance,
                 "scope_id": scope_id or existing.get("scope_id", ""),
                 "project_id": project_id or existing.get("project_id", ""),
                 "owner_id": owner_id or existing.get("owner_id", ""),

@@ -1,7 +1,7 @@
 ---
 title: Task Attempt Ontology
 slug: task-attempt-ontology
-last_updated: 2026-03-28T07:11:48.492316+00:00
+last_updated: 2026-03-28T07:35:01.145182+00:00
 confidence: 0.75
 domain: project
 visibility_policy: project_scoped

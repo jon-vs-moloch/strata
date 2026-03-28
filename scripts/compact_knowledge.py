@@ -4,17 +4,19 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+from sqlalchemy.exc import OperationalError
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from strata.knowledge.page_payloads import slugify_page_title
+from strata.knowledge.page_payloads import build_content_fingerprint, slugify_page_title
 from strata.knowledge.pages import KnowledgePageStore
 from strata.storage.services.main import StorageManager
 
@@ -184,6 +186,7 @@ def _provenance_entry(path: Path, *, kind: str, body: str, recorded_at: str) -> 
         "kind": kind,
         "recorded_at": recorded_at,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "content_fingerprint": build_content_fingerprint(body),
         "snippet": _snippet(body, limit=240),
     }
 
@@ -231,6 +234,8 @@ def _iter_hot_research_pages(raw_files: List[Path], recorded_at: str) -> List[Di
         frontmatter, body = _split_frontmatter(raw)
         title = str(frontmatter.get("title") or _extract_title(body, path.stem.replace("_", " ").title()))
         kind = _classify(path)
+        if kind == "wip_research":
+            continue
         pages.append(
             {
                 "slug": str(frontmatter.get("slug") or slugify_page_title(title)),
@@ -303,6 +308,164 @@ def _build_index_page(page_specs: List[Dict[str, Any]], archived_entries: List[D
     }
 
 
+def _build_maintenance_page(pages: List[Dict[str, Any]], recorded_at: str) -> Dict[str, Any]:
+    duplicate_lines = []
+    stale_lines = []
+    for page in pages:
+        maintenance = page.get("maintenance") or {}
+        candidates = maintenance.get("duplicate_candidates") or []
+        if candidates:
+            preview = ", ".join(f"`{item['slug']}` ({item['reason']})" for item in candidates[:3])
+            duplicate_lines.append(f"- `{page['slug']}` -> {preview}")
+        if maintenance.get("freshness_status") == "stale":
+            stale_lines.append(f"- `{page['slug']}`")
+    lines = [
+        "# Knowledge Maintenance Report",
+        "",
+        f"Generated: {recorded_at}",
+        "",
+        f"- Pages tracked: {len(pages)}",
+        f"- Pages with duplicate candidates: {len(duplicate_lines)}",
+        f"- Pages marked stale: {len(stale_lines)}",
+        "",
+        "## Duplicate Candidates",
+        "",
+    ]
+    lines.extend(duplicate_lines or ["- No duplicate candidates detected."])
+    lines.extend(["", "## Freshness", ""])
+    lines.extend(stale_lines or ["- No stale pages detected."])
+    provenance = []
+    for page in pages:
+        provenance.extend(page.get("provenance") or [])
+    return {
+        "slug": "knowledge-maintenance-report",
+        "title": "Knowledge Maintenance Report",
+        "body": "\n".join(lines).strip(),
+        "tags": ["knowledge", "maintenance", "dedupe"],
+        "aliases": ["maintenance report"],
+        "related_pages": [page["slug"] for page in pages[:20]],
+        "domain": "project",
+        "visibility_policy": "project_scoped",
+        "confidence": 0.85,
+        "created_by": "knowledge_compactor",
+        "updated_reason": "knowledge_compaction",
+        "project_id": "strata",
+        "retention_policy": "persistent",
+        "provenance": provenance,
+    }
+
+
+def _persist_page_with_retry(page: Dict[str, Any], *, attempts: int = 4, delay_s: float = 0.5) -> Dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        storage = StorageManager()
+        try:
+            store = KnowledgePageStore(storage)
+            persisted = store.upsert_page(
+                slug=page["slug"],
+                title=page["title"],
+                body=page["body"],
+                summary=page.get("summary"),
+                tags=page.get("tags"),
+                aliases=page.get("aliases"),
+                related_pages=page.get("related_pages"),
+                provenance=page.get("provenance"),
+                confidence=float(page.get("confidence", 0.5) or 0.5),
+                created_by=str(page.get("created_by") or "knowledge_compactor"),
+                updated_reason=str(page.get("updated_reason") or "knowledge_compaction"),
+                domain=str(page.get("domain") or "project"),
+                visibility_policy=page.get("visibility_policy"),
+                disclosure_rules=page.get("disclosure_rules"),
+                scope_id=str(page.get("scope_id") or ""),
+                project_id=str(page.get("project_id") or "strata"),
+                owner_id=str(page.get("owner_id") or ""),
+                retention_policy=str(page.get("retention_policy") or "persistent"),
+                maintenance=page.get("maintenance"),
+            )
+            storage.commit()
+            return persisted
+        except OperationalError as exc:
+            storage.rollback()
+            last_error = exc
+            if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+        finally:
+            storage.close()
+    if last_error:
+        raise last_error
+    raise RuntimeError("Failed to persist knowledge page")
+
+
+def _load_persisted_pages() -> List[Dict[str, Any]]:
+    storage = StorageManager()
+    try:
+        store = KnowledgePageStore(storage)
+        pages = []
+        for metadata in store.list_pages(audience="operator", limit=200):
+            slug = str(metadata.get("slug") or "")
+            if not slug:
+                continue
+            page = store._load_page_payload(slug)
+            if page:
+                pages.append(page)
+        return pages
+    finally:
+        storage.close()
+
+
+def _refresh_maintenance_report_with_retry(*, attempts: int = 4, delay_s: float = 0.5) -> Dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        storage = StorageManager()
+        try:
+            report = KnowledgePageStore(storage).refresh_maintenance_report()
+            storage.commit()
+            return report
+        except OperationalError as exc:
+            storage.rollback()
+            last_error = exc
+            if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+        finally:
+            storage.close()
+    if last_error:
+        raise last_error
+    raise RuntimeError("Failed to refresh maintenance report")
+
+
+def _prune_stale_compacted_pages(valid_slugs: List[str], *, attempts: int = 4, delay_s: float = 0.5) -> List[str]:
+    desired = {slugify_page_title(slug) for slug in valid_slugs}
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        storage = StorageManager()
+        try:
+            store = KnowledgePageStore(storage)
+            removed = []
+            for metadata in store.list_pages(audience="operator", limit=500):
+                slug = slugify_page_title(str(metadata.get("slug") or ""))
+                if not slug or slug in desired:
+                    continue
+                if str(metadata.get("updated_reason") or "") != "knowledge_compaction":
+                    continue
+                if store.delete_page(slug):
+                    removed.append(slug)
+            storage.commit()
+            return removed
+        except OperationalError as exc:
+            storage.rollback()
+            last_error = exc
+            if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+        finally:
+            storage.close()
+    if last_error:
+        raise last_error
+    raise RuntimeError("Failed to prune stale compacted pages")
+
+
 def build_knowledge_snapshot() -> Dict[str, object]:
     recorded_at = datetime.now(timezone.utc).isoformat()
     KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -327,36 +490,22 @@ def build_knowledge_snapshot() -> Dict[str, object]:
     page_specs.extend(_iter_hot_research_pages(hot_files, recorded_at))
     page_specs.append(_build_index_page(page_specs, archived_entries, recorded_at))
 
-    storage = StorageManager()
     mirrored_pages: List[Dict[str, Any]] = []
-    try:
-        store = KnowledgePageStore(storage)
-        for page in page_specs:
-            mirrored_pages.append(
-                store.upsert_page(
-                    slug=page["slug"],
-                    title=page["title"],
-                    body=page["body"],
-                    summary=page.get("summary"),
-                    tags=page.get("tags"),
-                    aliases=page.get("aliases"),
-                    related_pages=page.get("related_pages"),
-                    provenance=page.get("provenance"),
-                    confidence=float(page.get("confidence", 0.5) or 0.5),
-                    created_by=str(page.get("created_by") or "knowledge_compactor"),
-                    updated_reason=str(page.get("updated_reason") or "knowledge_compaction"),
-                    domain=str(page.get("domain") or "project"),
-                    visibility_policy=page.get("visibility_policy"),
-                    disclosure_rules=page.get("disclosure_rules"),
-                    scope_id=str(page.get("scope_id") or ""),
-                    project_id=str(page.get("project_id") or "strata"),
-                    owner_id=str(page.get("owner_id") or ""),
-                    retention_policy=str(page.get("retention_policy") or "persistent"),
-                )
-            )
-        storage.commit()
-    finally:
-        storage.close()
+    for page in page_specs:
+        mirrored_pages.append(_persist_page_with_retry(page))
+    _prune_stale_compacted_pages([page["slug"] for page in page_specs])
+    _refresh_maintenance_report_with_retry()
+    mirrored_pages = _load_persisted_pages()
+    maintenance_page = _build_maintenance_page(mirrored_pages, recorded_at)
+    maintenance_page["maintenance"] = {
+        "freshness_status": "fresh",
+        "review_status": "unreviewed",
+        "evidence_status": "maintenance_report",
+        "last_compacted_at": recorded_at,
+    }
+    mirrored_pages.append(_persist_page_with_retry(maintenance_page))
+    _refresh_maintenance_report_with_retry()
+    mirrored_pages = _load_persisted_pages()
 
     current_page = next((page for page in mirrored_pages if page.get("slug") == "current-knowledge-base"), None)
     if current_page:
@@ -385,6 +534,7 @@ def build_knowledge_snapshot() -> Dict[str, object]:
                         "source_count": page.get("source_count", len(page.get("provenance") or [])),
                         "provenance": page.get("provenance") or [],
                         "archived_provenance_summary": page.get("archived_provenance_summary") or {},
+                        "maintenance": page.get("maintenance") or {},
                     }
                     for page in mirrored_pages
                 },

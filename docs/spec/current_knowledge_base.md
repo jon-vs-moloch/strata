@@ -5,7 +5,7 @@
 This page is the current-facing knowledge index for Strata.
 Durable docs and synthesized pages are kept here so research and operations can cite a stable wiki instead of scraping transient note dumps.
 
-Generated: 2026-03-28T07:11:38.225173+00:00
+Generated: 2026-03-28T07:35:01.004716+00:00
 
 ## Index
 ### Project
@@ -18,5 +18,5 @@ Generated: 2026-03-28T07:11:38.225173+00:00
 
 ### System
 - **Constitution** (`constitution`): # Constitution This file stores persistent, cross-project instructions and preferences for Strata. Canonical location: `.knowledge/specs/constitution.md` Current durable guidance: 
-- **Model Performance Intel** (`model-performance-intel`): # Strata Fitness Signal Report *Generated on: 2026-03-28T05:40:56.827940* ## Global Stats - **Total Attempts:** 164 - **Success Rate:** 76.22% - **Failed Attempts:** 39 - **Decompo
+- **Model Performance Intel** (`model-performance-intel`): # Strata Fitness Signal Report *Generated on: 2026-03-28T07:34:58.012809* ## Global Stats - **Total Attempts:** 214 - **Success Rate:** 79.91% - **Failed Attempts:** 43 - **Decompo
 - **Strata System Philosophy** (`strata-system-philosophy`): # Strata Project Philosophy ## Purpose Strata exists to answer a practical question: Can a modest local model become genuinely useful if the system around it supplies the rigor, me

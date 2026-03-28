@@ -199,3 +199,31 @@ def test_provenance_thread_is_compacted(tmp_path, monkeypatch):
 
     assert len(page["provenance"]) == knowledge_pages.MAX_INLINE_PROVENANCE
     assert page["archived_provenance_summary"]["archived_count"] == 10
+
+
+def test_duplicate_candidates_and_maintenance_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
+    storage = DummyStorage()
+    store = knowledge_pages.KnowledgePageStore(storage)
+
+    store.upsert_page(
+        slug="system-constitution",
+        title="System Constitution",
+        body="# System Constitution\n\nShared durable rules.",
+        aliases=["constitution"],
+        provenance=[{"label": ".knowledge/specs/constitution.md", "content_fingerprint": "abc123"}],
+    )
+    page = store.upsert_page(
+        slug="constitution",
+        title="Constitution",
+        body="# Constitution\n\nShared durable rules.",
+        aliases=["System Constitution"],
+        provenance=[{"label": ".knowledge/specs/constitution.md", "content_fingerprint": "abc123"}],
+    )
+
+    duplicate_slugs = [item["slug"] for item in page["maintenance"]["duplicate_candidates"]]
+    assert "system-constitution" in duplicate_slugs
+
+    store.refresh_maintenance_report()
+    report = storage.parameters.values[knowledge_pages.KNOWLEDGE_PAGE_MAINTENANCE_REPORT_KEY]
+    assert report["duplicate_page_count"] >= 1
