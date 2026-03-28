@@ -13,7 +13,7 @@ agents can inspect what the harness is learning and how it is behaving.
 import logging
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, Optional
 import asyncio
@@ -236,21 +236,31 @@ async def _enqueue_eval_job_task(
     eval_job: Dict[str, Any],
     dedupe_signature: Optional[Dict[str, Any]] = None,
 ) -> TaskModel:
-    if dedupe_signature:
-        existing = _find_existing_eval_job(storage, str(eval_job.get("kind") or ""), dedupe_signature)
-        if existing:
-            return existing
-    task = storage.tasks.create(
-        title=title,
-        description=description,
-        session_id=session_id,
-        state=TaskState.PENDING,
-        constraints={"eval_job": eval_job},
-    )
-    task.type = TaskType.JUDGE
-    storage.commit()
-    await _worker.enqueue(task.task_id)
-    return task
+    last_error: OperationalError | None = None
+    for attempt in range(5):
+        if dedupe_signature:
+            existing = _find_existing_eval_job(storage, str(eval_job.get("kind") or ""), dedupe_signature)
+            if existing:
+                return existing
+        try:
+            task = storage.tasks.create(
+                title=title,
+                description=description,
+                session_id=session_id,
+                state=TaskState.PENDING,
+                constraints={"eval_job": eval_job},
+            )
+            task.type = TaskType.JUDGE
+            storage.commit()
+            await _worker.enqueue(task.task_id)
+            return task
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            last_error = exc
+            storage.rollback()
+            await asyncio.sleep(0.2 * (attempt + 1))
+    raise HTTPException(status_code=503, detail=f"Database busy while queueing eval job: {last_error}")
 
 
 async def _queue_eval_system_job(
@@ -264,7 +274,9 @@ async def _queue_eval_system_job(
     dedupe_signature: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     blocked_retry_window = timedelta(minutes=5)
-    if dedupe_signature:
+    def _find_matching_system_job() -> Optional[Dict[str, Any]]:
+        if not dedupe_signature:
+            return None
         tasks = (
             storage.session.query(TaskModel)
             .filter(TaskModel.type == TaskType.JUDGE)
@@ -293,26 +305,41 @@ async def _queue_eval_system_job(
                 if task.state == TaskState.BLOCKED:
                     status = "recent_failure"
                 return {"task_id": task.task_id, "status": status, "kind": kind}
-    task = storage.tasks.create(
-        title=title,
-        description=description,
-        session_id=session_id,
-        state=TaskState.PENDING,
-        type=TaskType.JUDGE,
-        constraints={
-            "system_job": {
+        return None
+
+    last_error: OperationalError | None = None
+    for attempt in range(5):
+        existing = _find_matching_system_job()
+        if existing:
+            return existing
+        try:
+            task = storage.tasks.create(
+                title=title,
+                description=description,
+                session_id=session_id,
+                state=TaskState.PENDING,
+                type=TaskType.JUDGE,
+                constraints={
+                    "system_job": {
+                        "kind": kind,
+                        "payload": payload,
+                    }
+                },
+            )
+            storage.commit()
+            await _worker.enqueue(task.task_id)
+            return {
+                "task_id": task.task_id,
+                "status": "queued",
                 "kind": kind,
-                "payload": payload,
             }
-        },
-    )
-    storage.commit()
-    await _worker.enqueue(task.task_id)
-    return {
-        "task_id": task.task_id,
-        "status": "queued",
-        "kind": kind,
-    }
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            last_error = exc
+            storage.rollback()
+            await asyncio.sleep(0.2 * (attempt + 1))
+    raise HTTPException(status_code=503, detail=f"Database busy while queueing system job: {last_error}")
 
 
 globals().update(register_eval_admin_routes(

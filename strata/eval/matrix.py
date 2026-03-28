@@ -29,6 +29,8 @@ class EvalMatrixSample:
     correct: bool
     latency_s: float
     usage: Dict[str, Any]
+    status: str
+    error_message: str
 
 
 def _build_context(mode: str, run_id: str):
@@ -103,10 +105,14 @@ async def _run_variant(
                 correct=_grade_response(response, expected, grading),
                 latency_s=round(latency_s, 2),
                 usage=usage,
+                status=str(usage.get("status") or "success"),
+                error_message=str(usage.get("error_message") or ""),
             )
         )
     case_count = len(samples)
     correct = sum(1 for sample in samples if sample.correct)
+    error_count = sum(1 for sample in samples if sample.status == "error")
+    degraded_count = sum(1 for sample in samples if sample.status == "degraded")
     total_prompt_tokens = sum(int(sample.usage.get("prompt_tokens") or 0) for sample in samples)
     total_completion_tokens = sum(int(sample.usage.get("completion_tokens") or 0) for sample in samples)
     total_tokens = sum(int(sample.usage.get("total_tokens") or 0) for sample in samples)
@@ -116,6 +122,10 @@ async def _run_variant(
         "profile": profile,
         "case_count": case_count,
         "accuracy": round(correct / case_count, 4) if case_count else 0.0,
+        "error_count": error_count,
+        "error_rate": round(error_count / case_count, 4) if case_count else 0.0,
+        "degraded_count": degraded_count,
+        "degraded_rate": round(degraded_count / case_count, 4) if case_count else 0.0,
         "avg_latency_s": round(sum(sample.latency_s for sample in samples) / case_count, 2) if case_count else 0.0,
         "prompt_tokens": total_prompt_tokens,
         "completion_tokens": total_completion_tokens,

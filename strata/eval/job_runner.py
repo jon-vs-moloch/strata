@@ -37,7 +37,19 @@ def _trim_result(payload: Dict[str, Any]) -> Dict[str, Any]:
         trimmed["variants_preview"] = [
             {
                 key: variant.get(key)
-                for key in ("variant_id", "mode", "profile", "accuracy", "avg_latency_s", "total_tokens", "case_count")
+                for key in (
+                    "variant_id",
+                    "mode",
+                    "profile",
+                    "accuracy",
+                    "error_count",
+                    "error_rate",
+                    "degraded_count",
+                    "degraded_rate",
+                    "avg_latency_s",
+                    "total_tokens",
+                    "case_count",
+                )
             }
             for variant in trimmed["variants"][:6]
         ]
@@ -222,6 +234,8 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 }
                 for metric_name, value in (
                     (f"{metric_name_prefix}_accuracy", float(variant.get("accuracy", 0.0) or 0.0)),
+                    (f"{metric_name_prefix}_error_rate", float(variant.get("error_rate", 0.0) or 0.0)),
+                    (f"{metric_name_prefix}_degraded_rate", float(variant.get("degraded_rate", 0.0) or 0.0)),
                     (f"{metric_name_prefix}_latency_s", float(variant.get("avg_latency_s", 0.0) or 0.0)),
                     (f"{metric_name_prefix}_total_tokens", float(variant.get("total_tokens", 0.0) or 0.0)),
                 ):

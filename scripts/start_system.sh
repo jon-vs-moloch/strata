@@ -17,7 +17,10 @@ SUPERVISOR_MODE="${SUPERVISOR_MODE:-continuous}"
 API_PATTERN="uvicorn strata.api.main:app --host 0.0.0.0 --port 8000"
 
 cleanup_stale_api_processes() {
-  mapfile -t api_pids < <(pgrep -f "$API_PATTERN" || true)
+  local api_pids=()
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && api_pids+=("$pid")
+  done < <(pgrep -f "$API_PATTERN" || true)
   if [ "${#api_pids[@]}" -le 1 ]; then
     return
   fi

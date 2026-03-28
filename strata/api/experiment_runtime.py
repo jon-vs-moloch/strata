@@ -96,6 +96,16 @@ def summarize_eval_variant_metrics(metric_rows, *, series_limit: int = EVAL_SERI
             or metric_payloads.get("eval_matrix_accuracy", {}).get("latest")
             or 0.0
         )
+        current["latest_error_rate"] = (
+            metric_payloads.get("eval_sample_tick_error_rate", {}).get("latest")
+            or metric_payloads.get("eval_matrix_error_rate", {}).get("latest")
+            or 0.0
+        )
+        current["latest_degraded_rate"] = (
+            metric_payloads.get("eval_sample_tick_degraded_rate", {}).get("latest")
+            or metric_payloads.get("eval_matrix_degraded_rate", {}).get("latest")
+            or 0.0
+        )
         current["latest_latency_s"] = (
             metric_payloads.get("eval_sample_tick_latency_s", {}).get("latest")
             or metric_payloads.get("eval_matrix_latency_s", {}).get("latest")

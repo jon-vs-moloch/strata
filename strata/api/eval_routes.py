@@ -250,6 +250,8 @@ def register_eval_routes(
             }
             for metric_name, value in (
                 ("eval_matrix_accuracy", float(variant.get("accuracy", 0.0) or 0.0)),
+                ("eval_matrix_error_rate", float(variant.get("error_rate", 0.0) or 0.0)),
+                ("eval_matrix_degraded_rate", float(variant.get("degraded_rate", 0.0) or 0.0)),
                 ("eval_matrix_latency_s", float(variant.get("avg_latency_s", 0.0) or 0.0)),
                 ("eval_matrix_prompt_tokens", float(variant.get("prompt_tokens", 0) or 0.0)),
                 ("eval_matrix_completion_tokens", float(variant.get("completion_tokens", 0) or 0.0)),
@@ -318,6 +320,26 @@ def register_eval_routes(
                 storage,
                 metric_name="eval_sample_tick_accuracy",
                 value=float(variant.get("accuracy", 0.0) or 0.0),
+                model_id=variant.get("variant_id"),
+                task_type="EVAL_SAMPLE_TICK",
+                run_mode="eval_sample_tick",
+                execution_context=variant.get("mode"),
+                details=details,
+            )
+            record_metric(
+                storage,
+                metric_name="eval_sample_tick_error_rate",
+                value=float(variant.get("error_rate", 0.0) or 0.0),
+                model_id=variant.get("variant_id"),
+                task_type="EVAL_SAMPLE_TICK",
+                run_mode="eval_sample_tick",
+                execution_context=variant.get("mode"),
+                details=details,
+            )
+            record_metric(
+                storage,
+                metric_name="eval_sample_tick_degraded_rate",
+                value=float(variant.get("degraded_rate", 0.0) or 0.0),
                 model_id=variant.get("variant_id"),
                 task_type="EVAL_SAMPLE_TICK",
                 run_mode="eval_sample_tick",
