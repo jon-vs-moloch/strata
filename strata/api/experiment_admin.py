@@ -18,6 +18,14 @@ from strata.eval.harness_eval import (
     default_eval_harness_config,
     get_active_eval_harness_config,
 )
+from strata.api.experiment_runtime import (
+    EVAL_PROPOSAL_CONFIG_DESCRIPTION,
+    EVAL_PROPOSAL_CONFIG_KEY,
+    default_eval_proposal_config,
+    get_active_eval_proposal_config,
+    normalize_eval_proposal_config,
+    summarize_recent_eval_candidates,
+)
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
 from strata.experimental.trace_review import append_trace_review_to_task, build_trace_summary, review_trace
 from strata.experimental.audit_registry import (
@@ -29,8 +37,6 @@ from strata.specs.bootstrap import get_active_spec_record
 from strata.experimental.calibration import JUDGE_TRUST_KEY
 from strata.experimental.variants import get_variant_rating_snapshot
 from strata.storage.models import ParameterModel
-from strata.api.experiment_runtime import summarize_recent_eval_candidates
-
 
 def register_experiment_routes(
     app,
@@ -232,6 +238,35 @@ def register_experiment_routes(
         storage.commit()
         return {"status": "ok", "config": current_config}
 
+    @app.get("/admin/evals/proposal_config")
+    async def get_eval_proposal_config(storage=Depends(get_storage)):
+        active_config = storage.parameters.peek_parameter(
+            EVAL_PROPOSAL_CONFIG_KEY,
+            default_value=default_eval_proposal_config(),
+        ) or default_eval_proposal_config()
+        return {"status": "ok", "config": normalize_eval_proposal_config(active_config)}
+
+    @app.post("/admin/evals/proposal_config")
+    async def set_eval_proposal_config(payload: Dict[str, Any], storage=Depends(get_storage)):
+        current_config = get_active_eval_proposal_config()
+        merged = normalize_eval_proposal_config(
+            {
+                "bootstrap": {**dict(current_config.get("bootstrap") or {}), **dict(payload.get("bootstrap") or {})},
+                "inference": {
+                    **dict(current_config.get("inference") or {}),
+                    **dict(payload.get("inference") or {}),
+                },
+                "novelty": {**dict(current_config.get("novelty") or {}), **dict(payload.get("novelty") or {})},
+            }
+        )
+        storage.parameters.set_parameter(
+            EVAL_PROPOSAL_CONFIG_KEY,
+            merged,
+            description=EVAL_PROPOSAL_CONFIG_DESCRIPTION,
+        )
+        storage.commit()
+        return {"status": "ok", "config": merged}
+
     @app.post("/admin/experiments/promote")
     async def promote_experiment_candidate(payload: Dict[str, Any], storage=Depends(get_storage)):
         candidate_change_id = payload.get("candidate_change_id")
@@ -248,13 +283,18 @@ def register_experiment_routes(
         wait_for_completion = bool(payload.get("wait", False))
         if queue_requested is None:
             queue_requested = not wait_for_completion
-        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["strong"])]
+        proposal_config = get_active_eval_proposal_config()
+        bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
+        proposer_tiers = [
+            str(tier).lower()
+            for tier in payload.get("proposer_tiers", bootstrap_policy.get("default_proposer_tiers", ["weak", "strong"]))
+        ]
         proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
         if not proposer_tiers:
             raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
         auto_promote = bool(payload.get("auto_promote", True))
         suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
-        run_count = max(1, int(payload.get("run_count", 2) or 2))
+        run_count = max(1, int(payload.get("run_count", bootstrap_policy.get("default_run_count", 2)) or 1))
         baseline_change_id = payload.get("baseline_change_id", "baseline")
         normalized_payload = {
             "proposer_tiers": proposer_tiers,
@@ -288,7 +328,7 @@ def register_experiment_routes(
             storage.session.query(ParameterModel)
             .filter(ParameterModel.key.like("experiment_report:%"))
             .order_by(ParameterModel.updated_at.desc())
-            .limit(50)
+            .limit(int(bootstrap_policy.get("recent_report_window", 50) or 50))
             .all()
         )
         recent_report_payloads = list(iter_experiment_reports(recent_reports))
@@ -297,7 +337,10 @@ def register_experiment_routes(
             for report in recent_report_payloads
             if report.get("eval_harness_config_override")
         }
-        recent_candidate_hints = summarize_recent_eval_candidates(recent_report_payloads)
+        recent_candidate_hints = summarize_recent_eval_candidates(
+            recent_report_payloads,
+            limit=int(bootstrap_policy.get("recent_candidate_limit", 6) or 6),
+        )
         current_config = get_active_eval_harness_config()
         current_signature = eval_override_signature(current_config)
         proposals = await asyncio.gather(
@@ -308,6 +351,7 @@ def register_experiment_routes(
                     recent_candidates=recent_candidate_hints,
                     recent_signatures=recent_signatures,
                     current_signature=current_signature,
+                    proposal_config=proposal_config,
                 )
                 for tier in proposer_tiers
             ]

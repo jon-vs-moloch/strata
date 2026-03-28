@@ -11,7 +11,11 @@ import json
 import asyncio
 from typing import Any, Dict
 
-from strata.api.experiment_runtime import eval_override_signature, summarize_recent_eval_candidates
+from strata.api.experiment_runtime import (
+    eval_override_signature,
+    get_active_eval_proposal_config,
+    summarize_recent_eval_candidates,
+)
 from strata.eval.benchmark import persist_benchmark_report, run_benchmark
 from strata.eval.matrix import run_eval_matrix
 from strata.eval.harness_eval import get_active_eval_harness_config
@@ -136,20 +140,25 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             from strata.api.main import _apply_experiment_promotion, _generate_eval_candidate_from_tier
             from strata.storage.models import ParameterModel
 
-            proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["strong"])]
+            proposal_config = get_active_eval_proposal_config()
+            bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
+            proposer_tiers = [
+                str(tier).lower()
+                for tier in payload.get("proposer_tiers", bootstrap_policy.get("default_proposer_tiers", ["weak", "strong"]))
+            ]
             proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
             if not proposer_tiers:
                 raise ValueError("bootstrap_cycle requires at least one proposer tier")
 
             auto_promote = bool(payload.get("auto_promote", True))
             suite_name = str(payload.get("suite_name") or "bootstrap_mcq_v1")
-            run_count = max(1, int(payload.get("run_count", 2) or 2))
+            run_count = max(1, int(payload.get("run_count", bootstrap_policy.get("default_run_count", 2)) or 1))
             baseline_change_id = str(payload.get("baseline_change_id") or "baseline")
             recent_reports = (
                 storage.session.query(ParameterModel)
                 .filter(ParameterModel.key.like("experiment_report:%"))
                 .order_by(ParameterModel.updated_at.desc())
-                .limit(50)
+                .limit(int(bootstrap_policy.get("recent_report_window", 50) or 50))
                 .all()
             )
             recent_report_payloads = list(iter_experiment_reports(recent_reports))
@@ -158,7 +167,10 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 for report in recent_report_payloads
                 if report.get("eval_harness_config_override")
             }
-            recent_candidate_hints = summarize_recent_eval_candidates(recent_report_payloads)
+            recent_candidate_hints = summarize_recent_eval_candidates(
+                recent_report_payloads,
+                limit=int(bootstrap_policy.get("recent_candidate_limit", 6) or 6),
+            )
             current_config = get_active_eval_harness_config()
             current_signature = eval_override_signature(current_config)
             proposals = await asyncio.gather(
@@ -169,6 +181,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                         recent_candidates=recent_candidate_hints,
                         recent_signatures=recent_signatures,
                         current_signature=current_signature,
+                        proposal_config=proposal_config,
                     )
                     for tier in proposer_tiers
                 ]

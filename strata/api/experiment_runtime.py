@@ -22,10 +22,135 @@ from strata.experimental.experiment_runner import ExperimentRunner, iter_experim
 from strata.experimental.variants import get_variant_rating_snapshot
 from strata.specs.bootstrap import list_spec_proposals
 from strata.storage.models import MetricModel
+from strata.storage.services.main import StorageManager
 
 
 MAX_PROMOTION_HISTORY = 200
 EVAL_SERIES_LIMIT = 12
+EVAL_PROPOSAL_CONFIG_KEY = "eval_proposal_generation_config"
+EVAL_PROPOSAL_CONFIG_DESCRIPTION = (
+    "Mutable proposal-generation policy for bootstrap mutation authoring, novelty pressure, and inference parameters."
+)
+
+
+def default_eval_proposal_config() -> Dict[str, Any]:
+    return {
+        "bootstrap": {
+            "default_proposer_tiers": ["weak", "strong"],
+            "continuous_proposer_tiers": ["weak", "strong"],
+            "default_run_count": 2,
+            "continuous_run_count": 1,
+            "recent_report_window": 50,
+            "recent_candidate_limit": 6,
+        },
+        "inference": {
+            "strong": {"temperature": 0.1},
+            "weak": {"temperature": 0.2},
+            "novelty_retry_count": 1,
+            "novelty_temperature_step": 0.15,
+            "novelty_max_temperature": 0.35,
+        },
+        "novelty": {
+            "include_recent_candidates_in_prompt": True,
+            "require_material_difference": True,
+        },
+    }
+
+
+def _normalize_inference_params(value: Any, *, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    params = dict(fallback)
+    if not isinstance(value, dict):
+        return params
+    for key in ("temperature", "top_p", "max_tokens"):
+        raw = value.get(key)
+        if raw is None or raw == "":
+            continue
+        if key == "max_tokens":
+            params[key] = max(1, int(raw))
+        else:
+            params[key] = float(raw)
+    return params
+
+
+def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = default_eval_proposal_config()
+    payload = payload or {}
+    bootstrap_payload = dict(payload.get("bootstrap") or {})
+    inference_payload = dict(payload.get("inference") or {})
+    novelty_payload = dict(payload.get("novelty") or {})
+
+    def normalize_tiers(raw: Any, fallback: list[str]) -> list[str]:
+        if not isinstance(raw, list):
+            return list(fallback)
+        normalized = [str(item).lower() for item in raw if str(item).lower() in {"weak", "strong"}]
+        return normalized or list(fallback)
+
+    bootstrap_defaults = defaults["bootstrap"]
+    inference_defaults = defaults["inference"]
+    novelty_defaults = defaults["novelty"]
+
+    return {
+        "bootstrap": {
+            "default_proposer_tiers": normalize_tiers(
+                bootstrap_payload.get("default_proposer_tiers"),
+                bootstrap_defaults["default_proposer_tiers"],
+            ),
+            "continuous_proposer_tiers": normalize_tiers(
+                bootstrap_payload.get("continuous_proposer_tiers"),
+                bootstrap_defaults["continuous_proposer_tiers"],
+            ),
+            "default_run_count": max(1, int(bootstrap_payload.get("default_run_count", bootstrap_defaults["default_run_count"]) or 1)),
+            "continuous_run_count": max(
+                1,
+                int(bootstrap_payload.get("continuous_run_count", bootstrap_defaults["continuous_run_count"]) or 1),
+            ),
+            "recent_report_window": max(
+                1,
+                int(bootstrap_payload.get("recent_report_window", bootstrap_defaults["recent_report_window"]) or 1),
+            ),
+            "recent_candidate_limit": max(
+                1,
+                int(bootstrap_payload.get("recent_candidate_limit", bootstrap_defaults["recent_candidate_limit"]) or 1),
+            ),
+        },
+        "inference": {
+            "strong": _normalize_inference_params(inference_payload.get("strong"), fallback=inference_defaults["strong"]),
+            "weak": _normalize_inference_params(inference_payload.get("weak"), fallback=inference_defaults["weak"]),
+            "novelty_retry_count": max(
+                0,
+                int(inference_payload.get("novelty_retry_count", inference_defaults["novelty_retry_count"]) or 0),
+            ),
+            "novelty_temperature_step": float(
+                inference_payload.get("novelty_temperature_step", inference_defaults["novelty_temperature_step"]) or 0.0
+            ),
+            "novelty_max_temperature": float(
+                inference_payload.get("novelty_max_temperature", inference_defaults["novelty_max_temperature"]) or 0.0
+            ),
+        },
+        "novelty": {
+            "include_recent_candidates_in_prompt": bool(
+                novelty_payload.get(
+                    "include_recent_candidates_in_prompt",
+                    novelty_defaults["include_recent_candidates_in_prompt"],
+                )
+            ),
+            "require_material_difference": bool(
+                novelty_payload.get("require_material_difference", novelty_defaults["require_material_difference"])
+            ),
+        },
+    }
+
+
+def get_active_eval_proposal_config() -> Dict[str, Any]:
+    storage = StorageManager()
+    try:
+        config = storage.parameters.peek_parameter(
+            EVAL_PROPOSAL_CONFIG_KEY,
+            default_value=default_eval_proposal_config(),
+        ) or default_eval_proposal_config()
+        return normalize_eval_proposal_config(config)
+    finally:
+        storage.close()
 
 
 def summarize_eval_variant_metrics(metric_rows, *, series_limit: int = EVAL_SERIES_LIMIT) -> Dict[str, Any]:
@@ -192,10 +317,12 @@ def _proposal_prompt(
     *,
     recent_candidates: Optional[list[Dict[str, Any]]] = None,
     retry_reason: Optional[str] = None,
+    proposal_config: Optional[Dict[str, Any]] = None,
 ) -> str:
+    proposal_config = normalize_eval_proposal_config(proposal_config)
     recent_candidates = recent_candidates or []
     recent_block = ""
-    if recent_candidates:
+    if recent_candidates and proposal_config["novelty"]["include_recent_candidates_in_prompt"]:
         serialized = json.dumps(recent_candidates, indent=2)
         recent_block = f"""
 
@@ -271,7 +398,9 @@ async def generate_eval_candidate_from_tier(
     recent_candidates: Optional[list[Dict[str, Any]]] = None,
     recent_signatures: Optional[set[str]] = None,
     current_signature: Optional[str] = None,
+    proposal_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    proposal_config = normalize_eval_proposal_config(proposal_config or get_active_eval_proposal_config())
     adapter = model_adapter_factory()
     if proposer_tier == "weak":
         from strata.schemas.execution import WeakExecutionContext
@@ -285,21 +414,33 @@ async def generate_eval_candidate_from_tier(
 
     recent_signatures = recent_signatures or set()
     current_signature = current_signature or eval_override_signature(current_config)
-    base_temperature = 0.2 if proposer_tier == "weak" else 0.1
+    base_inference_params = dict((proposal_config.get("inference") or {}).get(proposer_tier) or {})
+    base_temperature = float(base_inference_params.get("temperature", 0.2 if proposer_tier == "weak" else 0.1) or 0.0)
+    novelty_retry_count = int((proposal_config.get("inference") or {}).get("novelty_retry_count", 1) or 0)
+    novelty_temperature_step = float((proposal_config.get("inference") or {}).get("novelty_temperature_step", 0.15) or 0.0)
+    novelty_max_temperature = float((proposal_config.get("inference") or {}).get("novelty_max_temperature", 0.35) or 0.0)
+    require_material_difference = bool((proposal_config.get("novelty") or {}).get("require_material_difference", True))
     latest_raw_content = ""
     latest_metadata: Dict[str, Any] = {"novelty_retry_count": 0}
 
-    for attempt_index in range(2):
+    for attempt_index in range(novelty_retry_count + 1):
         retry_reason = None if attempt_index == 0 else "proposal matched current or recent eval override signature"
         proposal_prompt = _proposal_prompt(
             proposer_tier,
             current_config,
             recent_candidates=recent_candidates,
             retry_reason=retry_reason,
+            proposal_config=proposal_config,
+        )
+        inference_params = dict(base_inference_params)
+        inference_params["temperature"] = (
+            base_temperature
+            if attempt_index == 0
+            else min(base_temperature + (novelty_temperature_step * attempt_index), novelty_max_temperature)
         )
         response = await adapter.chat(
             [{"role": "user", "content": proposal_prompt}],
-            temperature=base_temperature if attempt_index == 0 else min(base_temperature + 0.15, 0.35),
+            **inference_params,
         )
         latest_raw_content = response.get("content", "")
         try:
@@ -310,10 +451,14 @@ async def generate_eval_candidate_from_tier(
             proposer_tier,
             proposal,
             current_config,
-            metadata={**latest_metadata, "novelty_retry_count": attempt_index},
+            metadata={
+                **latest_metadata,
+                "novelty_retry_count": attempt_index,
+                "inference_params": inference_params,
+            },
         )
         signature = eval_override_signature(normalized["eval_harness_config_override"])
-        if signature != current_signature and signature not in recent_signatures:
+        if not require_material_difference or (signature != current_signature and signature not in recent_signatures):
             return normalized
 
     fallback = {

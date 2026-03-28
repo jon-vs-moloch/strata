@@ -24,7 +24,6 @@ CONTEXT_SNAPSHOT_EVERY = 12
 ERROR_BACKOFF_SECONDS = 15
 POLL_INTERVAL_SECONDS = 5
 JOB_TIMEOUT_SECONDS = 60 * 60
-CONTINUOUS_BOOTSTRAP_PROPOSER_TIERS = ["strong"]
 TELEMETRY_PROFILES = [
     "raw_model",
     "harness_no_capes",
@@ -80,14 +79,19 @@ def wait_for_job(task_id: str, timeout: int = JOB_TIMEOUT_SECONDS) -> dict:
     raise TimeoutError(f"queued job {task_id} did not finish within {timeout}s")
 
 
+def get_proposal_config() -> dict:
+    payload = get_json("/admin/evals/proposal_config")
+    return dict(payload.get("config") or {})
+
+
 def run_bootstrap_cycle(*, cycle_number: int | None = None, lean: bool = False) -> dict:
-    proposer_tiers = ["weak", "strong"]
-    run_count = 2
+    proposal_config = get_proposal_config()
+    bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
+    proposer_tiers = list(bootstrap_policy.get("default_proposer_tiers") or ["weak", "strong"])
+    run_count = max(1, int(bootstrap_policy.get("default_run_count", 2) or 1))
     if lean:
-        # Normal supervised operation is strong -> weak: the strong tier proposes
-        # harness changes intended to improve the weak tier's performance.
-        proposer_tiers = list(CONTINUOUS_BOOTSTRAP_PROPOSER_TIERS)
-        run_count = 1
+        proposer_tiers = list(bootstrap_policy.get("continuous_proposer_tiers") or proposer_tiers)
+        run_count = max(1, int(bootstrap_policy.get("continuous_run_count", 1) or 1))
     return post_json(
         "/admin/experiments/bootstrap_cycle",
         {
