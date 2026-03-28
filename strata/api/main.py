@@ -444,6 +444,7 @@ globals().update(register_chat_task_routes(
     semantic_memory=_memory,
     worker=_worker,
     broadcast_event=_broadcast_event,
+    queue_eval_system_job=_queue_eval_system_job,
     global_settings=GLOBAL_SETTINGS,
     knowledge_page_store_cls=KnowledgePageStore,
     slugify_page_title=slugify_page_title,

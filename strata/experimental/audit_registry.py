@@ -139,6 +139,21 @@ def _build_session_trace_events(trace_summary: Dict[str, Any], *, timeline_id: s
                 "inferred": False,
             }
         )
+    for idx, feedback in enumerate(trace_summary.get("feedback_events") or []):
+        feedback = dict(feedback or {})
+        events.append(
+            {
+                "id": f"{timeline_id}:feedback:{idx}",
+                "timeline_id": timeline_id,
+                "type": "feedback_received",
+                "timestamp_utc": feedback.get("created_at") or _now(),
+                "actor_id": "user",
+                "subject_id": feedback.get("message_id"),
+                "source_trace_refs": [{"kind": "feedback_event", "event_id": feedback.get("event_id")}],
+                "payload": feedback,
+                "inferred": False,
+            }
+        )
     for idx, task in enumerate(trace_summary.get("tasks") or []):
         task = dict(task or {})
         events.append(

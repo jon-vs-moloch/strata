@@ -22,11 +22,17 @@ from strata.eval.matrix import run_eval_matrix
 from strata.eval.harness_eval import get_active_eval_harness_config
 from strata.eval.structured_eval import persist_structured_eval_report, run_structured_eval
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports
+from strata.experimental.artifact_pipeline import (
+    append_trace_review_to_session,
+    enqueue_review_followups,
+    persist_trace_review_artifacts,
+)
 from strata.experimental.trace_review import (
     append_trace_review_to_task,
     build_trace_summary,
     review_trace,
 )
+from strata.knowledge.pages import KnowledgePageStore
 from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import AttemptOutcome, TaskState
@@ -351,6 +357,8 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             }
         elif kind == "trace_review":
             trace_kind = str(payload.get("trace_kind") or "generic_trace")
+            reviewer_tier = str(payload.get("reviewer_tier") or "strong")
+            spec_scope = str(payload.get("spec_scope") or "project")
             trace_summary = build_trace_summary(
                 trace_kind=trace_kind,
                 storage=storage,
@@ -368,9 +376,20 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 model_adapter,
                 trace_kind=trace_kind,
                 trace_summary=trace_summary,
-                reviewer_tier=str(payload.get("reviewer_tier") or "strong"),
+                reviewer_tier=reviewer_tier,
                 candidate_change_id=payload.get("candidate_change_id"),
             )
+            artifacts = persist_trace_review_artifacts(
+                storage,
+                trace_kind=trace_kind,
+                trace_summary=trace_summary,
+                review=review,
+                spec_scope=spec_scope,
+                reviewer_tier=reviewer_tier,
+                candidate_change_id=payload.get("candidate_change_id"),
+            )
+            review["timeline_artifact_id"] = artifacts["timeline_artifact"].get("artifact_id")
+            review["audit_artifact_id"] = artifacts["audit_artifact"].get("artifact_id")
             target_task_ids = []
             if payload.get("persist_to_task", True):
                 for candidate in [payload.get("task_id"), *(payload.get("associated_task_ids") or [])]:
@@ -379,11 +398,33 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                         target_task_ids.append(task_id)
                 for task_id in target_task_ids:
                     append_trace_review_to_task(storage, task_id=task_id, review=review)
+            session_review = None
+            session_id = str(payload.get("session_id") or "").strip()
+            if trace_kind == "session_trace" and session_id:
+                session_review = append_trace_review_to_session(storage, session_id=session_id, review=review)
+            queued_followups = []
+            if bool(payload.get("emit_followups", True)):
+                queued_followups = enqueue_review_followups(
+                    storage,
+                    trace_kind=trace_kind,
+                    trace_summary=trace_summary,
+                    review=review,
+                    session_id=session_id or None,
+                    knowledge_page_store_cls=KnowledgePageStore,
+                )
+                if queued_followups:
+                    from strata.api.main import _worker
+                for followup_task_id in queued_followups:
+                    await _worker.enqueue(followup_task_id)
             result = {
                 "trace_kind": trace_kind,
                 "reviewer_tier": review.get("reviewer_tier"),
                 "review": review,
                 "associated_task_ids": target_task_ids,
+                "timeline_artifact": artifacts["timeline_artifact"],
+                "audit_artifact": artifacts["audit_artifact"],
+                "session_review": session_review,
+                "queued_followup_task_ids": queued_followups,
             }
         else:
             raise ValueError(f"Unsupported system eval job kind: {kind}")

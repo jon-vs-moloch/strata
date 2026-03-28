@@ -4,8 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.api import main as api_main
+from strata.api import message_feedback
 from strata.eval.job_runner import run_eval_job_task
 from strata.experimental.audit_registry import get_audit_artifact, get_timeline_artifact
+from strata.experimental.artifact_pipeline import append_trace_review_to_session
 from strata.experimental.trace_review import build_task_trace_summary, review_trace
 from strata.storage.models import Base, AttemptOutcome, TaskState, TaskType
 from strata.storage.services.main import StorageManager
@@ -96,6 +98,55 @@ def test_review_trace_supports_weak_reviewer_tier():
     assert result["reviewer_tier"] == "weak"
     assert adapter.bound_context.mode == "weak"
     assert adapter.bound_context.evaluation_run is True
+
+
+def test_session_trace_summary_includes_feedback_events():
+    storage = make_storage()
+    storage.messages.create(
+        role="assistant",
+        content="Here is an answer.",
+        session_id="trace-session",
+    )
+    storage.commit()
+    message = storage.messages.get_all(session_id="trace-session")[-1]
+    message_feedback.toggle_message_reaction(
+        storage,
+        message=message,
+        reaction="confused",
+        session_id="trace-session",
+    )
+    storage.commit()
+
+    from strata.experimental.trace_review import build_session_trace_summary
+
+    summary = build_session_trace_summary(storage, session_id="trace-session")
+    assert summary["feedback_event_count"] == 1
+    assert summary["feedback_events"][0]["reaction"] == "confused"
+    assert "confused" in summary["feedback_summaries"][0]
+
+
+def test_append_trace_review_to_session_persists_slim_reviews():
+    storage = make_storage()
+    payload = append_trace_review_to_session(
+        storage,
+        session_id="trace-session",
+        review={
+            "recorded_at": "2026-03-28T00:00:00+00:00",
+            "trace_kind": "session_trace",
+            "reviewer_tier": "strong",
+            "overall_assessment": "needs_intervention",
+            "primary_failure_mode": "missed_feedback",
+            "summary": "The assistant missed an explicit correction signal.",
+            "targeted_interventions": [{"kind": "spec", "description": "Tighten feedback handling."}],
+            "telemetry_to_watch": ["chat_feedback_negative_rate"],
+            "timeline_artifact_id": "timeline_demo",
+            "audit_artifact_id": "audit_demo",
+        },
+    )
+    assert payload["session_id"] == "trace-session"
+    assert payload["reviews"][0]["primary_failure_mode"] == "missed_feedback"
+    stored = storage.parameters.peek_parameter("session_trace_review:trace-session", default_value={})
+    assert stored["reviews"][0]["timeline_artifact_id"] == "timeline_demo"
 
 
 def test_trace_review_job_persists_result_and_attaches_to_task():

@@ -14,6 +14,7 @@ MESSAGE_FEEDBACK_KEY_PREFIX = "message_feedback"
 MESSAGE_FEEDBACK_INDEX_KEY = "message_feedback:index"
 MAX_MESSAGE_FEEDBACK_EVENTS = 500
 ALLOWED_MESSAGE_REACTIONS = {"thumbs_up", "thumbs_down", "heart", "emphasis", "confused"}
+SIGNALFUL_MESSAGE_REACTIONS = {"thumbs_down", "confused", "emphasis"}
 
 
 def _now() -> str:
@@ -172,3 +173,7 @@ def build_feedback_event_message(*, action: str, reaction: str, message_preview:
     if normalized_action == "removed":
         return f"User removed {reaction_label} reaction from assistant message: \"{preview}\""
     return f"User reacted to assistant message with {reaction_label}: \"{preview}\""
+
+
+def should_trigger_feedback_distillation(*, action: str, reaction: str) -> bool:
+    return str(action or "").strip().lower() == "added" and str(reaction or "").strip().lower() in SIGNALFUL_MESSAGE_REACTIONS

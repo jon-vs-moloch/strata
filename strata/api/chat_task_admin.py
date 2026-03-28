@@ -19,6 +19,7 @@ from strata.api.message_feedback import (
     build_feedback_event_message,
     get_message_feedback,
     list_message_feedback_events,
+    should_trigger_feedback_distillation,
     toggle_message_reaction,
 )
 
@@ -34,6 +35,7 @@ def register_chat_task_routes(
     semantic_memory,
     worker,
     broadcast_event,
+    queue_eval_system_job,
     global_settings,
     knowledge_page_store_cls,
     slugify_page_title,
@@ -123,12 +125,38 @@ def register_chat_task_routes(
             session_id=session_id,
         )
         storage.commit()
+        distillation_job = None
+        if queue_eval_system_job and should_trigger_feedback_distillation(
+            action=result.get("action") or "",
+            reaction=result.get("event", {}).get("reaction") or reaction,
+        ):
+            distillation_job = await queue_eval_system_job(
+                storage,
+                kind="trace_review",
+                title=f"Session Feedback Distillation: {session_id}",
+                description=f"Queued session trace review after user feedback reaction in session '{session_id}'.",
+                payload={
+                    "trace_kind": "session_trace",
+                    "session_id": session_id,
+                    "reviewer_tier": "strong",
+                    "emit_followups": True,
+                    "persist_to_task": False,
+                    "spec_scope": "project",
+                },
+                session_id=session_id,
+                dedupe_signature={
+                    "trace_kind": "session_trace",
+                    "reviewer_tier": "strong",
+                    "session_id": session_id,
+                },
+            )
         await broadcast_event({"type": "message", "session_id": session_id})
         return {
             "status": "ok",
             "message_id": message_id,
             "feedback": result.get("feedback") or {},
             "event": result.get("event") or {},
+            "distillation_job": distillation_job,
         }
 
     @app.get("/admin/messages/feedback")
@@ -137,6 +165,34 @@ def register_chat_task_routes(
             "status": "ok",
             "events": list_message_feedback_events(storage, limit=limit, session_id=session_id),
         }
+
+    @app.post("/admin/messages/feedback/distill_session")
+    async def distill_session_feedback(payload: Dict[str, Any], storage=Depends(get_storage)):
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id field required")
+        reviewer_tier = str(payload.get("reviewer_tier") or "strong").strip().lower() or "strong"
+        queued = await queue_eval_system_job(
+            storage,
+            kind="trace_review",
+            title=f"Session Feedback Distillation: {session_id}",
+            description=f"Queued {reviewer_tier}-tier session trace review for feedback distillation.",
+            payload={
+                "trace_kind": "session_trace",
+                "session_id": session_id,
+                "reviewer_tier": reviewer_tier,
+                "emit_followups": bool(payload.get("emit_followups", True)),
+                "persist_to_task": False,
+                "spec_scope": str(payload.get("spec_scope") or "project"),
+            },
+            session_id=session_id,
+            dedupe_signature={
+                "trace_kind": "session_trace",
+                "reviewer_tier": reviewer_tier,
+                "session_id": session_id,
+            },
+        )
+        return {"status": "ok", **queued}
 
     @app.get("/sessions")
     async def get_sessions(storage=Depends(get_storage)):
@@ -215,6 +271,7 @@ def register_chat_task_routes(
             "list_tasks": list_tasks,
             "get_messages": get_messages,
             "react_to_message": react_to_message,
+            "distill_session_feedback": distill_session_feedback,
             "get_sessions": get_sessions,
             "delete_session": delete_session,
             "post_chat": post_chat,

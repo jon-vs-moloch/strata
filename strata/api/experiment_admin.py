@@ -28,16 +28,18 @@ from strata.api.experiment_runtime import (
     summarize_recent_eval_candidates,
 )
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
-from strata.experimental.trace_review import append_trace_review_to_task, build_trace_summary, review_trace
-from strata.experimental.audit_registry import (
-    audit_stored_artifact,
-    audit_timeline_artifact,
-    persist_timeline_artifact,
+from strata.experimental.artifact_pipeline import (
+    append_trace_review_to_session,
+    enqueue_review_followups,
+    persist_trace_review_artifacts,
 )
+from strata.experimental.trace_review import append_trace_review_to_task, build_trace_summary, review_trace
+from strata.experimental.audit_registry import audit_stored_artifact
 from strata.specs.bootstrap import get_active_spec_record
 from strata.experimental.calibration import JUDGE_TRUST_KEY
 from strata.experimental.variants import get_variant_rating_snapshot
 from strata.storage.models import ParameterModel
+from strata.knowledge.pages import KnowledgePageStore
 
 def register_experiment_routes(
     app,
@@ -632,31 +634,33 @@ def register_experiment_routes(
             reviewer_tier=reviewer_tier,
             candidate_change_id=payload.get("candidate_change_id"),
         )
-        active_spec = get_active_spec_record(storage, scope=spec_scope)
-        timeline_artifact = persist_timeline_artifact(
+        artifacts = persist_trace_review_artifacts(
             storage,
             trace_kind=trace_kind,
             trace_summary=trace_summary,
-            applicable_spec_version=active_spec.get("version"),
-            metadata={
-                "reviewer_tier": reviewer_tier,
-                "candidate_change_id": payload.get("candidate_change_id"),
-            },
+            review=review,
+            spec_scope=spec_scope,
+            reviewer_tier=reviewer_tier,
+            candidate_change_id=payload.get("candidate_change_id"),
         )
-        audit_artifact = audit_timeline_artifact(
-            storage,
-            timeline_artifact=timeline_artifact,
-            spec_version_used=active_spec.get("version"),
-            rationale="Durable trace review artifacts should be auditable against the governing spec.",
-            confidence=float(review.get("confidence", 0.7) or 0.7),
-            extra_context={
-                "reviewer_tier": reviewer_tier,
-                "trace_kind": trace_kind,
-                "associated_review_status": review.get("status"),
-            },
-        )
+        timeline_artifact = artifacts["timeline_artifact"]
+        audit_artifact = artifacts["audit_artifact"]
         review["timeline_artifact_id"] = timeline_artifact.get("artifact_id")
         review["audit_artifact_id"] = audit_artifact.get("artifact_id")
+        session_id = str(payload.get("session_id") or "").strip()
+        session_review = None
+        if trace_kind == "session_trace" and session_id:
+            session_review = append_trace_review_to_session(storage, session_id=session_id, review=review)
+        queued_followup_task_ids = []
+        if bool(payload.get("emit_followups", True)):
+            queued_followup_task_ids = enqueue_review_followups(
+                storage,
+                trace_kind=trace_kind,
+                trace_summary=trace_summary,
+                review=review,
+                session_id=session_id or None,
+                knowledge_page_store_cls=KnowledgePageStore,
+            )
         if payload.get("persist_to_task", False):
             target_task_ids = []
             for candidate in [payload.get("task_id"), *(payload.get("associated_task_ids") or [])]:
@@ -674,6 +678,8 @@ def register_experiment_routes(
             "review": review,
             "timeline_artifact": timeline_artifact,
             "audit_artifact": audit_artifact,
+            "session_review": session_review,
+            "queued_followup_task_ids": queued_followup_task_ids,
         }
 
     @app.post("/admin/traces/review_task")

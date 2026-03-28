@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from strata.api.message_feedback import list_message_feedback_events
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
 from strata.storage.models import MessageModel, TaskModel
 
@@ -201,8 +202,10 @@ def build_session_trace_summary(
     session_id: str,
     message_limit: int = 20,
     task_limit: int = 10,
+    feedback_limit: int = 20,
 ) -> Dict[str, Any]:
     messages = storage.messages.get_all(session_id=session_id)
+    feedback_events = list_message_feedback_events(storage, session_id=session_id, limit=feedback_limit)
     tasks = (
         storage.session.query(TaskModel)
         .filter(TaskModel.session_id == session_id)
@@ -214,6 +217,24 @@ def build_session_trace_summary(
         "session_id": session_id,
         "message_count": len(messages),
         "messages": [_message_payload(message) for message in messages[-message_limit:]],
+        "feedback_event_count": len(feedback_events),
+        "feedback_events": [
+            {
+                "event_id": event.get("event_id"),
+                "action": event.get("action"),
+                "reaction": event.get("reaction"),
+                "message_id": event.get("message_id"),
+                "message_role": event.get("message_role"),
+                "message_preview": _clip(event.get("message_preview"), 220),
+                "created_at": event.get("created_at"),
+                "distillation_status": event.get("distillation_status"),
+            }
+            for event in feedback_events
+        ],
+        "feedback_summaries": [
+            f"{event.get('action')} {event.get('reaction')} on '{_clip(event.get('message_preview'), 120)}'"
+            for event in feedback_events
+        ],
         "tasks": [_task_payload(task) for task in tasks],
     }
 
@@ -280,7 +301,7 @@ def _trace_focus(trace_kind: str) -> str:
         )
     if kind == "session_trace":
         return (
-            "Focus on whether the conversation stayed aligned, asked the right questions, and used tools or memory appropriately."
+            "Focus on whether the conversation stayed aligned, asked the right questions, used tools or memory appropriately, and responded well to explicit user feedback such as reactions or correction signals."
         )
     if kind == "eval_trace":
         return (
