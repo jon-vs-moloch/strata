@@ -25,6 +25,47 @@ class ChatRuntime:
         self.deps = deps
         self.tool_executor = ChatToolExecutor(**deps)
 
+    def _slim_system_job_result(self, result: Any) -> Any:
+        if not isinstance(result, dict):
+            return result
+        payload = dict(result)
+        nested_result = payload.get("result")
+        if isinstance(nested_result, dict):
+            skipped = list(nested_result.get("skipped") or [])
+            evaluated = list(nested_result.get("evaluated") or [])
+            promoted = list(nested_result.get("promoted") or [])
+            payload["result"] = {
+                "current_eval_harness_config": nested_result.get("current_eval_harness_config"),
+                "evaluated": evaluated[:3],
+                "promoted": promoted[:3],
+                "skipped": skipped[:3],
+                "summary": {
+                    "evaluated_count": len(evaluated),
+                    "promoted_count": len(promoted),
+                    "skipped_count": len(skipped),
+                },
+            }
+        return payload
+
+    def _slim_attempt_artifacts(self, artifacts: Any) -> Dict[str, Any]:
+        payload = dict(artifacts or {})
+        result_summary = payload.get("result_summary")
+        if isinstance(result_summary, dict):
+            skipped = list(result_summary.get("skipped") or [])
+            evaluated = list(result_summary.get("evaluated") or [])
+            promoted = list(result_summary.get("promoted") or [])
+            payload["result_summary"] = {
+                "summary": {
+                    "evaluated_count": len(evaluated),
+                    "promoted_count": len(promoted),
+                    "skipped_count": len(skipped),
+                },
+                "evaluated": evaluated[:2],
+                "promoted": promoted[:2],
+                "skipped": skipped[:2],
+            }
+        return payload
+
     def list_tasks_payload(self, storage, *, lane: Optional[str] = None) -> List[Dict[str, Any]]:
         from sqlalchemy.orm import selectinload
 
@@ -56,7 +97,7 @@ class ChatRuntime:
                     "depth": task.depth,
                     "human_intervention_required": task.human_intervention_required,
                     "system_job": (task.constraints or {}).get("system_job"),
-                    "system_job_result": (task.constraints or {}).get("system_job_result"),
+                    "system_job_result": self._slim_system_job_result((task.constraints or {}).get("system_job_result")),
                     "generated_reports": (task.constraints or {}).get("generated_reports", []),
                     "paused": bool((task.constraints or {}).get("paused")),
                     "lane": task_lane,
@@ -75,7 +116,7 @@ class ChatRuntime:
                             "started_at": attempt.started_at.isoformat(),
                             "ended_at": attempt.ended_at.isoformat() if attempt.ended_at else None,
                             "reason": attempt.reason,
-                            "artifacts": dict(attempt.artifacts or {}),
+                            "artifacts": self._slim_attempt_artifacts(attempt.artifacts),
                             "evidence": dict(attempt.evidence or {}),
                             "plan_review": dict(attempt.plan_review or {}),
                         }

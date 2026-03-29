@@ -178,3 +178,36 @@ def test_session_summaries_include_unread_counts_from_assistant_messages():
     summaries = storage.messages.get_session_summaries(lane="strong")
 
     assert summaries[0]["unread_count"] == 1
+
+
+def test_list_tasks_payload_slims_large_system_job_payloads():
+    storage = make_storage()
+    runtime = make_runtime()
+
+    task = storage.tasks.create(
+        title="Bootstrap Cycle",
+        description="Queued strong-over-weak bootstrap cycle.",
+        session_id="strong:default",
+        state=TaskState.COMPLETE,
+        constraints={
+            "lane": "strong",
+            "system_job": {"kind": "bootstrap_cycle", "payload": {"run_count": 3}},
+            "system_job_result": {
+                "status": "completed",
+                "result": {
+                    "evaluated": [{"candidate_change_id": "a"}, {"candidate_change_id": "b"}, {"candidate_change_id": "c"}, {"candidate_change_id": "d"}],
+                    "promoted": [{"candidate_change_id": "p1"}, {"candidate_change_id": "p2"}, {"candidate_change_id": "p3"}, {"candidate_change_id": "p4"}],
+                    "skipped": [{"reason": "r1"}, {"reason": "r2"}, {"reason": "r3"}, {"reason": "r4"}],
+                },
+            },
+        },
+    )
+    storage.commit()
+
+    payload = runtime.list_tasks_payload(storage, lane="strong")
+    result = payload[0]["system_job_result"]["result"]
+
+    assert result["summary"] == {"evaluated_count": 4, "promoted_count": 4, "skipped_count": 4}
+    assert len(result["evaluated"]) == 3
+    assert len(result["promoted"]) == 3
+    assert len(result["skipped"]) == 3

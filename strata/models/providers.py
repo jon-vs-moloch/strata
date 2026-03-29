@@ -6,7 +6,7 @@
 
 import httpx
 import asyncio
-from typing import Dict, Optional, List, Literal
+from typing import Any, Dict, Optional, List, Literal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,7 +21,7 @@ class ModelResponse(BaseModel):
     tool_calls: Optional[List[Dict]] = Field(None)
     model: str = Field(...)
     provider: str = Field(...)
-    usage: Optional[Dict[str, int | float | str | None]] = Field(default=None)
+    usage: Optional[Dict[str, Any]] = Field(default=None)
 
 @dataclass
 class ThrottleState:
@@ -131,6 +131,28 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             now = asyncio.get_running_loop().time()
             state.next_allowed_at = max(state.next_allowed_at, now + retry_after_s)
 
+    def _normalize_usage(self, usage: Any) -> Dict[str, Any]:
+        if not isinstance(usage, dict):
+            return {}
+        normalized: Dict[str, Any] = {}
+        for key, value in usage.items():
+            if isinstance(value, (int, float, str)) or value is None:
+                normalized[key] = value
+            elif isinstance(value, dict):
+                # Preserve nested usage details without forcing them through scalar validation.
+                normalized[key] = {
+                    str(nested_key): nested_value
+                    for nested_key, nested_value in value.items()
+                    if isinstance(nested_value, (int, float, str, bool)) or nested_value is None
+                }
+            elif isinstance(value, list):
+                normalized[key] = [
+                    item
+                    for item in value
+                    if isinstance(item, (int, float, str, bool)) or item is None
+                ]
+        return normalized
+
     async def complete(self, messages: List[Dict[str, str]], **kwargs) -> ModelResponse:
         max_retries = kwargs.get("max_retries", 3)
         backoff_time = 2.0
@@ -188,7 +210,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                             tool_calls=tool_calls,
                             model=self.model_id,
                             provider=self.provider_id,
-                            usage=result.get("usage") or {},
+                            usage=self._normalize_usage(result.get("usage") or {}),
                         )
                 except httpx.HTTPStatusError as e:
                     status_code = e.response.status_code
