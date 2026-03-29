@@ -7,8 +7,7 @@
 @side_effects none
 """
 
-import yaml
-from typing import Dict, Any, Optional
+from typing import Optional
 from strata.schemas.core import TaskDecomposition, ResearchReport
 
 class DecompositionModule:
@@ -73,11 +72,11 @@ class DecompositionModule:
         
         if not data or "error" in data:
             print(f"Decomposition failed to parse structured output: {data}")
-            # Fallback mock so we don't crash, but log it
-            from strata.schemas.core import TaskFraming, LeafTaskPrototype
+            # Preserve framing, but do not fabricate fake recovery work.
+            from strata.schemas.core import TaskFraming
             return TaskDecomposition(
                 framing=TaskFraming(repository_context="Repo", problem_statement=task_desc, constraints=[], success_criteria=[]),
-                subtasks={"error_fallback": LeafTaskPrototype(title="Error Recover", description="Initial decomposition failed. Research manually.", target_files=[], dependencies=[])},
+                subtasks={},
                 total_estimated_budget=0.1
             )
             

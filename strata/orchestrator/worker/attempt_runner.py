@@ -121,6 +121,10 @@ async def _run_research(task, storage, model_adapter, enqueue_fn):
 async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
     decomp_mod = DecompositionModule(model_adapter, storage)
     decomp = await decomp_mod.decompose_task(task.title, task.description)
+    if not decomp.subtasks:
+        raise RuntimeError(
+            "Decomposition produced no actionable subtasks. Escalate for trainer intervention instead of spawning generic recovery work."
+        )
     for tid, proto in decomp.subtasks.items():
         sub = storage.tasks.create(
             title=proto.title,

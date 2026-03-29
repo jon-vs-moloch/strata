@@ -64,6 +64,23 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
             resolution="decompose",
             new_subtasks=[],
         )
+
+    # B3. Failed decomposition on recovery work should not recurse forever
+    if (
+        "decomposition produced no actionable subtasks" in err_str
+        or (
+            task.type == TaskType.DECOMP
+            and any(x in err_str for x in ["parse error", "invalid json", "produced no actionable subtasks"])
+        )
+    ):
+        return AttemptResolutionSchema(
+            reasoning=(
+                "Decomposition failed to produce a usable plan. Do not spawn generic recovery shells; "
+                "route this to trainer supervision so the failing branch can be replaced or abandoned explicitly."
+            ),
+            resolution="abandon_to_parent",
+            new_subtasks=[],
+        )
         
     # C. Missing Dependency -> blocked
     if any(x in err_str for x in ["not found", "missing", "no such file"]):
@@ -196,6 +213,33 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
             
     elif res == "abandon_to_parent":
         task.state = TaskState.ABANDONED
+        if str(task_lane or "").strip().lower() == "agent":
+            try:
+                from strata.api.main import _queue_eval_system_job
+
+                await _queue_eval_system_job(
+                    storage,
+                    kind="trace_review",
+                    title=f"Trainer Intervention: {str(task.title or task.task_id)[:72]}",
+                    description="Queued trainer intervention after a branch was abandoned to prevent recursive recovery loops.",
+                    payload={
+                        "trace_kind": "task_trace",
+                        "task_id": task.task_id,
+                        "reviewer_tier": "trainer",
+                        "emit_followups": True,
+                        "persist_to_task": True,
+                        "spec_scope": "project",
+                        "supervision_reason": "abandon_to_parent_recovery_loop",
+                        "trace_payload": {
+                            "origin_lane": task_lane,
+                            "abandon_reason": resolution_data.reasoning,
+                            "requested_action": "replace the failing branch with a bounded intervention or explicitly terminate it",
+                        },
+                    },
+                    session_id="trainer:default",
+                )
+            except Exception as review_err:
+                logger.warning("Failed to queue trainer intervention for abandoned task %s: %s", task.task_id, review_err)
         storage.apply_dependency_cascade()
 
     elif res == "improve_tooling":

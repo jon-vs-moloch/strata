@@ -3,7 +3,9 @@ from sqlalchemy.orm import sessionmaker
 import asyncio
 
 from strata.orchestrator.background import BackgroundWorker, resolution_from_plan_review
-from strata.storage.models import Base, TaskState
+from strata.orchestrator.worker.attempt_runner import _run_decomposition
+from strata.schemas.core import TaskDecomposition, TaskFraming
+from strata.storage.models import Base, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
 
@@ -31,6 +33,20 @@ class DummyModel:
 
     def bind_execution_context(self, _context):
         return None
+
+
+class DummyDecompModel(DummyModel):
+    def extract_structured_object(self, _raw):
+        return {
+            "framing": {
+                "repository_context": "Repo",
+                "problem_statement": "Do the thing",
+                "constraints": [],
+                "success_criteria": [],
+            },
+            "subtasks": {},
+            "total_estimated_budget": 0.1,
+        }
 
 
 def test_background_worker_can_pause_and_resume_individual_lanes():
@@ -216,3 +232,25 @@ def test_resolution_from_plan_review_honors_structural_recommendation():
     assert resolution is not None
     assert resolution.resolution == "decompose"
     assert resolution.reasoning == "The task should be broken into smaller steps."
+
+
+def test_run_decomposition_raises_when_no_actionable_subtasks():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Recovery Plan for Error Recover",
+        description="Try to recover from a failed decomposition.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        constraints={"lane": "agent"},
+    )
+    task.type = TaskType.DECOMP
+    storage.commit()
+
+    async def enqueue_fn(_task_id):
+        raise AssertionError("No child tasks should be enqueued for an empty decomposition")
+
+    try:
+        asyncio.run(_run_decomposition(task, storage, DummyDecompModel(), enqueue_fn))
+        raise AssertionError("Expected empty decomposition to raise")
+    except RuntimeError as exc:
+        assert "no actionable subtasks" in str(exc).lower()

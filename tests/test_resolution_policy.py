@@ -146,3 +146,57 @@ def test_research_iteration_limit_prefers_decompose():
     )
 
     assert resolution.resolution == "decompose"
+
+
+def test_failed_decomposition_prefers_abandon_to_parent():
+    task = DummyTask()
+    task.type = TaskType.DECOMP
+    task.title = "Recovery Plan for Error Recover"
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            RuntimeError("Decomposition produced no actionable subtasks. Escalate for trainer intervention instead of spawning generic recovery work."),
+            model_adapter=None,
+            storage=None,
+        )
+    )
+
+    assert resolution.resolution == "abandon_to_parent"
+
+
+def test_abandon_to_parent_agent_task_queues_trainer_intervention():
+    storage = DummyStorage()
+    task = DummyTask(session_id="agent:default")
+    resolution = AttemptResolutionSchema(
+        reasoning="Decomposition failed repeatedly and should be replaced by a bounded trainer intervention.",
+        resolution="abandon_to_parent",
+    )
+    queued_review_payloads = []
+
+    async def enqueue_fn(_task_id):
+        raise AssertionError("abandon_to_parent should not enqueue new child work directly")
+
+    async def fake_queue_eval_system_job(storage_obj, **kwargs):
+        queued_review_payloads.append(kwargs)
+        return {"status": "queued", "task_id": "review-2"}
+
+    api_main = sys.modules.get("strata.api.main")
+    original_queue = getattr(api_main, "_queue_eval_system_job", None) if api_main else None
+    if api_main is None:
+        api_main = SimpleNamespace()
+        sys.modules["strata.api.main"] = api_main
+    api_main._queue_eval_system_job = fake_queue_eval_system_job
+    try:
+        asyncio.run(apply_resolution(task, resolution, RuntimeError("boom"), storage, enqueue_fn))
+    finally:
+        if original_queue is None:
+            del sys.modules["strata.api.main"]
+        else:
+            api_main._queue_eval_system_job = original_queue
+
+    assert task.state == TaskState.ABANDONED
+    assert len(queued_review_payloads) == 1
+    payload = queued_review_payloads[0]
+    assert payload["kind"] == "trace_review"
+    assert payload["payload"]["supervision_reason"] == "abandon_to_parent_recovery_loop"
