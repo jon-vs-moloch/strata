@@ -8,6 +8,29 @@ use tauri::{AppHandle, Manager, RunEvent};
 
 struct BackendChild(Mutex<Option<Child>>);
 
+fn resolve_project_root() -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|err| format!("Failed to resolve current working directory: {err}"))?;
+    if cwd.join("strata").is_dir() && cwd.join("strata_ui").is_dir() {
+        return Ok(cwd);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidate = manifest_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Failed to resolve repository root from Cargo manifest directory.".to_string())?;
+
+    if candidate.join("strata").is_dir() && candidate.join("strata_ui").is_dir() {
+        return Ok(candidate);
+    }
+
+    Err(format!(
+        "Unable to locate the Strata project root from cwd {:?} or manifest dir {:?}.",
+        cwd, manifest_dir
+    ))
+}
+
 fn candidate_python_paths(root_dir: &Path) -> Vec<PathBuf> {
     vec![
         root_dir.join("venv").join("bin").join("python"),
@@ -87,7 +110,7 @@ fn start_backend(root_dir: &Path) -> Result<Option<Child>, String> {
 }
 
 fn setup_backend(app: &AppHandle) -> Result<(), String> {
-    let root_dir = std::env::current_dir().map_err(|err| format!("Failed to resolve current working directory: {err}"))?;
+    let root_dir = resolve_project_root()?;
 
     let child = start_backend(&root_dir)?;
     app.manage(BackendChild(Mutex::new(child)));

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { memo, useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -57,6 +57,13 @@ const laneForSessionId = (sessionId) => {
   if (sessionId.startsWith('weak:')) return 'weak';
   if (sessionId.startsWith('strong:')) return 'strong';
   return 'strong';
+};
+
+const explicitLaneForSessionId = (sessionId) => {
+  if (typeof sessionId !== 'string') return null;
+  if (sessionId.startsWith('weak:')) return 'weak';
+  if (sessionId.startsWith('strong:')) return 'strong';
+  return null;
 };
 
 const sessionMatchesLane = (sessionId, lane) => laneForSessionId(sessionId) === lane;
@@ -709,6 +716,8 @@ const MessageCard = ({
   );
 };
 
+const MemoMessageCard = memo(MessageCard);
+
 
 // ─── Settings View ─────────────────────────────────────────────────────────────
 const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
@@ -1356,6 +1365,12 @@ function App() {
   const sessionListRef = useRef([]);
   const isSendingRef = useRef(false);
   const fetchGenRef = useRef(0);       // generation counter for stale-poll rejection
+  const fetchPromiseRef = useRef(null);
+  const pendingFetchRef = useRef(false);
+  const workerStatusPromiseRef = useRef(null);
+  const pendingWorkerStatusRef = useRef(false);
+  const refreshTimerRef = useRef(null);
+  const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
   const [laneStatuses, setLaneStatuses] = useState({ strong: 'IDLE', weak: 'IDLE' });
   const [globalPaused, setGlobalPaused] = useState(false);
@@ -1451,17 +1466,37 @@ function App() {
   }, [replyTarget]);
 
   const fetchWorkerStatus = useCallback(async () => {
-    try {
-      const res = await axios.get(`${API}/admin/worker/status`);
-      setWorkerStatus(res.data.status.worker);
-      setGlobalPaused(Boolean(res.data.status.global_paused));
-      setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes : []);
-      setLaneStatuses(res.data.status.lanes || { strong: 'IDLE', weak: 'IDLE' });
-      setTiers(res.data.status.tiers);
-      if (res.data.status.tiers.Strong === 'error' && !localStorage.getItem('skipCloudWarning')) {
-        setShowCloudModal(true);
+    if (workerStatusPromiseRef.current) {
+      pendingWorkerStatusRef.current = true;
+      return workerStatusPromiseRef.current;
+    }
+
+    const request = (async () => {
+      try {
+        const res = await axios.get(`${API}/admin/worker/status`);
+        setWorkerStatus(res.data.status.worker);
+        setGlobalPaused(Boolean(res.data.status.global_paused));
+        setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes : []);
+        setLaneStatuses(res.data.status.lanes || { strong: 'IDLE', weak: 'IDLE' });
+        setTiers(res.data.status.tiers);
+        if (res.data.status.tiers.Strong === 'error' && !localStorage.getItem('skipCloudWarning')) {
+          setShowCloudModal(true);
+        }
+      } catch (e) {
+        console.error('Failed to fetch worker status', e);
+      } finally {
+        workerStatusPromiseRef.current = null;
+        if (pendingWorkerStatusRef.current) {
+          pendingWorkerStatusRef.current = false;
+          window.setTimeout(() => {
+            void fetchWorkerStatus();
+          }, 0);
+        }
       }
-    } catch (e) { console.error('Failed to fetch worker status', e); }
+    })();
+
+    workerStatusPromiseRef.current = request;
+    return request;
   }, [API]);
 
   useEffect(() => {
@@ -1530,80 +1565,132 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  useEffect(() => {
+    const hasOpenAttempts = tasks.some((task) =>
+      Array.isArray(task.attempts) && task.attempts.some((attempt) => !attempt.ended_at && !attempt.outcome)
+    );
+    if (!hasOpenAttempts) return undefined;
+    const interval = window.setInterval(() => {
+      setActivityNowMs(Date.now());
+    }, 15000);
+    return () => window.clearInterval(interval);
+  }, [tasks]);
+
   const fetchData = useCallback(async (force = false) => {
+    if (fetchPromiseRef.current) {
+      if (force) pendingFetchRef.current = true;
+      return fetchPromiseRef.current;
+    }
+
     // Skip polling while a message is in-flight (unless forced)
     if (!force && isSendingRef.current) return;
 
-    // Increment generation — any older in-flight fetch will see a mismatch and bail
-    const gen = ++fetchGenRef.current;
-    try {
-      const sessionParams = activeNav === 'chat' && currentScope !== 'home' ? { lane: effectiveLane } : undefined;
-      const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes, proposalConfigRes, evalJobsRes] = await Promise.all([
-        axios.get(`${API}/tasks`),
-        !sessionId || isDraftSession ? Promise.resolve({ data: [] }) : axios.get(`${API}/messages?session_id=${sessionId}`),
-        axios.get(`${API}/sessions`, { params: sessionParams }),
-        axios.get(`${API}/admin/telemetry?limit=8`),
-        axios.get(`${API}/admin/providers/telemetry`),
-        axios.get(`${API}/admin/dashboard?limit=6`),
-        axios.get(`${API}/admin/context/loaded`),
-        axios.get(`${API}/admin/routing`),
-        axios.get(`${API}/admin/specs`),
-        axios.get(`${API}/admin/spec_proposals?limit=6`),
-        axios.get(`${API}/admin/knowledge/pages?limit=6&audience=operator`),
-        axios.get(`${API}/admin/storage/retention`),
-        activeNav === 'dashboard' ? axios.get(`${API}/admin/variants/ratings`) : Promise.resolve({ data: null }),
-        activeNav === 'dashboard' ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null }),
-        activeNav === 'dashboard' ? axios.get(`${API}/admin/evals/proposal_config`) : Promise.resolve({ data: null }),
-        activeNav === 'dashboard' ? axios.get(`${API}/admin/evals/jobs`) : Promise.resolve({ data: null })
-      ]);
+    const request = (async () => {
+      // Increment generation — any older in-flight fetch will see a mismatch and bail
+      const gen = ++fetchGenRef.current;
+      try {
+        const sessionParams = activeNav === 'chat' && currentScope !== 'home' ? { lane: effectiveLane } : undefined;
+        const needsDashboardData = activeNav === 'dashboard';
+        const needsChatBannerData = activeNav === 'chat';
+        const shouldLoadDashboardSnapshot = needsDashboardData || needsChatBannerData;
+        const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes, proposalConfigRes, evalJobsRes] = await Promise.all([
+          axios.get(`${API}/tasks`),
+          !sessionId || isDraftSession ? Promise.resolve({ data: [] }) : axios.get(`${API}/messages?session_id=${sessionId}`),
+          axios.get(`${API}/sessions`, { params: sessionParams }),
+          needsDashboardData ? axios.get(`${API}/admin/telemetry?limit=8`) : Promise.resolve({ data: { telemetry: null } }),
+          needsDashboardData ? axios.get(`${API}/admin/providers/telemetry`) : Promise.resolve({ data: { providers: {} } }),
+          shouldLoadDashboardSnapshot ? axios.get(`${API}/admin/dashboard?limit=6`) : Promise.resolve({ data: { dashboard: null } }),
+          needsDashboardData ? axios.get(`${API}/admin/context/loaded`) : Promise.resolve({ data: { loaded: { files: [], budget_tokens: 0 } } }),
+          axios.get(`${API}/admin/routing`),
+          needsDashboardData ? axios.get(`${API}/admin/specs`) : Promise.resolve({ data: { specs: null } }),
+          needsDashboardData ? axios.get(`${API}/admin/spec_proposals?limit=6`) : Promise.resolve({ data: { proposals: [] } }),
+          needsDashboardData ? axios.get(`${API}/admin/knowledge/pages?limit=6&audience=operator`) : Promise.resolve({ data: { pages: [] } }),
+          needsDashboardData ? axios.get(`${API}/admin/storage/retention`) : Promise.resolve({ data: null }),
+          needsDashboardData ? axios.get(`${API}/admin/variants/ratings`) : Promise.resolve({ data: null }),
+          needsDashboardData ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null }),
+          needsDashboardData ? axios.get(`${API}/admin/evals/proposal_config`) : Promise.resolve({ data: null }),
+          needsDashboardData ? axios.get(`${API}/admin/evals/jobs`) : Promise.resolve({ data: null })
+        ]);
 
-      // If a newer fetch was launched while we were awaiting, discard this result
-      if (gen !== fetchGenRef.current) return;
+        // If a newer fetch was launched while we were awaiting, discard this result
+        if (gen !== fetchGenRef.current) return;
 
-      setTasks(tasksRes.data);
-      setMessages(msgsRes.data);
-      const sessions = (Array.isArray(sessionsRes.data) ? sessionsRes.data.slice() : [])
-        .filter((session) => activeNav !== 'chat' || currentScope === 'home' || sessionMatchesLane(session.session_id, effectiveLane));
-      if (sessionId && !sessions.some((s) => s.session_id === sessionId)) {
-        const existingSession = sessionListRef.current.find((session) => session.session_id === sessionId);
-        sessions.push({
-          session_id: sessionId,
-          title: existingSession?.title || fallbackSessionTitle(sessionId),
-          message_count: msgsRes.data.length,
-          first_message_at: msgsRes.data[0]?.created_at || null,
-          last_message_at: msgsRes.data[msgsRes.data.length - 1]?.created_at || null,
-          last_message_preview: msgsRes.data[msgsRes.data.length - 1]?.content || '',
-          last_message_role: msgsRes.data[msgsRes.data.length - 1]?.role || null,
-        });
+        setTasks(tasksRes.data);
+        setMessages(msgsRes.data);
+        const sessions = (Array.isArray(sessionsRes.data) ? sessionsRes.data.slice() : [])
+          .filter((session) => {
+            if (activeNav !== 'chat') return true;
+            if (currentScope === 'home') return Boolean(explicitLaneForSessionId(session.session_id));
+            return sessionMatchesLane(session.session_id, effectiveLane);
+          });
+        if (sessionId && !sessions.some((s) => s.session_id === sessionId)) {
+          const existingSession = sessionListRef.current.find((session) => session.session_id === sessionId);
+          sessions.push({
+            session_id: sessionId,
+            title: existingSession?.title || fallbackSessionTitle(sessionId),
+            message_count: msgsRes.data.length,
+            first_message_at: msgsRes.data[0]?.created_at || null,
+            last_message_at: msgsRes.data[msgsRes.data.length - 1]?.created_at || null,
+            last_message_preview: msgsRes.data[msgsRes.data.length - 1]?.content || '',
+            last_message_role: msgsRes.data[msgsRes.data.length - 1]?.role || null,
+          });
+        }
+        sessions.sort((a, b) => String(b.last_message_at || '').localeCompare(String(a.last_message_at || '')));
+        setSessionList(sessions);
+        setTelemetry(telemetryRes.data.telemetry);
+        setProviderTelemetry(providerTelemetryRes.data.providers || {});
+        setDashboard(dashboardRes.data.dashboard || null);
+        setLoadedContext(loadedContextRes.data.loaded || { files: [], budget_tokens: 0 });
+        setRoutingSummary(routingRes.data.routing || null);
+        setSpecsSnapshot(specsRes.data.specs || null);
+        setSpecProposalSnapshot(specProposalsRes.data.proposals || []);
+        setKnowledgePagesSnapshot(knowledgePagesRes.data.pages || []);
+        setRetentionSnapshot(retentionRes.data || null);
+        setVariantRatingsSnapshot(variantRatingsRes?.data?.ratings || null);
+        setPredictionTrustSnapshot(predictionTrustRes?.data?.trust || null);
+        setProposalConfigSnapshot(proposalConfigRes?.data?.config || null);
+        setEvalJobsSnapshot(evalJobsRes?.data?.jobs || []);
+        setApiStatus('ok');
+        if (activeNav === 'chat' && currentScope === 'home' && !sessionId && sessions.length) {
+          setScopeSessionIds((prev) => ({ ...prev, home: sessions[0].session_id }));
+        }
+      } catch (err) {
+        if (gen !== fetchGenRef.current) return;
+        console.error('Fetch failed', err);
+        setApiStatus('error');
+      } finally {
+        fetchPromiseRef.current = null;
+        if (pendingFetchRef.current) {
+          pendingFetchRef.current = false;
+          window.setTimeout(() => {
+            void fetchData(true);
+          }, 0);
+        }
       }
-      sessions.sort((a, b) => String(b.last_message_at || '').localeCompare(String(a.last_message_at || '')));
-      setSessionList(sessions);
-      setTelemetry(telemetryRes.data.telemetry);
-      setProviderTelemetry(providerTelemetryRes.data.providers || {});
-      setDashboard(dashboardRes.data.dashboard || null);
-      setLoadedContext(loadedContextRes.data.loaded || { files: [], budget_tokens: 0 });
-      setRoutingSummary(routingRes.data.routing || null);
-      setSpecsSnapshot(specsRes.data.specs || null);
-      setSpecProposalSnapshot(specProposalsRes.data.proposals || []);
-      setKnowledgePagesSnapshot(knowledgePagesRes.data.pages || []);
-      setRetentionSnapshot(retentionRes.data || null);
-      setVariantRatingsSnapshot(variantRatingsRes?.data?.ratings || null);
-      setPredictionTrustSnapshot(predictionTrustRes?.data?.trust || null);
-      setProposalConfigSnapshot(proposalConfigRes?.data?.config || null);
-      setEvalJobsSnapshot(evalJobsRes?.data?.jobs || []);
-      setApiStatus('ok');
-      if (activeNav === 'chat' && currentScope === 'home' && !sessionId && sessions.length) {
-        setScopeSessionIds((prev) => ({ ...prev, home: sessions[0].session_id }));
-      }
-    } catch (err) {
-      if (gen !== fetchGenRef.current) return;
-      console.error('Fetch failed', err);
-      setApiStatus('error');
-    }
+    })();
+
+    fetchPromiseRef.current = request;
+    return request;
   }, [activeNav, currentScope, effectiveLane, isDraftSession, sessionId]);
 
+  const scheduleRefresh = useCallback((force = false) => {
+    pendingFetchRef.current = pendingFetchRef.current || force;
+    pendingWorkerStatusRef.current = true;
+    if (refreshTimerRef.current != null) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      const shouldForceFetch = pendingFetchRef.current;
+      pendingFetchRef.current = false;
+      pendingWorkerStatusRef.current = false;
+      void Promise.all([
+        fetchWorkerStatus(),
+        fetchData(shouldForceFetch),
+      ]);
+    }, 100);
+  }, [fetchData, fetchWorkerStatus]);
+
   useEffect(() => {
-    fetchData(true);
+    scheduleRefresh(true);
 
     let fallbackInterval = null;
     const es = new EventSource(`${API}/events`);
@@ -1611,14 +1698,12 @@ function App() {
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        console.log('SSE Event:', data);
         if (fallbackInterval) {
           clearInterval(fallbackInterval);
           fallbackInterval = null;
         }
         if (data.type === 'task_update' || data.type === 'message' || data.type === 'worker_status') {
-          fetchWorkerStatus();
-          fetchData(true);
+          scheduleRefresh(true);
         }
       } catch (err) {
         console.error('SSE Parse Error:', err);
@@ -1629,19 +1714,22 @@ function App() {
       console.error('SSE Error:', err);
       if (!fallbackInterval) {
         fallbackInterval = setInterval(() => {
-          fetchWorkerStatus();
-          fetchData(true);
+          scheduleRefresh(true);
         }, 30000);
       }
     };
 
     return () => {
       es.close();
+      if (refreshTimerRef.current != null) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
       if (fallbackInterval) {
         clearInterval(fallbackInterval);
       }
     };
-  }, [API, fetchData, fetchWorkerStatus]);
+  }, [API, scheduleRefresh]);
 
   useEffect(() => {
     if (activeNav !== 'knowledge') return;
@@ -2167,7 +2255,11 @@ function App() {
       : (laneDrafts[effectiveLane] || []))
       .slice()
       .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    const persisted = list.filter((session) => !drafts.some((draft) => draft.session_id === session.session_id));
+    const persisted = list.filter((session) => {
+      if (drafts.some((draft) => draft.session_id === session.session_id)) return false;
+      if (currentScope === 'home') return Boolean(explicitLaneForSessionId(session.session_id));
+      return true;
+    });
     return [...drafts, ...persisted];
   }, [currentScope, effectiveLane, laneDrafts, sessionList]);
   const buildLaneMeta = (lane) => {
@@ -2669,7 +2761,7 @@ function App() {
               const previousMessage = i > 0 ? messages[i - 1] : null;
               const groupedWithPrevious = shouldGroupMessages(msg, previousMessage, effectiveLane);
               return (
-              <MessageCard
+                <MemoMessageCard
                   key={msg.id || i}
                   message={msg}
                   lane={effectiveLane}
@@ -2895,7 +2987,7 @@ function App() {
                     style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}
                   >
                     {laneFinishedTasks.map(task => (
-                      <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />
+                      <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} nowMs={activityNowMs} />
                     ))}
                   </MotionDiv>
                 )}
@@ -2904,7 +2996,7 @@ function App() {
           )}
           <AnimatePresence>
             {focusedTaskPaneTree.map(task => (
-              <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />
+              <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} nowMs={activityNowMs} />
             ))}
           </AnimatePresence>
 

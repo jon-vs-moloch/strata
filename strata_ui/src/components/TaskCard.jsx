@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { memo, useMemo, useState } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -94,7 +94,7 @@ function stripInlineMarkdown(content) {
     .trim();
 }
 
-const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
+const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
   if (tasks.length === 0) return null;
 
@@ -120,7 +120,7 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
             exit={{ height: 0, opacity: 0 }}
             style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
           >
-            {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} />)}
+            {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} nowMs={nowMs} />)}
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -128,7 +128,7 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
   );
 };
 
-const OlderAttemptsGroup = ({ attempts, taskUpdatedAt }) => {
+const OlderAttemptsGroup = ({ attempts, taskUpdatedAt, nowMs, totalAttempts }) => {
   const [expanded, setExpanded] = useState(false);
   if (!attempts.length) return null;
 
@@ -170,8 +170,11 @@ const OlderAttemptsGroup = ({ attempts, taskUpdatedAt }) => {
                 key={attempt.id}
                 attempt={attempt}
                 index={idx + 4}
+                totalAttempts={totalAttempts}
                 taskUpdatedAt={taskUpdatedAt}
                 defaultExpanded={false}
+                nowMs={nowMs}
+                hasNewerAttempt={true}
               />
             ))}
           </MotionDiv>
@@ -248,7 +251,7 @@ const InterventionWidget = ({ taskId, question, onResolve }) => {
   );
 };
 
-const TaskCard = ({ task, onArchive, isNested = false }) => {
+const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now() }) => {
   const defaultExpanded = useMemo(() => !TERMINAL_STATUSES.has(task.status), [task.status]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
@@ -424,20 +427,23 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
                     key={attempt.id}
                     attempt={attempt}
                     index={idx + 1}
+                    totalAttempts={attempts.length}
                     taskUpdatedAt={task.updated_at}
                     defaultExpanded={idx === 0 || attempt.outcome !== 'failed'}
+                    nowMs={nowMs}
+                    hasNewerAttempt={idx > 0}
                   />
                 ))}
                 {olderAttempts.length > 0 && (
-                  <OlderAttemptsGroup attempts={olderAttempts} taskUpdatedAt={task.updated_at} />
+                  <OlderAttemptsGroup attempts={olderAttempts} taskUpdatedAt={task.updated_at} nowMs={nowMs} totalAttempts={attempts.length} />
                 )}
                </div>
             )}
             
             {/* Grouped Child Tasks */}
-            <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} />
-            <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} />
-            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} />
+            <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} />
+            <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} nowMs={nowMs} />
+            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} />
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -445,24 +451,22 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
   );
 };
 
-const AttemptRow = ({ attempt, index, taskUpdatedAt, defaultExpanded = false }) => {
+const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpanded = false, nowMs, hasNewerAttempt = false }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  React.useEffect(() => {
-    if (attempt.ended_at || attempt.outcome) return undefined;
-    const interval = window.setInterval(() => setNowMs(Date.now()), 15000);
-    return () => window.clearInterval(interval);
-  }, [attempt.ended_at, attempt.outcome]);
   const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
   const hasOpenAttempt = !attempt.ended_at && !attempt.outcome;
-  const lastActivityAt = taskUpdatedAt || attempt.started_at;
+  const lastActivityAt = hasNewerAttempt ? attempt.started_at : (taskUpdatedAt || attempt.started_at);
   const parsedLastActivityAt = parseTimestamp(lastActivityAt);
   const recentlyActive = parsedLastActivityAt ? (nowMs - parsedLastActivityAt.getTime()) < 90000 : false;
   const parsedStartedAt = parseTimestamp(attempt.started_at);
-  const staleOpenAttempt = hasOpenAttempt && !recentlyActive && parsedStartedAt
-    ? (nowMs - parsedStartedAt.getTime()) > 300000
-    : false;
-  const isActive = hasOpenAttempt && !staleOpenAttempt;
+  const supersededOpenAttempt = hasOpenAttempt && hasNewerAttempt;
+  const staleOpenAttempt = supersededOpenAttempt || (
+    hasOpenAttempt && !recentlyActive && parsedStartedAt
+      ? (nowMs - parsedStartedAt.getTime()) > 300000
+      : false
+  );
+  const isActive = hasOpenAttempt && !staleOpenAttempt && !hasNewerAttempt;
+  const displayAttemptNumber = Math.max(1, (Number(totalAttempts) || 0) - index + 1);
   const artifacts = attempt.artifacts && typeof attempt.artifacts === 'object' ? attempt.artifacts : null;
   const summaryBits = [];
   if (artifacts?.job_kind) summaryBits.push(`job ${artifacts.job_kind}`);
@@ -492,7 +496,7 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt, defaultExpanded = false }) 
         }}
       >
         <div style={{ fontSize: '10px', fontWeight: 800, color: '#666', fontFamily: "'JetBrains Mono', monospace", minWidth: '24px' }}>
-          A{index}
+          A{displayAttemptNumber}
         </div>
         {isActive ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '28px' }}>
@@ -511,7 +515,7 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt, defaultExpanded = false }) 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
             <div style={{ fontSize: '11px', color: isActive ? '#d8f8ff' : staleOpenAttempt ? '#ffd89a' : '#888', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              {isActive ? 'Attempt Active' : staleOpenAttempt ? 'Attempt Stale' : `Attempt ${attempt.outcome || 'Pending'}`}
+              {isActive ? 'Attempt Active' : supersededOpenAttempt ? 'Attempt Superseded' : staleOpenAttempt ? 'Attempt Stale' : `Attempt ${attempt.outcome || 'Pending'}`}
             </div>
             <div style={{ fontSize: '9px', color: '#555' }}>
               {formatAbsolute(attempt.started_at)}
@@ -522,7 +526,7 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt, defaultExpanded = false }) 
               {isActive ? `Running for ${formatElapsed(attempt.started_at)}` : staleOpenAttempt ? `Open for ${formatElapsed(attempt.started_at)}` : `Ran for ${formatElapsed(attempt.started_at, attempt.ended_at)}`}
             </div>
             <div style={{ fontSize: '10px', color: isActive ? (recentlyActive ? '#00f294' : '#777') : staleOpenAttempt ? '#ffb84d' : '#777' }}>
-              {isActive ? (recentlyActive ? 'actively updating' : 'no recent heartbeat') : staleOpenAttempt ? 'stale open attempt' : `ended ${formatRelative(attempt.ended_at)}`}
+              {isActive ? (recentlyActive ? 'actively updating' : 'no recent heartbeat') : supersededOpenAttempt ? 'newer attempt exists' : staleOpenAttempt ? 'stale open attempt' : `ended ${formatRelative(attempt.ended_at)}`}
             </div>
           </div>
           {summaryBits.length > 0 && (
@@ -582,5 +586,10 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt, defaultExpanded = false }) 
   );
 };
 
+const TaskCard = memo(TaskCardComponent, (prev, next) => (
+  prev.task === next.task &&
+  prev.isNested === next.isNested &&
+  prev.nowMs === next.nowMs
+));
 
 export default TaskCard;
