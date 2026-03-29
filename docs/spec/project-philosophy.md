@@ -221,6 +221,15 @@ The design constraint is:
 
 In other words, desktop should be a shell around Strata, not a fork of Strata.
 
+That same principle should shape the frontend itself:
+
+- the bundled product should stay as a minimal stable shell
+- the shell should always be able to fall back into a safe-mode UI that can inspect chat, tasks, knowledge, tools, settings, and runtime health
+- as much higher-level behavior as practical should move into validated, versioned runtime modules or plugins that live outside the immutable core
+- a broken module should degrade back to safe mode, not take the product down with it
+
+This preserves both reliability and self-modifiability. The trusted core is continuity infrastructure; the evolving product surface should mostly live above it.
+
 ### 2. Strata-Managed Local Inference
 
 Strata should eventually own more of the local inference lifecycle instead of assuming that LM Studio is always the external operator-managed bridge from model files to inference.

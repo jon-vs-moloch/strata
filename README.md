@@ -103,6 +103,7 @@ These roadmap items come with two constraints:
 
 - preserve future web/mobile shells by keeping the FastAPI backend and web UI as the core product surface, with desktop behavior added as a wrapper rather than as a forked app
 - prefer level-2 inference ownership, where Strata manages engines such as MLX or vLLM-class runtimes (and potentially Rust-based successors if they prove operationally worthwhile), instead of turning Strata into its own model-serving engine
+- keep the bundled desktop/frontend core intentionally small and safe: the product should prefer loading validated, modifiable runtime modules on top of a stable fallback shell instead of treating every UI or tool-surface change as a rebuild-only concern
 
 ## Requirements
 
@@ -177,6 +178,13 @@ npm run desktop:build
 ```
 
 This shell is intentionally thin. It wraps the existing UI and backend lifecycle rather than creating a desktop-only product surface.
+
+Longer-term frontend/productization direction:
+
+- the bundle should provide a stable "safe mode" shell with core views such as chat, tasks, knowledge, tools, and settings
+- fast-changing product surfaces should move toward validated runtime modules and plugin-provided panels rather than being permanently hardcoded into the bundled UI
+- if an external module is missing, invalid, or incompatible, the shell should fall back to the bundled safe-mode experience instead of failing to boot
+- plugin surfaces should target stable extension contracts so interchangeable modules are the default, not a special integration path
 
 Current requirement:
 

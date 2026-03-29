@@ -9,6 +9,7 @@ It is intentionally practical rather than aspirational. The goal is to preserve 
 - Keep the FastAPI backend as the durable system core.
 - Keep the React UI as a client of that backend rather than letting platform wrappers absorb product logic.
 - Treat desktop, web, and future mobile clients as shells over shared services and APIs.
+- Keep the bundled frontend shell minimal and trustworthy; prefer validated runtime modules/plugins for fast-changing product surfaces.
 - Prefer operational ownership of local inference over low-level inference implementation.
 - Do not let packaging convenience erase the weak/strong bootstrap architecture.
 
@@ -52,12 +53,14 @@ Scope:
 - log viewing and crash recovery surfaces
 - desktop notifications
 - environment and model-health onboarding
+- a stable safe-mode shell that remains usable even if higher-level runtime modules fail to load
 
 Exit criteria:
 
 - non-technical startup flow works on a clean machine
 - common startup failures are diagnosable from the app
 - updating or restarting the app does not require terminal use
+- the packaged app can fall back to bundled safe-mode views when runtime modules or plugins are invalid
 
 ### Phase 3. Multi-Shell Discipline
 
@@ -69,6 +72,7 @@ Scope:
 - API contracts that remain shell-agnostic
 - removal of browser-only assumptions from UI flows where desktop behavior differs
 - optional remote/backend deployment path for web/mobile clients
+- versioned extension contracts for runtime modules, tool panels, telemetry cards, and plugin-provided views
 
 Exit criteria:
 
@@ -76,6 +80,7 @@ Exit criteria:
 - the web UI remains first-class
 - future mobile work can target stable backend surfaces instead of reverse-engineering desktop behavior
 - communication routing remains shell-agnostic, so chat replies, in-app notices, and future OS notifications all share the same underlying decision model
+- plugin/module surfaces are interchangeable by default because they target shared contracts owned by the stable shell
 
 ## Workstream 2: Strata-Managed Local Inference
 

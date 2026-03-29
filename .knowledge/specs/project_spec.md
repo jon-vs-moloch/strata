@@ -20,6 +20,7 @@ Normal operating mode:
 - evals should support diagnosis and promotion decisions, not dominate wall-clock activity when the system could be doing useful work
 - trainer supervision should treat verifier findings and deterministic contradictions as first-class evidence; repeated verifier failures without correction indicate a system-level supervision gap, not merely a task that needs more retries
 - verification policy should be shared across tiers and anneal from measured error rate rather than from hardcoded role-specific trust
+- the product shell should stay minimal and trustworthy: bundled code should provide continuity and safe-mode fallback, while higher-level UI and tool surfaces should increasingly be delivered through validated runtime modules or plugins
 
 Canonical supporting references:
 - `README.md`
@@ -36,3 +37,4 @@ Operational guidance:
 - reflection should be implemented as self-audit rather than a parallel mechanism; the same audit pipeline should be able to inspect external task traces, internal process traces, attention signals, prior audit artifacts, and other reviewable sequences
 - surprising signals should themselves remain auditable so the system can ask not only "what happened?" but also "was it right to be surprised by this?" and recalibrate its own attention policy
 - prefer evolving existing pipelines into shared primitives instead of creating adjacent special-purpose systems; a new subsystem should justify itself by becoming reusable across multiple Strata surfaces
+- plugin and module interfaces should be explicit and versioned so interchangeable product surfaces are normal behavior, not bespoke glue code
