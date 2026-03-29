@@ -168,6 +168,7 @@ async def ensure_continuous_supervision_job(
     queue_system_job=None,
     get_proposal_config=None,
     enabled: bool = True,
+    minimum_run_count: int = 1,
 ) -> Optional[dict]:
     if not enabled:
         return None
@@ -184,7 +185,7 @@ async def ensure_continuous_supervision_job(
         for tier in bootstrap_policy.get("continuous_proposer_tiers", ["weak", "strong"])
         if str(tier).lower() in {"weak", "strong"}
     ] or ["weak", "strong"]
-    run_count = max(1, int(bootstrap_policy.get("continuous_run_count", 1) or 1))
+    run_count = max(max(1, int(minimum_run_count or 1)), int(bootstrap_policy.get("continuous_run_count", 1) or 1))
     suite_name = "bootstrap_mcq_v1"
 
     storage = storage_factory()
@@ -300,6 +301,8 @@ class BackgroundWorker:
         # 1. Deep Preflight Model Check (Strong + Weak)
         logger.info("Performing Deep Preflight Check (Strong + Weak tiers)...")
         from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+        settings = self._settings()
+        allow_cloud_only_boot = bool(settings.get("allow_cloud_only_boot", False))
         
         contexts = [
             ("Strong", StrongExecutionContext(run_id="preflight")),
@@ -323,14 +326,15 @@ class BackgroundWorker:
                 logger.error(f"  -> {name} tier FAILED check: {e}")
                 self._tier_health[name] = "error"
                 if name == "Weak":
-                    # Weak (Local) is the mandatory baseline for this dev session.
-                    raise Exception(f"Worker cannot start: Local (Weak) model is unreachable. ({e})")
+                    if allow_cloud_only_boot and self._tier_health.get("Strong") == "ok":
+                        logger.warning("Worker proceeding in cloud-only mode because Weak tier is unavailable.")
+                    else:
+                        raise Exception(f"Worker cannot start: Local (Weak) model is unreachable. ({e})")
                 else:
                     # Strong (Cloud) is optional but critical for high-level reasoning.
                     logger.warning(f"Worker proceeding without {name} model tier (unreachable/misconfigured).")
 
         # 2. Start Recovery Sweep
-        settings = self._settings()
         await recover_tasks(
             self._storage_factory,
             self._queue,
@@ -488,13 +492,18 @@ class BackgroundWorker:
                     seeded = await ensure_continuous_supervision_job(
                         self._storage_factory,
                         enabled=True,
+                        minimum_run_count=3 if settings.get("heavy_reflection_mode", False) else 1,
                     )
                     if seeded and seeded.get("status") == "queued":
                         logger.info("Queued continuous supervision job %s for idle strong lane.", seeded.get("task_id"))
             except Exception as exc:
                 logger.warning("Unable to ensure continuous supervision job for strong lane: %s", exc)
 
-        if settings.get("automatic_task_generation", False) and "weak" not in self._paused_lanes:
+        if (
+            settings.get("automatic_task_generation", False)
+            and self._tier_health.get("Weak") != "error"
+            and "weak" not in self._paused_lanes
+        ):
             if not self._lane_has_runnable_or_active_work("weak"):
                 await run_idle_tasks(self._storage_factory, self._model, self._queue)
 
@@ -603,6 +612,9 @@ class BackgroundWorker:
             # --- ROUTING ---
             from strata.orchestrator.worker.routing_policy import select_model_tier
             context = select_model_tier(task)
+            if self._tier_health.get("Weak") != "ok" and self._tier_health.get("Strong") == "ok":
+                from strata.schemas.execution import StrongExecutionContext
+                context = StrongExecutionContext(run_id=f"run_{task_id}_cloud_only")
             
             # Application of experimental override if active
             if self._active_experiment_id:

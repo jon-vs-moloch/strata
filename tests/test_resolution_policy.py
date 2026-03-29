@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+import sys
 
 from strata.orchestrator.worker.resolution_policy import apply_resolution
 from strata.schemas.core import AttemptResolutionSchema
@@ -9,11 +10,11 @@ from strata.storage.models import TaskState, TaskType
 
 
 class DummyTask:
-    def __init__(self, task_id="root", priority=17.0):
+    def __init__(self, task_id="root", priority=17.0, session_id="demo"):
         self.task_id = task_id
         self.title = "Parent Task"
         self.description = "Do the thing."
-        self.session_id = "demo"
+        self.session_id = session_id
         self.state = TaskState.WORKING
         self.type = TaskType.IMPL
         self.depth = 0
@@ -88,3 +89,44 @@ def test_improve_tooling_marks_broken_tools_as_bug_fix():
     assert repair.title.startswith("Tool Fix:")
     assert repair.type == TaskType.BUG_FIX
     assert repair.constraints["tool_modification_target"] == "search_web"
+
+
+def test_blocked_weak_task_queues_strong_escalation_review(monkeypatch):
+    storage = DummyStorage()
+    task = DummyTask(session_id="weak:default")
+    resolution = AttemptResolutionSchema(
+        reasoning="Need higher-level judgment on whether this requires user clarification.",
+        resolution="blocked",
+    )
+    queued = []
+    queued_review_payloads = []
+
+    async def enqueue_fn(task_id):
+        queued.append(task_id)
+
+    async def fake_queue_eval_system_job(storage_obj, **kwargs):
+        queued_review_payloads.append(kwargs)
+        return {"status": "queued", "task_id": "review-1"}
+
+    api_main = sys.modules.get("strata.api.main")
+    original_queue = getattr(api_main, "_queue_eval_system_job", None) if api_main else None
+    if api_main is None:
+        api_main = SimpleNamespace()
+        sys.modules["strata.api.main"] = api_main
+    api_main._queue_eval_system_job = fake_queue_eval_system_job
+    try:
+        asyncio.run(apply_resolution(task, resolution, RuntimeError("boom"), storage, enqueue_fn))
+    finally:
+        if original_queue is None:
+            del sys.modules["strata.api.main"]
+        else:
+            api_main._queue_eval_system_job = original_queue
+
+    assert task.state == TaskState.BLOCKED
+    assert task.human_intervention_required is True
+    assert queued == []
+    assert len(queued_review_payloads) == 1
+    payload = queued_review_payloads[0]
+    assert payload["kind"] == "trace_review"
+    assert payload["payload"]["supervision_reason"] == "weak_blocked_escalation"
+    assert payload["payload"]["reviewer_tier"] == "strong"

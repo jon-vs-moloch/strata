@@ -224,21 +224,56 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
     elif res == "blocked":
         task.state = TaskState.BLOCKED
         task.human_intervention_required = True
-        enqueue_user_question(
-            storage,
-            session_id=task.session_id or "default",
-            question=(
-                f"I’m blocked on task '{task.title}'. "
-                f"What should I know or change to proceed? Reason: {resolution_data.reasoning}"
-            ),
-            source_type="task_blocked",
-            source_id=task.task_id,
-            context={
-                "reasoning": resolution_data.reasoning,
-                "title": task.title,
-                "task_id": task.task_id,
-                "lane": task_lane,
-            },
-            lane=task_lane,
-        )
+        queued_strong_review = None
+        if str(task_lane or "").strip().lower() == "weak":
+            try:
+                from strata.api.main import _queue_eval_system_job
+
+                queued_strong_review = await _queue_eval_system_job(
+                    storage,
+                    kind="trace_review",
+                    title=f"Weak Escalation Review: {str(task.title or task.task_id)[:72]}",
+                    description="Queued strong-tier review for weak-lane work that requested escalation.",
+                    payload={
+                        "trace_kind": "task_trace",
+                        "task_id": task.task_id,
+                        "reviewer_tier": "strong",
+                        "emit_followups": True,
+                        "persist_to_task": True,
+                        "spec_scope": "project",
+                        "supervision_reason": "weak_blocked_escalation",
+                        "trace_payload": {
+                            "escalation_reason": resolution_data.reasoning,
+                            "origin_lane": task_lane,
+                            "requested_action": "decide whether to ask the user, add follow-up work, or unblock with guidance",
+                        },
+                    },
+                    session_id="strong:default",
+                    dedupe_signature={
+                        "trace_kind": "task_trace",
+                        "reviewer_tier": "strong",
+                        "task_id": task.task_id,
+                        "supervision_reason": "weak_blocked_escalation",
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Unable to queue strong escalation review for blocked weak task %s: %s", task.task_id, exc)
+        if not queued_strong_review:
+            enqueue_user_question(
+                storage,
+                session_id=task.session_id or "default",
+                question=(
+                    f"I’m blocked on task '{task.title}'. "
+                    f"What should I know or change to proceed? Reason: {resolution_data.reasoning}"
+                ),
+                source_type="task_blocked",
+                source_id=task.task_id,
+                context={
+                    "reasoning": resolution_data.reasoning,
+                    "title": task.title,
+                    "task_id": task.task_id,
+                    "lane": task_lane,
+                },
+                lane=task_lane,
+            )
         storage.commit()

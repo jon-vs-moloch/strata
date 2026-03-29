@@ -734,6 +734,8 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
   const [automaticTaskGeneration, setAutomaticTaskGeneration] = useState(false);
   const [testingMode, setTestingMode] = useState(false);
   const [replayPendingOnStartup, setReplayPendingOnStartup] = useState(false);
+  const [allowCloudOnlyBoot, setAllowCloudOnlyBoot] = useState(false);
+  const [heavyReflectionMode, setHeavyReflectionMode] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Model Registry Settings
@@ -749,6 +751,8 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
         setAutomaticTaskGeneration(Boolean(res.data.settings.automatic_task_generation));
         setTestingMode(Boolean(res.data.settings.testing_mode));
         setReplayPendingOnStartup(Boolean(res.data.settings.replay_pending_tasks_on_startup));
+        setAllowCloudOnlyBoot(Boolean(res.data.settings.allow_cloud_only_boot));
+        setHeavyReflectionMode(Boolean(res.data.settings.heavy_reflection_mode));
       }
     } catch (e) { console.error('Failed to load settings', e); }
   }, [apiUrl]);
@@ -824,6 +828,8 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
       automatic_task_generation: overrides.automatic_task_generation ?? automaticTaskGeneration,
       testing_mode: overrides.testing_mode ?? testingMode,
       replay_pending_tasks_on_startup: overrides.replay_pending_tasks_on_startup ?? replayPendingOnStartup,
+      allow_cloud_only_boot: overrides.allow_cloud_only_boot ?? allowCloudOnlyBoot,
+      heavy_reflection_mode: overrides.heavy_reflection_mode ?? heavyReflectionMode,
     };
     setSavingSettings(true);
     try {
@@ -1151,6 +1157,40 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
                 Replay pending backlog on startup
                 <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
                   Re-enqueues old pending tasks after a reboot. Leave this off unless you intentionally want to resume backlog work.
+                </div>
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={allowCloudOnlyBoot}
+                onChange={e => {
+                  const checked = e.target.checked;
+                  setAllowCloudOnlyBoot(checked);
+                  void persistSettings({ allow_cloud_only_boot: checked });
+                }}
+              />
+              <span>
+                Allow cloud-only boot
+                <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
+                  Lets the worker start on the strong tier when the local weak endpoint is unavailable instead of failing startup.
+                </div>
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={heavyReflectionMode}
+                onChange={e => {
+                  const checked = e.target.checked;
+                  setHeavyReflectionMode(checked);
+                  void persistSettings({ heavy_reflection_mode: checked });
+                }}
+              />
+              <span>
+                Heavy reflection mode
+                <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
+                  Makes the strong lane seed larger bootstrap supervision batches when idle so overnight runs synthesize telemetry faster.
                 </div>
               </span>
             </label>
