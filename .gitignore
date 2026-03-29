@@ -14,6 +14,7 @@ strata/experimental/candidates/
 strata/attic/
 .venv/
 .env.local
+src-tauri/target/
 
 # Generated research dumps are noisy and task-specific.
 # Keep durable knowledge surfaces trackable.

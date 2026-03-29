@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "ai.strata.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix strata_ui -- --host 127.0.0.1 --port 5174 --strictPort",
+    "beforeDevCommand": "bash ./scripts/desktop_dev_frontend.sh",
     "beforeBuildCommand": "npm run build --prefix strata_ui",
     "devUrl": "http://127.0.0.1:5174",
     "frontendDist": "../strata_ui/dist"
