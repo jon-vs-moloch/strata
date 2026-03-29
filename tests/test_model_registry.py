@@ -1,11 +1,11 @@
 from strata.models.registry import ModelRegistry
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 
 
 def test_registry_supports_legacy_list_pool_shape():
     registry = ModelRegistry(
         {
-            "strong": [
+            "trainer": [
                 {
                     "provider": "test-cloud",
                     "model": "big-cloud",
@@ -16,17 +16,17 @@ def test_registry_supports_legacy_list_pool_shape():
         }
     )
 
-    endpoint = registry.resolve_endpoint_for_context(StrongExecutionContext(run_id="legacy-shape"))
+    endpoint = registry.resolve_endpoint_for_context(TrainerExecutionContext(run_id="legacy-shape"))
 
     assert endpoint.model == "big-cloud"
-    assert registry.pools["strong"].allow_cloud is True
-    assert registry.pools["strong"].allow_local is True
+    assert registry.pools["trainer"].allow_cloud is True
+    assert registry.pools["trainer"].allow_local is True
 
 
 def test_registry_prefers_pool_transport_without_hardcoding_tier_transport():
     registry = ModelRegistry(
         {
-            "weak": {
+            "agent": {
                 "allow_cloud": True,
                 "allow_local": True,
                 "preferred_transport": "cloud",
@@ -48,7 +48,7 @@ def test_registry_prefers_pool_transport_without_hardcoding_tier_transport():
         }
     )
 
-    endpoint = registry.resolve_endpoint_for_context(WeakExecutionContext(run_id="weak-cloud-ok"))
+    endpoint = registry.resolve_endpoint_for_context(AgentExecutionContext(run_id="weak-cloud-ok"))
 
     assert endpoint.model == "cheap-cloud"
     assert endpoint.transport == "cloud"
@@ -57,7 +57,7 @@ def test_registry_prefers_pool_transport_without_hardcoding_tier_transport():
 def test_context_transport_override_still_works():
     registry = ModelRegistry(
         {
-            "strong": {
+            "trainer": {
                 "allow_cloud": True,
                 "allow_local": True,
                 "preferred_transport": "cloud",
@@ -80,7 +80,7 @@ def test_context_transport_override_still_works():
     )
 
     endpoint = registry.resolve_endpoint_for_context(
-        StrongExecutionContext(run_id="force-local", allow_cloud=False, allow_local=True)
+        TrainerExecutionContext(run_id="force-local", allow_cloud=False, allow_local=True)
     )
 
     assert endpoint.model == "big-local"

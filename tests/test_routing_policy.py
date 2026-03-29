@@ -10,10 +10,10 @@ def make_task(task_id: str, risk: str = "low"):
 def test_background_routing_defaults_to_weak():
     context = select_model_tier(make_task("task-default"))
 
-    assert context.mode == "weak"
+    assert context.mode == "agent"
 
 
 def test_background_routing_does_not_cross_pool_on_risk_by_default():
     context = select_model_tier(make_task("task-risky", risk="high"))
 
-    assert context.mode == "weak"
+    assert context.mode == "agent"

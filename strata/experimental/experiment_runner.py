@@ -7,7 +7,7 @@
 import logging
 from typing import List, Dict, Any, Optional, Literal
 from strata.feedback.signals import register_feedback_signal
-from strata.schemas.execution import WeakExecutionContext
+from strata.schemas.execution import AgentExecutionContext
 from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import TaskModel, MetricModel
 from strata.eval.benchmark import run_benchmark, persist_benchmark_report
@@ -362,7 +362,7 @@ class ExperimentRunner:
             benchmark_reports=benchmark_reports,
         )
         prediction_record = normalize_prediction(diagnostic_review)
-        prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "strong")
+        prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "trainer")
         prediction_record["failure_family"] = str(diagnostic_review.get("failure_family") or "")
         prediction_outcome = {
             "candidate_change_id": candidate_change_id,
@@ -516,7 +516,7 @@ class ExperimentRunner:
             suite_name=suite_name,
         )
         prediction_record = normalize_prediction(diagnostic_review)
-        prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "strong")
+        prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "trainer")
         prediction_record["failure_family"] = str(diagnostic_review.get("failure_family") or "")
         prediction_outcome = {
             "candidate_change_id": candidate_change_id,
@@ -660,7 +660,7 @@ class ExperimentRunner:
         logger.info(f"Starting experiment for candidate change {candidate_change_id}...")
         
         # 1. Prepare Isolated Context
-        context = WeakExecutionContext(
+        context = AgentExecutionContext(
             run_id=f"exp_{candidate_change_id}",
             candidate_change_id=candidate_change_id,
             evaluation_run=True
@@ -697,7 +697,7 @@ class ExperimentRunner:
                 task_id=task_id,
                 task_type=t_type,
                 run_mode="weak_eval",
-                execution_context="weak",
+                execution_context="agent",
                 candidate_change_id=candidate_change_id,
                 details={"error": str(error)} if not success else {}
             )

@@ -73,17 +73,24 @@ The system also now maintains per-message lifecycle metadata so it can distingui
 
 That is important because correct behavior is not always "reply immediately." Strata still needs durable evidence that a message was received and processed even when the right action is silence.
 
-## Weak/Strong Bootstrap Loop
+## Agent/Trainer Bootstrap Loop
 
-The `weak` and `strong` model tiers are intentional. They support the project’s improvement loop:
+The `agent` and `trainer` tiers are intentional. They support the project’s improvement loop:
 
-1. use a strong model inside the harness to propose or implement a change
-2. evaluate the weak model with that change
+1. use the trainer tier inside the harness to propose or implement a change
+2. evaluate the agent tier with that change
 3. inspect telemetry and downstream results
 4. refine the system
-5. repeat until the weak tier can make meaningful improvements itself
+5. repeat until the agent tier can make meaningful improvements itself
 
 That separation is a core part of the design, not just a configuration detail.
+
+The `trainer` tier is not supposed to merely restate what the `agent` already said. Its job is to investigate, falsify weak premises, and turn repeated verifier concerns into corrective action. In practice that now means:
+
+- both tiers use the same verifier machinery
+- the verifier anneals from observed error rate instead of per-tier special casing
+- repeated verifier findings are supervision evidence, not just retry noise
+- if trainer review output is malformed or empty, the system should still preserve a usable fallback diagnosis instead of silently losing the review
 
 ## Roadmap Direction
 
@@ -136,7 +143,7 @@ The background worker is created and started by the API lifespan hook. There is 
 Important startup constraint:
 
 - The worker performs a preflight model check on startup.
-- The weak/local model tier is currently mandatory.
+- The agent/local model tier is currently mandatory.
 - If the local model endpoint is not reachable, the API startup will fail.
 
 ### Frontend
@@ -179,12 +186,12 @@ Current requirement:
 
 The default registry is defined in [strata/models/registry.py](/Users/jon/Projects/strata/strata/models/registry.py):
 
-- `strong`: a higher-capability pool that defaults to preferring cloud transport
-- `weak`: a lower-cost/constrained pool that defaults to preferring local transport
+- `trainer`: a higher-capability pool that defaults to preferring cloud transport
+- `agent`: a lower-cost/constrained pool that defaults to preferring local transport
 
 The UI also exposes registry and settings controls through the admin panel.
 
-Those pool names are intentional roles, not permanent transport categories. Over time, either pool may point at local or cloud endpoints as long as the routing policy matches the job being done. The current default assumption remains `strong -> cloud-preferred` and `weak -> local-preferred`.
+Those pool names are intentional roles, not permanent transport categories. Over time, either pool may point at local or cloud endpoints as long as the routing policy matches the job being done. The current default assumption remains `trainer -> cloud-preferred` and `agent -> local-preferred`.
 
 Within a pool, the real mutable unit is the inference config, not just the bare model ID. That config can eventually include prompt/profile selection, context shaping, inference params, output schema, and in-pool escalation order such as `fast local -> slower local -> bigger local`.
 
@@ -202,7 +209,7 @@ Longer-term direction:
 
 - LM Studio should become one local runtime option rather than the implicit default host
 - Strata-native inference/runtime management should eventually become another registry-backed option, especially for future finetuning and adaptation features
-- by default, cross-pool `weak -> strong` escalation should remain disabled unless an explicit policy enables it
+- by default, cross-pool `agent -> trainer` escalation should remain disabled unless an explicit policy enables it
 
 If you are using one of the cloud presets, these are the direct key pages:
 

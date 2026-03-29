@@ -50,6 +50,11 @@ class DecompositionModule:
         - edit_type: 'refactor', 'feature', 'test', 'fix', or 'chore'.
         - validator: The specific validation engine (e.g., 'pytest', 'lint', 'sandbox').
         - max_diff_size: A character-count budget for the file change (default 50000).
+
+        OUTPUT CONTRACT:
+        - Return only one structured object matching the requested schema.
+        - Do not add prose before or after the object.
+        - Do not wrap the object in markdown fences.
         """
         
         response = await self.model.chat(
@@ -64,18 +69,10 @@ class DecompositionModule:
             }
         )
         raw_content = response.get("content", "{}")
-        
-        import json
-        try:
-            # Handle potential markdown fence if the model ignored response_format (rare)
-            if "```json" in raw_content:
-                raw_content = raw_content.split("```json")[1].split("```")[0]
-            data = json.loads(raw_content)
-        except Exception:
-            data = {"error": "Failed to parse JSON"}
+        data = self.model.extract_structured_object(raw_content)
         
         if not data or "error" in data:
-            print(f"Decomposition failed to parse YAML: {data}")
+            print(f"Decomposition failed to parse structured output: {data}")
             # Fallback mock so we don't crash, but log it
             from strata.schemas.core import TaskFraming, LeafTaskPrototype
             return TaskDecomposition(
@@ -89,9 +86,14 @@ class DecompositionModule:
         except Exception as e:
             print(f"Decomposition validation failed: {e}")
             # Another layer of safety
+            from strata.schemas.core import TaskFraming
             return TaskDecomposition(
-                framing=TaskDecomposition(**data).framing if "framing" in data else TaskDecomposition(framing={"repository_context": "..."}).framing, # bit risky but ok for now
+                framing=TaskFraming(
+                    repository_context=str((data.get("framing") or {}).get("repository_context") or "Repository context unavailable."),
+                    problem_statement=str((data.get("framing") or {}).get("problem_statement") or task_desc),
+                    constraints=list((data.get("framing") or {}).get("constraints") or []),
+                    success_criteria=list((data.get("framing") or {}).get("success_criteria") or []),
+                ),
                 subtasks={},
-                total_estimated_budget=0.0
-            ) # This will likely fail downstream, which is fine
-
+                total_estimated_budget=float(data.get("total_estimated_budget") or 0.0),
+            )

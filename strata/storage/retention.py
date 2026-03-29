@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
+from sqlalchemy.exc import OperationalError
 
 from strata.storage.models import (
     MetricModel,
@@ -278,35 +279,51 @@ def run_retention_maintenance(storage, *, force: bool = False) -> Dict[str, Any]
         except Exception:
             pass
 
-    summary = {
-        "skipped": False,
-        "policy": policy,
-        "messages": _compact_messages(storage, policy),
-        "metrics": compact_metrics(
-            storage,
-            policy,
-            metric_archive_key=METRIC_ARCHIVE_KEY,
-            utcnow=_utcnow,
-            as_utc=_as_utc,
-            metric_group_signature=_metric_group_signature,
-            metric_group_to_dict=_metric_group_to_dict,
-        ),
-        "attempts": compact_attempts(
-            storage,
-            policy,
-            attempt_archive_key=ATTEMPT_ARCHIVE_KEY,
-            utcnow=_utcnow,
-            as_utc=_as_utc,
-            terminal_task_states=TERMINAL_TASK_STATES,
-            truncate_text=_truncate_text,
-        ),
-        "experiment_reports": compact_experiment_reports(
-            storage,
-            policy,
-            terminal_task_states=TERMINAL_TASK_STATES,
-        ),
-        "completed_at": _utcnow().isoformat(),
-    }
-    _set_retention_runtime(storage, summary)
-    storage.commit()
-    return summary
+    try:
+        summary = {
+            "skipped": False,
+            "policy": policy,
+            "messages": _compact_messages(storage, policy),
+            "metrics": compact_metrics(
+                storage,
+                policy,
+                metric_archive_key=METRIC_ARCHIVE_KEY,
+                utcnow=_utcnow,
+                as_utc=_as_utc,
+                metric_group_signature=_metric_group_signature,
+                metric_group_to_dict=_metric_group_to_dict,
+            ),
+            "attempts": compact_attempts(
+                storage,
+                policy,
+                attempt_archive_key=ATTEMPT_ARCHIVE_KEY,
+                utcnow=_utcnow,
+                as_utc=_as_utc,
+                terminal_task_states=TERMINAL_TASK_STATES,
+                truncate_text=_truncate_text,
+            ),
+            "experiment_reports": compact_experiment_reports(
+                storage,
+                policy,
+                terminal_task_states=TERMINAL_TASK_STATES,
+            ),
+            "completed_at": _utcnow().isoformat(),
+        }
+        _set_retention_runtime(storage, summary)
+        storage.commit()
+        return summary
+    except OperationalError as exc:
+        if "database is locked" not in str(exc).lower():
+            raise
+        storage.rollback()
+        summary = {
+            "skipped": True,
+            "reason": "database_locked",
+            "policy": policy,
+        }
+        try:
+            _set_retention_runtime(storage, summary)
+            storage.commit()
+        except OperationalError:
+            storage.rollback()
+        return summary

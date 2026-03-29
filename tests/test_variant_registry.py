@@ -62,7 +62,7 @@ def test_experiment_runner_resolves_eval_and_promotion_policy_variants():
         candidate_change_id="candidate_x",
         baseline_change_id="baseline",
         eval_harness_config_override={"system_prompt": "candidate prompt", "context_files": ["docs/spec/eval-brief.md"]},
-        proposal_metadata={"proposer_tier": "weak"},
+        proposal_metadata={"proposer_tier": "agent"},
     )
 
     assert assignment["candidate_variant_id"].startswith("eval_harness_bundle_")

@@ -33,7 +33,7 @@ def test_toggle_message_reaction_records_counts_and_events():
         storage,
         message=message,
         reaction="thumbs_up",
-        session_id="strong:default",
+        session_id="trainer:default",
     )
 
     assert added["action"] == "added"
@@ -44,14 +44,14 @@ def test_toggle_message_reaction_records_counts_and_events():
         storage,
         message=message,
         reaction="thumbs_up",
-        session_id="strong:default",
+        session_id="trainer:default",
     )
 
     assert removed["action"] == "removed"
     assert removed["feedback"]["counts"] == {}
     assert removed["feedback"]["viewer_reactions"] == []
 
-    events = message_feedback.list_message_feedback_events(storage, session_id="strong:default")
+    events = message_feedback.list_message_feedback_events(storage, session_id="trainer:default")
     assert len(events) == 2
     assert events[-1]["action"] == "removed"
     assert events[-1]["distillation_status"] == "pending"

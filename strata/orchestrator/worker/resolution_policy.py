@@ -53,6 +53,17 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
             reasoning=f"Transient network/timeout failure: {err_str}.",
             resolution="reattempt"
         )
+
+    # B2. Iteration exhaustion on research-like work -> decompose
+    if "iteration limit reached" in err_str and task.type == TaskType.RESEARCH:
+        return AttemptResolutionSchema(
+            reasoning=(
+                "The task exhausted its autonomous iteration budget during research. "
+                "Treat this as a scope/plan problem and decompose instead of blindly retrying."
+            ),
+            resolution="decompose",
+            new_subtasks=[],
+        )
         
     # C. Missing Dependency -> blocked
     if any(x in err_str for x in ["not found", "missing", "no such file"]):
@@ -85,7 +96,8 @@ If you choose improve_tooling, also provide:
 Use tool_broken when the tool is behaving incorrectly and should be treated as untrustworthy until fixed.
 Use tool_too_weak when the tool works but is insufficient for the task.
 
-Respond with structured reasoning first, then the resolution choice.
+Return only one JSON object matching the requested schema.
+Do not add prose before or after the object.
 """
     try:
         response = await model_adapter.chat(
@@ -99,13 +111,10 @@ Respond with structured reasoning first, then the resolution choice.
                 }
             }
         )
-        import json
         raw_content = response.get("content", "{}")
-        # Handle potential markdown fence
-        if "```json" in raw_content:
-            raw_content = raw_content.split("```json")[1].split("```")[0]
-        
-        data = json.loads(raw_content)
+        data = model_adapter.extract_structured_object(raw_content)
+        if "error" in data:
+            raise ValueError(data["error"])
         return AttemptResolutionSchema(**data)
     except Exception as e:
         logger.error(f"Failed to parse structured LLM resolution: {e}. Falling back to REATTEMPT.")
@@ -224,41 +233,41 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
     elif res == "blocked":
         task.state = TaskState.BLOCKED
         task.human_intervention_required = True
-        queued_strong_review = None
-        if str(task_lane or "").strip().lower() == "weak":
+        queued_trainer_review = None
+        if str(task_lane or "").strip().lower() == "agent":
             try:
                 from strata.api.main import _queue_eval_system_job
 
-                queued_strong_review = await _queue_eval_system_job(
+                queued_trainer_review = await _queue_eval_system_job(
                     storage,
                     kind="trace_review",
-                    title=f"Weak Escalation Review: {str(task.title or task.task_id)[:72]}",
-                    description="Queued strong-tier review for weak-lane work that requested escalation.",
+                    title=f"Agent Escalation Review: {str(task.title or task.task_id)[:72]}",
+                    description="Queued trainer review for agent-lane work that requested escalation.",
                     payload={
                         "trace_kind": "task_trace",
                         "task_id": task.task_id,
-                        "reviewer_tier": "strong",
+                        "reviewer_tier": "trainer",
                         "emit_followups": True,
                         "persist_to_task": True,
                         "spec_scope": "project",
-                        "supervision_reason": "weak_blocked_escalation",
+                        "supervision_reason": "agent_blocked_escalation",
                         "trace_payload": {
                             "escalation_reason": resolution_data.reasoning,
                             "origin_lane": task_lane,
                             "requested_action": "decide whether to ask the user, add follow-up work, or unblock with guidance",
                         },
                     },
-                    session_id="strong:default",
+                    session_id="trainer:default",
                     dedupe_signature={
                         "trace_kind": "task_trace",
-                        "reviewer_tier": "strong",
+                        "reviewer_tier": "trainer",
                         "task_id": task.task_id,
-                        "supervision_reason": "weak_blocked_escalation",
+                        "supervision_reason": "agent_blocked_escalation",
                     },
                 )
             except Exception as exc:
-                logger.warning("Unable to queue strong escalation review for blocked weak task %s: %s", task.task_id, exc)
-        if not queued_strong_review:
+                logger.warning("Unable to queue trainer escalation review for blocked agent task %s: %s", task.task_id, exc)
+        if not queued_trainer_review:
             enqueue_user_question(
                 storage,
                 session_id=task.session_id or "default",

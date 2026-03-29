@@ -20,7 +20,7 @@ from strata.eval.benchmark import _load_env_file
 from strata.eval.harness_eval import run_harness_response
 from strata.models.adapter import ModelAdapter
 from strata.orchestrator.worker.telemetry import record_metric
-from strata.schemas.execution import WeakExecutionContext
+from strata.schemas.execution import AgentExecutionContext
 
 
 SUITES_DIR = Path("strata/eval/suites")
@@ -71,7 +71,7 @@ def load_suite(suite_name: str) -> List[Dict[str, Any]]:
 
 
 async def _run_direct_baseline(adapter: ModelAdapter, prompt: str) -> tuple[str, float]:
-    adapter.bind_execution_context(WeakExecutionContext(run_id=f"structured_eval_{int(time.time() * 1000)}"))
+    adapter.bind_execution_context(AgentExecutionContext(run_id=f"structured_eval_{int(time.time() * 1000)}"))
     started_at = time.perf_counter()
     response = await adapter.chat([{"role": "user", "content": prompt}], temperature=0.0)
     return response.get("content", ""), time.perf_counter() - started_at
@@ -170,7 +170,7 @@ def persist_structured_eval_report(
             model_id=model_id,
             task_type="STRUCTURED_EVAL",
             run_mode=run_mode,
-            execution_context="weak",
+            execution_context="agent",
             candidate_change_id=candidate_change_id,
             details={
                 "case_count": case_count,
@@ -188,7 +188,7 @@ def persist_structured_eval_report(
             model_id=model_id,
             task_type="STRUCTURED_EVAL",
             run_mode=run_mode,
-            execution_context="weak",
+            execution_context="agent",
             candidate_change_id=candidate_change_id,
             details={
                 "run_label": report.get("run_label"),

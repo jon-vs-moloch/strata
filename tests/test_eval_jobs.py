@@ -61,14 +61,14 @@ def test_queue_eval_system_job_uses_reviewer_tier_as_lane(monkeypatch):
             description="Review weak telemetry from strong lane.",
             payload={
                 "trace_kind": "session_trace",
-                "session_id": "weak:default",
-                "reviewer_tier": "strong",
+                "session_id": "agent:default",
+                "reviewer_tier": "trainer",
             },
-            session_id="weak:default",
+            session_id="agent:default",
             dedupe_signature={
                 "trace_kind": "session_trace",
-                "session_id": "weak:default",
-                "reviewer_tier": "strong",
+                "session_id": "agent:default",
+                "reviewer_tier": "trainer",
             },
         )
     )
@@ -77,8 +77,8 @@ def test_queue_eval_system_job_uses_reviewer_tier_as_lane(monkeypatch):
 
     assert result["status"] == "queued"
     assert task is not None
-    assert task.constraints["lane"] == "strong"
-    assert task.session_id == "weak:default"
+    assert task.constraints["lane"] == "trainer"
+    assert task.session_id == "agent:default"
     assert enqueued == [task.task_id]
 
 
@@ -257,7 +257,7 @@ def test_create_task_endpoint_scopes_lane_to_session():
             {
                 "title": "Weak scoped task",
                 "description": "lane owned",
-                "lane": "weak",
+                "lane": "agent",
             },
             storage=storage,
         )
@@ -266,30 +266,30 @@ def test_create_task_endpoint_scopes_lane_to_session():
     task = storage.tasks.get_by_id(result["id"])
 
     assert task is not None
-    assert task.session_id == "weak:default"
-    assert task.constraints["lane"] == "weak"
+    assert task.session_id == "agent:default"
+    assert task.constraints["lane"] == "agent"
 
 
 def test_sessions_endpoint_includes_custom_title():
     storage = make_storage()
-    storage.messages.create(role="user", content="hello", session_id="strong:default")
-    set_session_metadata(storage, "strong:default", {"custom_title": "Bootstrap Chat"})
+    storage.messages.create(role="user", content="hello", session_id="trainer:default")
+    set_session_metadata(storage, "trainer:default", {"custom_title": "Bootstrap Chat"})
     storage.commit()
 
-    result = asyncio.run(api_main.get_sessions(lane="strong", storage=storage))
+    result = asyncio.run(api_main.get_sessions(lane="trainer", storage=storage))
 
     assert result[0]["title"] == "Bootstrap Chat"
 
 
 def test_mark_session_read_clears_unread_count():
     storage = make_storage()
-    storage.messages.create(role="assistant", content="autonomous note", session_id="strong:default")
+    storage.messages.create(role="assistant", content="autonomous note", session_id="trainer:default")
     storage.commit()
 
-    before = asyncio.run(api_main.get_sessions(lane="strong", storage=storage))
+    before = asyncio.run(api_main.get_sessions(lane="trainer", storage=storage))
     assert before[0]["unread_count"] == 1
 
-    asyncio.run(api_main.mark_session_as_read("strong:default", {}, storage=storage))
-    after = asyncio.run(api_main.get_sessions(lane="strong", storage=storage))
+    asyncio.run(api_main.mark_session_as_read("trainer:default", {}, storage=storage))
+    after = asyncio.run(api_main.get_sessions(lane="trainer", storage=storage))
 
     assert after[0]["unread_count"] == 0

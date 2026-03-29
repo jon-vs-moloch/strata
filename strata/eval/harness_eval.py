@@ -19,7 +19,7 @@ import httpx
 from strata.models.adapter import ModelAdapter
 from strata.context.loaded_files import get_loaded_context_registry
 from strata.observability.context import record_context_load
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 from strata.storage.services.main import StorageManager
 
 
@@ -278,10 +278,10 @@ async def _run_safe_tool_loop(
     allow_web: bool,
     max_iters: int = 2,
 ) -> tuple[str, float, Dict[str, Any]]:
-    if mode == "strong":
-        adapter.bind_execution_context(StrongExecutionContext(run_id=run_id))
+    if mode == "trainer":
+        adapter.bind_execution_context(TrainerExecutionContext(run_id=run_id))
     else:
-        adapter.bind_execution_context(WeakExecutionContext(run_id=run_id))
+        adapter.bind_execution_context(AgentExecutionContext(run_id=run_id))
 
     context_lookup = {str(path): _load_eval_context([str(path)]) for path in context_files}
     capabilities = _resolve_eval_capabilities(adapter)
@@ -400,7 +400,7 @@ async def run_harness_response(
     *,
     run_id: str | None = None,
     config_override: Optional[Dict[str, Any]] = None,
-    mode: str = "weak",
+    mode: str = "agent",
     profile: str = "harness_no_capes",
 ) -> tuple[str, float, Dict[str, Any]]:
     """
@@ -412,10 +412,10 @@ async def run_harness_response(
     run_id = run_id or f"harness_eval_{int(time.time() * 1000)}"
 
     if not profile_config["scaffold"]:
-        if mode == "strong":
-            adapter.bind_execution_context(StrongExecutionContext(run_id=run_id))
+        if mode == "trainer":
+            adapter.bind_execution_context(TrainerExecutionContext(run_id=run_id))
         else:
-            adapter.bind_execution_context(WeakExecutionContext(run_id=run_id))
+            adapter.bind_execution_context(AgentExecutionContext(run_id=run_id))
         started_at = time.perf_counter()
         response = await adapter.chat([{"role": "user", "content": prompt}], temperature=0.0)
         content, usage = _normalize_model_result(response)
@@ -424,10 +424,10 @@ async def run_harness_response(
     config = _normalize_eval_config(config_override)
     context_files = list(config.get("context_files", [])) if profile_config["use_context"] else []
     system_prompt = config.get("system_prompt", DEFAULT_EVAL_SYSTEM_PROMPT)
-    if mode == "strong":
-        adapter.bind_execution_context(StrongExecutionContext(run_id=run_id))
+    if mode == "trainer":
+        adapter.bind_execution_context(TrainerExecutionContext(run_id=run_id))
     else:
-        adapter.bind_execution_context(WeakExecutionContext(run_id=run_id))
+        adapter.bind_execution_context(AgentExecutionContext(run_id=run_id))
     capabilities = _resolve_eval_capabilities(adapter)
 
     if profile_config["use_tools"]:

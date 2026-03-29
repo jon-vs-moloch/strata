@@ -22,7 +22,7 @@ def _emit_task_communication(storage, task, *, content: str, source_kind: str) -
     decision = build_communication_decision(
         role="assistant",
         content=content,
-        lane=infer_lane_from_task(task) or "strong",
+        lane=infer_lane_from_task(task) or "trainer",
         channel="existing_session_message",
         session_id=task.session_id or "default",
         audience="user",

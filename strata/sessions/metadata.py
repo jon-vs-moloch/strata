@@ -9,12 +9,28 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 from strata.models.adapter import ModelAdapter
-from strata.schemas.execution import WeakExecutionContext
+from strata.schemas.execution import AgentExecutionContext
 
 
 SESSION_METADATA_PREFIX = "session_metadata:"
 DEFAULT_SESSION_TITLE = "New Session"
 DEFAULT_DISCLOSABILITY = "user_visible"
+
+
+def _normalize_participant_names(raw: Any) -> Dict[str, str]:
+    source = dict(raw or {}) if isinstance(raw, dict) else {}
+    trainer = str(source.get("trainer") or "").strip()
+    if not trainer or trainer.lower() == "trainer-agent":
+        trainer = "Trainer"
+    agent = str(source.get("agent") or "").strip() or "Agent"
+    user = str(source.get("user") or "").strip() or "You"
+    system = str(source.get("system") or "").strip() or "System"
+    return {
+        "user": user,
+        "trainer": trainer,
+        "agent": agent,
+        "system": system,
+    }
 
 
 def _utcnow_iso() -> str:
@@ -44,7 +60,7 @@ def get_session_metadata(storage, session_id: str) -> Dict[str, Any]:
     merged.setdefault("last_communication_source_kind", "")
     merged.setdefault("last_communication_actor", "")
     merged.setdefault("last_communication_tags", [])
-    merged.setdefault("participant_names", {"user": "You", "strong": "Strong", "weak": "Weak", "system": "System"})
+    merged["participant_names"] = _normalize_participant_names(merged.get("participant_names"))
     merged.setdefault("action_required", False)
     merged.setdefault("action_required_reason", "")
     return merged
@@ -53,6 +69,7 @@ def get_session_metadata(storage, session_id: str) -> Dict[str, Any]:
 def set_session_metadata(storage, session_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
     current = get_session_metadata(storage, session_id)
     next_value = {**current, **dict(metadata or {})}
+    next_value["participant_names"] = _normalize_participant_names(next_value.get("participant_names"))
     storage.parameters.set_parameter(
         _session_metadata_key(session_id),
         next_value,
@@ -157,7 +174,7 @@ async def ensure_generated_session_title(storage, *, session_id: str, model_adap
     generated_title = ""
     try:
         if isinstance(model_adapter, ModelAdapter):
-            title_adapter = ModelAdapter(context=WeakExecutionContext(run_id=f"session-title:{session_id}"))
+            title_adapter = ModelAdapter(context=AgentExecutionContext(run_id=f"session-title:{session_id}"))
             title_adapter._selected_models = dict(getattr(model_adapter, "_selected_models", {}))
         else:
             title_adapter = model_adapter

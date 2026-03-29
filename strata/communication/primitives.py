@@ -26,15 +26,20 @@ def _now_iso() -> str:
 
 
 def _new_session_id(lane: str) -> str:
-    normalized_lane = normalize_lane(lane) or "strong"
+    normalized_lane = normalize_lane(lane) or "trainer"
     return f"{normalized_lane}:session-{uuid4().hex[:12]}"
+
+
+def _is_lane_default_session(session_id: Optional[str]) -> bool:
+    raw = str(session_id or "").strip().lower()
+    return raw in {"trainer:default", "agent:default", "strong:default", "weak:default", "default"}
 
 
 def build_communication_decision(
     *,
     role: str,
     content: str,
-    lane: str = "strong",
+    lane: str = "trainer",
     channel: str = "existing_session_message",
     session_id: Optional[str] = None,
     audience: str = "user",
@@ -55,7 +60,7 @@ def build_communication_decision(
         "should_send": bool(should_send),
         "role": role,
         "content": content,
-        "lane": normalize_lane(lane) or "strong",
+        "lane": normalize_lane(lane) or "trainer",
         "channel": str(channel or "existing_session_message").strip().lower(),
         "session_id": session_id,
         "audience": str(audience or "user").strip() or "user",
@@ -160,7 +165,7 @@ def _session_reuse_score(summary: Dict[str, Any], metadata: Dict[str, Any], deci
 
 
 def _find_reusable_session(storage, decision: Dict[str, Any]) -> Optional[str]:
-    lane = normalize_lane(decision.get("lane")) or "strong"
+    lane = normalize_lane(decision.get("lane")) or "trainer"
     summaries = storage.messages.get_session_summaries(lane=lane)
     best: Optional[Tuple[int, str, str]] = None
     for summary in summaries:
@@ -184,6 +189,7 @@ def route_communication_decision(storage, decision: Dict[str, Any]) -> Dict[str,
     source_kind = str(normalized.get("source_kind") or "system").strip().lower() or "system"
     explicit_session_id = str(normalized.get("session_id") or "").strip()
     explicit_channel = str(normalized.get("channel") or "").strip().lower() or "existing_session_message"
+    explicit_default_session = _is_lane_default_session(explicit_session_id)
 
     if communicative_act == "response":
         if explicit_channel == "new_session":
@@ -191,6 +197,19 @@ def route_communication_decision(storage, decision: Dict[str, Any]) -> Dict[str,
             normalized["session_id"] = None
             return normalized
         normalized["channel"] = "existing_session_message"
+        return normalized
+
+    if communicative_act == "question":
+        if explicit_session_id and explicit_channel != "new_session" and not explicit_default_session:
+            normalized["channel"] = "existing_session_message"
+            return normalized
+        reusable_session_id = _find_reusable_session(storage, normalized)
+        if reusable_session_id:
+            normalized["channel"] = "existing_session_message"
+            normalized["session_id"] = reusable_session_id
+            return normalized
+        normalized["channel"] = "new_session"
+        normalized["session_id"] = None
         return normalized
 
     if source_kind.startswith("autonomous_") or source_kind in {"system_notice", "alignment_notice"}:
@@ -220,7 +239,7 @@ def deliver_communication(
     *,
     role: str,
     content: str,
-    lane: str = "strong",
+    lane: str = "trainer",
     channel: str = "existing_session_message",
     session_id: Optional[str] = None,
     audience: str = "user",
@@ -235,7 +254,7 @@ def deliver_communication(
     if not str(content or "").strip():
         return {"status": "skipped", "reason": "empty_content"}
 
-    normalized_lane = normalize_lane(lane) or "strong"
+    normalized_lane = normalize_lane(lane) or "trainer"
     normalized_channel = str(channel or "existing_session_message").strip().lower()
     if normalized_channel == "new_session":
         resolved_session_id = _new_session_id(normalized_lane)
@@ -306,7 +325,7 @@ def deliver_communication_decision(storage, decision: Dict[str, Any]) -> Dict[st
         storage,
         role=str(normalized.get("role") or "assistant"),
         content=str(normalized.get("content") or ""),
-        lane=str(normalized.get("lane") or "strong"),
+        lane=str(normalized.get("lane") or "trainer"),
         channel=str(normalized.get("channel") or "existing_session_message"),
         session_id=normalized.get("session_id"),
         audience=str(normalized.get("audience") or "user"),

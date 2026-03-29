@@ -102,7 +102,7 @@ def register_chat_task_routes(
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
-                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+                raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         return runtime.list_tasks_payload(storage, lane=normalized_lane)
 
     @app.get("/messages")
@@ -173,7 +173,7 @@ def register_chat_task_routes(
             build_communication_decision(
                 role="system",
                 content=feedback_event_message,
-                lane=normalize_lane(session_id.split(":", 1)[0]) or "strong",
+                lane=normalize_lane(session_id.split(":", 1)[0]) or "trainer",
                 channel="existing_session_message",
                 session_id=session_id,
                 audience="user",
@@ -200,7 +200,7 @@ def register_chat_task_routes(
                 payload={
                     "trace_kind": "session_trace",
                     "session_id": session_id,
-                    "reviewer_tier": "strong",
+                    "reviewer_tier": "trainer",
                     "emit_followups": True,
                     "persist_to_task": False,
                     "spec_scope": "project",
@@ -209,7 +209,7 @@ def register_chat_task_routes(
                 session_id=session_id,
                 dedupe_signature={
                     "trace_kind": "session_trace",
-                    "reviewer_tier": "strong",
+                    "reviewer_tier": "trainer",
                     "session_id": session_id,
                 },
             )
@@ -264,7 +264,7 @@ def register_chat_task_routes(
         session_id = str(payload.get("session_id") or "").strip()
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id field required")
-        reviewer_tier = str(payload.get("reviewer_tier") or "strong").strip().lower() or "strong"
+        reviewer_tier = str(payload.get("reviewer_tier") or "trainer").strip().lower() or "trainer"
         queued = await queue_eval_system_job(
             storage,
             kind="trace_review",
@@ -293,7 +293,7 @@ def register_chat_task_routes(
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
-                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+                raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         summaries = storage.messages.get_session_summaries(lane=normalized_lane)
         for summary in summaries:
             metadata = get_session_metadata(storage, summary["session_id"])
@@ -352,9 +352,9 @@ def register_chat_task_routes(
 
     @app.post("/chat")
     async def post_chat(payload: Dict[str, Any], storage=Depends(get_storage)):
-        preferred_tier = str(payload.get("preferred_tier") or "strong").strip().lower()
-        if preferred_tier not in {"strong", "weak"}:
-            preferred_tier = "strong"
+        preferred_tier = str(payload.get("preferred_tier") or "trainer").strip().lower()
+        if preferred_tier not in {"trainer", "agent"}:
+            preferred_tier = "trainer"
         session_id = canonical_session_id_for_lane(preferred_tier, payload.get("session_id", "default"))
         content = payload.get("content", "")
         ensure_session_metadata(

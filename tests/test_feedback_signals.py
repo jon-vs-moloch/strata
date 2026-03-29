@@ -42,14 +42,14 @@ def test_register_response_signal_is_listed_by_session():
     register_feedback_signal(
         storage,
         source_type="session",
-        source_id="strong:default",
+        source_id="trainer:default",
         signal_kind="response",
         signal_value="User said this answer format is too verbose.",
         source_actor="user",
-        session_id="strong:default",
+        session_id="trainer:default",
         source_preview="Assistant answered with a long explanation.",
     )
-    rows = list_feedback_signals(storage, session_id="strong:default")
+    rows = list_feedback_signals(storage, session_id="trainer:default")
     assert len(rows) == 1
     assert rows[0]["prioritization"]["priority"] == "review_soon"
 

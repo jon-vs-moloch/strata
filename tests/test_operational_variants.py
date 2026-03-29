@@ -109,9 +109,9 @@ def test_execution_plan_prefers_validated_default_and_builds_lanes():
     strong = ensure_variant(
         storage,
         kind="prompt_bundle",
-        payload={"instruction_suffix": "strong"},
+        payload={"instruction_suffix": "trainer"},
         family="implementation_prompt",
-        label="strong",
+        label="trainer",
         metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "validated"},
     )
     challenger = ensure_variant(

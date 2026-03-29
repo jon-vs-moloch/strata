@@ -11,7 +11,7 @@ from strata.schemas.execution import ExecutionContext
 from strata.models.providers import LocalProvider, CloudProvider, BaseModelProvider
 
 REGISTRY_PRESETS = {
-    "strong": {
+    "trainer": {
         "cerebras_glm_4_7": {
             "provider": "cerebras",
             "model": "zai-glm-4.7",
@@ -46,7 +46,7 @@ REGISTRY_PRESETS = {
             "tags": ["free-tier", "fallback", "openai-compatible"],
         },
     },
-    "weak": {
+    "agent": {
         "lmstudio_local": {
             "provider": "lmstudio",
             "model": "mlx-qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2",
@@ -219,7 +219,7 @@ class ModelRegistry:
 
 # Example default registry (can be overridden)
 DEFAULT_CONFIG = {
-    "strong": {
+    "trainer": {
         "allow_cloud": True,
         "allow_local": True,
         "preferred_transport": "cloud",
@@ -236,7 +236,7 @@ DEFAULT_CONFIG = {
             }
         ],
     },
-    "weak": {
+    "agent": {
         "allow_cloud": True,
         "allow_local": True,
         "preferred_transport": "local",

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 
-VALID_LANES = {"strong", "weak"}
+VALID_LANES = {"trainer", "agent"}
 
 
 def normalize_lane(value: Any) -> Optional[str]:
@@ -18,15 +18,15 @@ def normalize_lane(value: Any) -> Optional[str]:
 
 def infer_lane_from_session_id(session_id: Optional[str]) -> Optional[str]:
     raw = str(session_id or "").strip().lower()
-    if raw.startswith("strong:"):
-        return "strong"
-    if raw.startswith("weak:"):
-        return "weak"
+    if raw.startswith("trainer:"):
+        return "trainer"
+    if raw.startswith("agent:"):
+        return "agent"
     return None
 
 
 def canonical_session_id_for_lane(lane: Any, session_id: Optional[str] = None) -> str:
-    normalized_lane = normalize_lane(lane) or "strong"
+    normalized_lane = normalize_lane(lane) or "trainer"
     raw = str(session_id or "").strip()
     inferred_lane = infer_lane_from_session_id(raw)
     if inferred_lane == normalized_lane and raw:

@@ -156,9 +156,9 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
             proposer_tiers = [
                 str(tier).lower()
-                for tier in payload.get("proposer_tiers", bootstrap_policy.get("default_proposer_tiers", ["weak", "strong"]))
+                for tier in payload.get("proposer_tiers", bootstrap_policy.get("default_proposer_tiers", ["agent", "trainer"]))
             ]
-            proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+            proposer_tiers = [tier for tier in proposer_tiers if tier in {"agent", "trainer"}]
             if not proposer_tiers:
                 raise ValueError("bootstrap_cycle requires at least one proposer tier")
 
@@ -310,7 +310,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             tool_name = str(payload.get("tool_name") or "").strip()
             if not tool_name:
                 raise ValueError("tool_cycle requires tool_name")
-            proposer_tier = str(payload.get("proposer_tier") or "weak")
+            proposer_tier = str(payload.get("proposer_tier") or "agent")
             from strata.api.main import _generate_tool_candidate_from_tier
             proposal = await _generate_tool_candidate_from_tier(
                 proposer_tier,
@@ -358,7 +358,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             }
         elif kind == "trace_review":
             trace_kind = str(payload.get("trace_kind") or "generic_trace")
-            reviewer_tier = str(payload.get("reviewer_tier") or "strong")
+            reviewer_tier = str(payload.get("reviewer_tier") or "trainer")
             spec_scope = str(payload.get("spec_scope") or "project")
             trace_summary = build_trace_summary(
                 trace_kind=trace_kind,

@@ -36,16 +36,16 @@ EVAL_PROPOSAL_CONFIG_DESCRIPTION = (
 def default_eval_proposal_config() -> Dict[str, Any]:
     return {
         "bootstrap": {
-            "default_proposer_tiers": ["weak", "strong"],
-            "continuous_proposer_tiers": ["weak", "strong"],
+            "default_proposer_tiers": ["agent", "trainer"],
+            "continuous_proposer_tiers": ["agent", "trainer"],
             "default_run_count": 2,
             "continuous_run_count": 1,
             "recent_report_window": 50,
             "recent_candidate_limit": 6,
         },
         "inference": {
-            "strong": {"temperature": 0.1},
-            "weak": {"temperature": 0.2},
+            "trainer": {"temperature": 0.1},
+            "agent": {"temperature": 0.2},
             "novelty_retry_count": 1,
             "novelty_temperature_step": 0.15,
             "novelty_max_temperature": 0.35,
@@ -56,7 +56,7 @@ def default_eval_proposal_config() -> Dict[str, Any]:
         },
         "resolution": {
             "use_llm_for_ambiguous": True,
-            "adjudicator_tier": "strong",
+            "adjudicator_tier": "trainer",
             "vote_count": 1,
             "near_duplicate_overlap": 0.92,
             "family_overlap": 0.68,
@@ -90,7 +90,7 @@ def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> 
     def normalize_tiers(raw: Any, fallback: list[str]) -> list[str]:
         if not isinstance(raw, list):
             return list(fallback)
-        normalized = [str(item).lower() for item in raw if str(item).lower() in {"weak", "strong"}]
+        normalized = [str(item).lower() for item in raw if str(item).lower() in {"agent", "trainer"}]
         return normalized or list(fallback)
 
     bootstrap_defaults = defaults["bootstrap"]
@@ -123,8 +123,8 @@ def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> 
             ),
         },
         "inference": {
-            "strong": _normalize_inference_params(inference_payload.get("strong"), fallback=inference_defaults["strong"]),
-            "weak": _normalize_inference_params(inference_payload.get("weak"), fallback=inference_defaults["weak"]),
+            "trainer": _normalize_inference_params(inference_payload.get("trainer"), fallback=inference_defaults["trainer"]),
+            "agent": _normalize_inference_params(inference_payload.get("agent"), fallback=inference_defaults["agent"]),
             "novelty_retry_count": max(
                 0,
                 int(inference_payload.get("novelty_retry_count", inference_defaults["novelty_retry_count"]) or 0),
@@ -152,10 +152,10 @@ def normalize_eval_proposal_config(payload: Optional[Dict[str, Any]] = None) -> 
                 resolution_payload.get("use_llm_for_ambiguous", resolution_defaults["use_llm_for_ambiguous"])
             ),
             "adjudicator_tier": str(
-                resolution_payload.get("adjudicator_tier", resolution_defaults["adjudicator_tier"]) or "strong"
+                resolution_payload.get("adjudicator_tier", resolution_defaults["adjudicator_tier"]) or "trainer"
             ).lower()
-            if str(resolution_payload.get("adjudicator_tier", resolution_defaults["adjudicator_tier"]) or "strong").lower() in {"weak", "strong"}
-            else "strong",
+            if str(resolution_payload.get("adjudicator_tier", resolution_defaults["adjudicator_tier"]) or "trainer").lower() in {"agent", "trainer"}
+            else "trainer",
             "vote_count": max(1, int(resolution_payload.get("vote_count", resolution_defaults["vote_count"]) or 1)),
             "near_duplicate_overlap": float(
                 resolution_payload.get("near_duplicate_overlap", resolution_defaults["near_duplicate_overlap"]) or 0.92
@@ -271,7 +271,7 @@ def summarize_eval_variant_metrics(metric_rows, *, series_limit: int = EVAL_SERI
 
     snapshots.sort(
         key=lambda item: (
-            item.get("mode") != "weak",
+            item.get("mode") != "agent",
             item.get("profile") != "raw_model",
             item.get("profile") != "harness_no_capes",
             item.get("variant_id") or "",
@@ -471,16 +471,16 @@ async def adjudicate_eval_proposal_relationship(
 ) -> Dict[str, Any]:
     proposal_config = normalize_eval_proposal_config(proposal_config)
     resolution_config = dict(proposal_config.get("resolution") or {})
-    adjudicator_tier = str(resolution_config.get("adjudicator_tier", "strong") or "strong")
+    adjudicator_tier = str(resolution_config.get("adjudicator_tier", "trainer") or "trainer")
     vote_count = max(1, int(resolution_config.get("vote_count", 1) or 1))
 
-    from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+    from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 
     adapter = model_adapter_factory()
-    if adjudicator_tier == "weak":
-        adapter.bind_execution_context(WeakExecutionContext(run_id=f"proposal_resolution_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+    if adjudicator_tier == "agent":
+        adapter.bind_execution_context(AgentExecutionContext(run_id=f"proposal_resolution_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
     else:
-        adapter.bind_execution_context(StrongExecutionContext(run_id=f"proposal_resolution_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+        adapter.bind_execution_context(TrainerExecutionContext(run_id=f"proposal_resolution_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
 
     adjudication_prompt = f"""
 You are resolving whether two Strata harness-mutation proposals are duplicates, mergeable refinements, or distinct.
@@ -627,15 +627,15 @@ async def synthesize_merged_eval_proposal(
 ) -> Dict[str, Any]:
     proposal_config = normalize_eval_proposal_config(proposal_config)
     resolution_config = dict(proposal_config.get("resolution") or {})
-    adjudicator_tier = str(resolution_config.get("adjudicator_tier", "strong") or "strong")
+    adjudicator_tier = str(resolution_config.get("adjudicator_tier", "trainer") or "trainer")
 
-    from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+    from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 
     adapter = model_adapter_factory()
-    if adjudicator_tier == "weak":
-        adapter.bind_execution_context(WeakExecutionContext(run_id=f"proposal_merge_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+    if adjudicator_tier == "agent":
+        adapter.bind_execution_context(AgentExecutionContext(run_id=f"proposal_merge_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
     else:
-        adapter.bind_execution_context(StrongExecutionContext(run_id=f"proposal_merge_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
+        adapter.bind_execution_context(TrainerExecutionContext(run_id=f"proposal_merge_{int(datetime.now(timezone.utc).timestamp() * 1000)}"))
 
     proposal_override = canonical_eval_override(proposal.get("eval_harness_config_override"))
     existing_override = canonical_eval_override(existing_candidate.get("eval_harness_config_override"))
@@ -875,20 +875,20 @@ async def generate_eval_candidate_from_tier(
 ) -> Dict[str, Any]:
     proposal_config = normalize_eval_proposal_config(proposal_config or get_active_eval_proposal_config())
     adapter = model_adapter_factory()
-    if proposer_tier == "weak":
-        from strata.schemas.execution import WeakExecutionContext
+    if proposer_tier == "agent":
+        from strata.schemas.execution import AgentExecutionContext
 
-        context = WeakExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+        context = AgentExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
     else:
-        from strata.schemas.execution import StrongExecutionContext
+        from strata.schemas.execution import TrainerExecutionContext
 
-        context = StrongExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+        context = TrainerExecutionContext(run_id=f"bootstrap_proposal_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
     adapter.bind_execution_context(context)
 
     recent_signatures = recent_signatures or set()
     current_signature = current_signature or eval_override_signature(current_config)
     base_inference_params = dict((proposal_config.get("inference") or {}).get(proposer_tier) or {})
-    base_temperature = float(base_inference_params.get("temperature", 0.2 if proposer_tier == "weak" else 0.1) or 0.0)
+    base_temperature = float(base_inference_params.get("temperature", 0.2 if proposer_tier == "agent" else 0.1) or 0.0)
     novelty_retry_count = int((proposal_config.get("inference") or {}).get("novelty_retry_count", 1) or 0)
     novelty_temperature_step = float((proposal_config.get("inference") or {}).get("novelty_temperature_step", 0.15) or 0.0)
     novelty_max_temperature = float((proposal_config.get("inference") or {}).get("novelty_max_temperature", 0.35) or 0.0)
@@ -952,14 +952,14 @@ async def generate_eval_candidate_from_tier(
 
 async def generate_tool_candidate_from_tier(proposer_tier: str, *, tool_name: str, task_description: str, model_adapter_factory) -> Dict[str, Any]:
     adapter = model_adapter_factory()
-    if proposer_tier == "weak":
-        from strata.schemas.execution import WeakExecutionContext
+    if proposer_tier == "agent":
+        from strata.schemas.execution import AgentExecutionContext
 
-        context = WeakExecutionContext(run_id=f"tool_bootstrap_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+        context = AgentExecutionContext(run_id=f"tool_bootstrap_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
     else:
-        from strata.schemas.execution import StrongExecutionContext
+        from strata.schemas.execution import TrainerExecutionContext
 
-        context = StrongExecutionContext(run_id=f"tool_bootstrap_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+        context = TrainerExecutionContext(run_id=f"tool_bootstrap_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
     adapter.bind_execution_context(context)
     proposal_prompt = f"""
 Create a small, safe Strata dynamic tool.
@@ -985,7 +985,7 @@ Requirements:
 """.strip()
     response = await adapter.chat(
         [{"role": "user", "content": proposal_prompt}],
-        temperature=0.15 if proposer_tier == "strong" else 0.25,
+        temperature=0.15 if proposer_tier == "trainer" else 0.25,
     )
     raw_content = response.get("content", "")
     try:
@@ -1103,9 +1103,9 @@ def build_dashboard_snapshot(
     for current in normalized_reports:
         metadata = current.get("proposal_metadata") or {}
         if current.get("recommendation") == "promote":
-            if metadata.get("proposer_tier") == "weak":
+            if metadata.get("proposer_tier") == "agent":
                 weak_promotions += 1
-            elif metadata.get("proposer_tier") == "strong":
+            elif metadata.get("proposer_tier") == "trainer":
                 strong_promotions += 1
         reports.append(
             {
@@ -1124,7 +1124,7 @@ def build_dashboard_snapshot(
     for current in normalized_reports:
         metadata = current.get("proposal_metadata") or {}
         weak_gain = report_has_weak_gain(current)
-        if metadata.get("proposer_tier") == "weak" and current.get("recommendation") == "promote" and weak_gain:
+        if metadata.get("proposer_tier") == "agent" and current.get("recommendation") == "promote" and weak_gain:
             ignition = {
                 "detected": True,
                 "candidate_change_id": current.get("candidate_change_id"),
@@ -1166,8 +1166,8 @@ def build_dashboard_snapshot(
         "ignition": ignition,
         "current_promoted_candidate": promoted_state.get("current"),
         "promotion_counts": {
-            "weak": weak_promotions,
-            "strong": strong_promotions,
+            "agent": weak_promotions,
+            "trainer": strong_promotions,
             "total_history": len(promoted_state.get("history", [])),
             "archived_history": int(promoted_state.get("archived_count", 0) or 0),
         },

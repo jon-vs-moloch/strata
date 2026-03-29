@@ -104,11 +104,31 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             self._telemetry_states[key] = ProviderTelemetryState()
         return self._telemetry_states[key]
 
-    def _effective_min_interval_ms(self) -> float:
+    def _is_local_transport(self) -> bool:
+        return self.__class__.__name__ == "LocalProvider"
+
+    def _adaptive_min_interval_ms(self, telemetry: ProviderTelemetryState) -> float:
+        if not self._is_local_transport():
+            return 0.0
+        observed_requests = max(telemetry.success_count, telemetry.request_count)
+        if observed_requests < 3:
+            return 0.0
+        avg_latency_ms = (telemetry.total_latency_s / max(1, telemetry.success_count)) * 1000.0 if telemetry.success_count else 0.0
+        error_rate = telemetry.error_count / max(1, telemetry.request_count)
+        adaptive_ms = 0.0
+        if avg_latency_ms >= 2500.0:
+            adaptive_ms = max(adaptive_ms, min(15000.0, avg_latency_ms * 0.25))
+        if error_rate >= 0.15:
+            adaptive_ms = max(adaptive_ms, min(20000.0, 1500.0 + (avg_latency_ms * 0.2)))
+        return adaptive_ms
+
+    def _effective_min_interval_ms(self, telemetry: Optional[ProviderTelemetryState] = None) -> float:
         min_interval = float(self.min_interval_ms or 0)
         if self.requests_per_minute and self.requests_per_minute > 0:
             rpm_interval = 60000.0 / float(self.requests_per_minute)
             min_interval = max(min_interval, rpm_interval)
+        if telemetry is not None:
+            min_interval = max(min_interval, self._adaptive_min_interval_ms(telemetry))
         return min_interval
 
     async def _wait_for_turn(self, state: ThrottleState, telemetry: ProviderTelemetryState):
@@ -118,7 +138,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             if state.next_allowed_at > now:
                 delay_s = state.next_allowed_at - now
             reservation_start = max(now, state.next_allowed_at)
-            state.next_allowed_at = reservation_start + (self._effective_min_interval_ms() / 1000.0)
+            state.next_allowed_at = reservation_start + (self._effective_min_interval_ms(telemetry) / 1000.0)
         if delay_s > 0:
             telemetry.throttled_count += 1
             telemetry.total_wait_s += delay_s
@@ -289,15 +309,25 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
     for key, state in GenericOpenAICompatibleProvider._telemetry_states.items():
         avg_wait_ms = (state.total_wait_s / state.throttled_count * 1000.0) if state.throttled_count else 0.0
         avg_latency_ms = (state.total_latency_s / state.request_count * 1000.0) if state.request_count else 0.0
+        request_count = max(1, state.request_count)
+        adaptive_min_interval_ms = 0.0
+        if request_count >= 3 and "127.0.0.1" in key:
+            if avg_latency_ms >= 2500.0:
+                adaptive_min_interval_ms = max(adaptive_min_interval_ms, min(15000.0, avg_latency_ms * 0.25))
+            error_rate = state.error_count / request_count
+            if error_rate >= 0.15:
+                adaptive_min_interval_ms = max(adaptive_min_interval_ms, min(20000.0, 1500.0 + (avg_latency_ms * 0.2)))
         snapshot[key] = {
             "request_count": state.request_count,
             "success_count": state.success_count,
             "error_count": state.error_count,
+            "error_rate": round(state.error_count / request_count, 4),
             "retried_count": state.retried_count,
             "throttled_count": state.throttled_count,
             "rate_limit_hits": state.rate_limit_hits,
             "avg_wait_ms": round(avg_wait_ms, 2),
             "avg_latency_ms": round(avg_latency_ms, 2),
+            "adaptive_min_interval_ms": round(adaptive_min_interval_ms, 2),
             "last_status_code": state.last_status_code,
             "last_error": state.last_error,
             "last_request_at": state.last_request_at,

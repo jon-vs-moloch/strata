@@ -29,6 +29,29 @@ DEFAULT_REPO_ANCHORS = [
 ]
 
 
+def _should_return_raw_file(
+    *,
+    filepath: str,
+    target_scope: str,
+    task_description: str,
+    spec_paths: Optional[list[str]] = None,
+) -> bool:
+    normalized_path = str(filepath or "").strip()
+    if not normalized_path:
+        return False
+    normalized_spec_paths = {str(path or "").strip() for path in (spec_paths or []) if str(path or "").strip()}
+    lower_path = normalized_path.lower()
+    lower_scope = str(target_scope or "").strip().lower()
+    lower_desc = str(task_description or "").strip().lower()
+    if normalized_path in normalized_spec_paths:
+        return True
+    if lower_path.startswith(".knowledge/specs/"):
+        return True
+    return lower_scope == "codebase" and any(
+        keyword in lower_desc for keyword in ("alignment", "spec", "repository", "repo", "implementation")
+    )
+
+
 def _build_research_system_prompt(
     target_scope: str,
     task_description: str,
@@ -410,21 +433,32 @@ class ResearchModule:
                     filepath = args.get("filepath", "")
                     print(f"  -> Research Agent reading file: {filepath}")
                     full_path = os.path.join(root, filepath)
-                    
+
                     async def fetch_raw_content():
                         with open(full_path, "r", encoding="utf-8") as f:
                             return f.read()
-                    
+
                     try:
-                        # Apply Progressive Disclosure Wrapper
-                        tool_result = await self.storage.get_resource_summary(
-                            resource_id=filepath,
-                            raw_content_callback=fetch_raw_content,
-                            model_adapter=self.model
-                        )
+                        if _should_return_raw_file(
+                            filepath=filepath,
+                            target_scope=target_scope,
+                            task_description=task_description,
+                            spec_paths=spec_paths,
+                        ):
+                            raw_content = await fetch_raw_content()
+                            tool_result = raw_content[:12000]
+                            if len(raw_content) > 12000:
+                                tool_result += "\n... truncated ..."
+                        else:
+                            # Apply Progressive Disclosure Wrapper for non-critical reads.
+                            tool_result = await self.storage.get_resource_summary(
+                                resource_id=filepath,
+                                raw_content_callback=fetch_raw_content,
+                                model_adapter=self.model
+                            )
                     except Exception as e:
                         tool_result = f"File read failed: {e}"
-                        
+
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
 

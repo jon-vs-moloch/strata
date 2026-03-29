@@ -8,11 +8,12 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from strata.api.message_feedback import list_message_feedback_events
 from strata.feedback.signals import get_feedback_signal, register_feedback_signal
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 from strata.storage.models import MessageModel, TaskModel
 
 
@@ -21,22 +22,6 @@ def _clip(text: Any, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3].rstrip() + "..."
-
-
-def _extract_json_object(raw: str) -> Dict[str, Any]:
-    normalized = str(raw or "").strip()
-    if normalized.startswith("```"):
-        normalized = re.sub(r"^```(?:json)?", "", normalized).strip()
-        normalized = re.sub(r"```$", "", normalized).strip()
-    try:
-        return json.loads(normalized)
-    except Exception:
-        pass
-    match = re.search(r"\{.*\}", normalized, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON object found in trace review response.")
-    return json.loads(match.group(0))
-
 
 def _iso(value: Any) -> Optional[str]:
     if not value:
@@ -85,6 +70,99 @@ def _message_payload(message: MessageModel) -> Dict[str, Any]:
         "content": _clip(message.content, 360),
         "is_intervention": bool(message.is_intervention),
     }
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _collect_missing_file_claims(task: TaskModel, attempts: List[Any], messages: List[MessageModel]) -> List[str]:
+    candidates = [
+        str(task.title or ""),
+        str(task.description or ""),
+        *[str((attempt.reason or "")) for attempt in attempts],
+        *[str((message.content or "")) for message in messages],
+    ]
+    claims: List[str] = []
+    patterns = [
+        re.compile(r"`([^`]+)`"),
+        re.compile(r"([./][A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)"),
+    ]
+    for text in candidates:
+        lowered = text.lower()
+        if "missing" not in lowered and "does not exist" not in lowered and "contains neither" not in lowered:
+            continue
+        for pattern in patterns:
+            for match in pattern.findall(text):
+                candidate = str(match or "").strip()
+                if not candidate:
+                    continue
+                if candidate.endswith("/"):
+                    continue
+                if candidate not in claims:
+                    claims.append(candidate)
+    return claims
+
+
+def _build_repo_fact_checks(task: TaskModel, attempts: List[Any], messages: List[MessageModel]) -> List[Dict[str, Any]]:
+    constraints = dict(task.constraints or {})
+    repo_root = _repo_root()
+    candidate_paths: List[str] = []
+    for path in constraints.get("spec_paths") or []:
+        normalized = str(path or "").strip()
+        if normalized and normalized not in candidate_paths:
+            candidate_paths.append(normalized)
+    for path in _collect_missing_file_claims(task, attempts, messages):
+        if path not in candidate_paths:
+            candidate_paths.append(path)
+
+    checks: List[Dict[str, Any]] = []
+    for rel_path in candidate_paths:
+        try:
+            resolved = (repo_root / rel_path).resolve()
+            exists = resolved.exists() and str(resolved).startswith(str(repo_root))
+        except Exception:
+            resolved = repo_root / rel_path
+            exists = False
+        checks.append(
+            {
+                "path": rel_path,
+                "exists": bool(exists),
+                "is_file": bool(exists and resolved.is_file()),
+            }
+        )
+    return checks
+
+
+def _extract_attempt_note_paths(attempts: List[Any]) -> List[str]:
+    note_paths: List[str] = []
+    for attempt in attempts:
+        reason = str(getattr(attempt, "reason", "") or "")
+        for match in re.findall(r"(\.?/?\.knowledge/[A-Za-z0-9_./-]+\.md)", reason):
+            normalized = str(match or "").strip()
+            if normalized.startswith("./"):
+                normalized = normalized[2:]
+            if normalized and normalized not in note_paths:
+                note_paths.append(normalized)
+    return note_paths
+
+
+def _build_attempt_note_excerpts(attempts: List[Any], *, char_limit: int = 1200) -> List[Dict[str, Any]]:
+    repo_root = _repo_root()
+    excerpts: List[Dict[str, Any]] = []
+    for rel_path in _extract_attempt_note_paths(attempts):
+        try:
+            resolved = (repo_root / rel_path).resolve()
+            if not str(resolved).startswith(str(repo_root)) or not resolved.exists() or not resolved.is_file():
+                continue
+            content = resolved.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        excerpt = content[:char_limit]
+        if len(content) > char_limit:
+            excerpt += "..."
+        excerpts.append({"path": rel_path, "excerpt": excerpt})
+    return excerpts
 
 
 def build_eval_trace_summary(
@@ -185,6 +263,8 @@ def build_task_trace_summary(
     if include_session_messages and task.session_id:
         session_messages = storage.messages.get_all(session_id=task.session_id)
         messages = [msg for msg in session_messages if msg.associated_task_id == task_id][-message_limit:]
+    repo_fact_checks = _build_repo_fact_checks(task, attempts, messages)
+    attempt_note_excerpts = _build_attempt_note_excerpts(attempts)
 
     return {
         "task": _task_payload(task),
@@ -194,6 +274,8 @@ def build_task_trace_summary(
         "message_count": len(messages),
         "messages": [_message_payload(message) for message in messages],
         "associated_reports": list((task.constraints or {}).get("associated_reports") or []),
+        "repo_fact_checks": repo_fact_checks,
+        "attempt_note_excerpts": attempt_note_excerpts,
     }
 
 
@@ -313,14 +395,14 @@ def build_trace_summary(
 
 
 def _reviewer_context(reviewer_tier: str, *, run_id: str, candidate_change_id: Optional[str]) -> Any:
-    tier = str(reviewer_tier or "strong").strip().lower()
-    if tier == "weak":
-        return WeakExecutionContext(
+    tier = str(reviewer_tier or "trainer").strip().lower()
+    if tier == "agent":
+        return AgentExecutionContext(
             run_id=run_id,
             candidate_change_id=candidate_change_id,
             evaluation_run=True,
         )
-    return StrongExecutionContext(
+    return TrainerExecutionContext(
         run_id=run_id,
         candidate_change_id=candidate_change_id,
     )
@@ -380,12 +462,180 @@ def _normalize_review_fields(review: Dict[str, Any], *, trace_kind: str) -> Dict
     return normalized
 
 
+def _apply_repo_fact_check_overrides(review: Dict[str, Any], trace_summary: Dict[str, Any]) -> Dict[str, Any]:
+    checks = list((trace_summary or {}).get("repo_fact_checks") or [])
+    existing_paths = {
+        str(item.get("path") or "").strip()
+        for item in checks
+        if item.get("exists")
+    }
+    if not existing_paths:
+        return review
+
+    text_fragments = [
+        str((trace_summary.get("task") or {}).get("title") or ""),
+        str((trace_summary.get("task") or {}).get("description") or ""),
+        *[str((attempt or {}).get("reason") or "") for attempt in (trace_summary.get("attempts") or [])],
+        *[str((message or {}).get("content") or "") for message in (trace_summary.get("messages") or [])],
+        *[str((item or {}).get("excerpt") or "") for item in (trace_summary.get("attempt_note_excerpts") or [])],
+    ]
+    contradiction_paths = [
+        path
+        for path in sorted(existing_paths)
+        if any(
+            path in fragment
+            and any(phrase in fragment.lower() for phrase in ("missing", "does not exist", "contains neither"))
+            for fragment in text_fragments
+        )
+    ]
+    if not contradiction_paths:
+        return review
+
+    evidence = list(review.get("evidence") or [])
+    evidence.append(
+        "Deterministic repo fact-check found these paths exist despite the trace claiming they were missing: "
+        + ", ".join(contradiction_paths)
+    )
+    interventions = list(review.get("targeted_interventions") or [])
+    interventions.append(
+        {
+            "kind": "context",
+            "target": "alignment and research grounding",
+            "description": (
+                "Reject stale missing-file premises when deterministic repo checks show the canonical spec files exist; "
+                "require exact file inspection before escalating."
+            ),
+            "priority": "high",
+        }
+    )
+    review["overall_assessment"] = "needs_intervention"
+    review["failure_family"] = "false_premise"
+    review["primary_failure_mode"] = "repo_fact_miss"
+    review["evidence"] = evidence
+    review["targeted_interventions"] = interventions
+    rationale = str(review.get("rationale") or "").strip()
+    review["rationale"] = (
+        rationale + " " if rationale else ""
+    ) + "The trace premise conflicts with deterministic repo state, so the task should be corrected before retry."
+    telemetry = list(review.get("telemetry_to_watch") or [])
+    if "repo_fact_mismatch_rate" not in telemetry:
+        telemetry.append("repo_fact_mismatch_rate")
+    review["telemetry_to_watch"] = telemetry
+    return review
+
+
+def _collect_verifier_reviews(trace_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    reviews: List[Dict[str, Any]] = []
+    task_constraints = dict(((trace_summary.get("task") or {}).get("constraints") or {}))
+    for item in task_constraints.get("verifier_reviews") or []:
+        if isinstance(item, dict):
+            reviews.append(dict(item))
+    for attempt in trace_summary.get("attempts") or []:
+        verifier = dict(((attempt or {}).get("artifacts") or {}).get("verifier") or {})
+        if verifier:
+            reviews.append(verifier)
+    return reviews
+
+
+def _collect_prior_trace_reviews(trace_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+    task_constraints = dict(((trace_summary.get("task") or {}).get("constraints") or {}))
+    rows = []
+    for item in task_constraints.get("trace_reviews") or []:
+        if isinstance(item, dict):
+            rows.append(dict(item))
+    return rows
+
+
+def _apply_verifier_supervision_overrides(review: Dict[str, Any], trace_summary: Dict[str, Any]) -> Dict[str, Any]:
+    verifier_reviews = _collect_verifier_reviews(trace_summary)
+    if not verifier_reviews:
+        return review
+
+    flawed_or_uncertain = [
+        item
+        for item in verifier_reviews
+        if str(item.get("verdict") or "").strip().lower() in {"flawed", "uncertain"}
+    ]
+    if not flawed_or_uncertain:
+        return review
+
+    prior_trace_reviews = _collect_prior_trace_reviews(trace_summary)
+    prior_review_unavailable = any(
+        str(item.get("overall_assessment") or "").strip().lower() == "review_unavailable"
+        for item in prior_trace_reviews
+    )
+    current_assessment = str(review.get("overall_assessment") or "").strip().lower()
+    current_failure_mode = str(review.get("primary_failure_mode") or review.get("failure_family") or "").strip().lower()
+
+    if current_failure_mode in {"uncorrected_verifier_failures", "trainer_supervision_gap"}:
+        return review
+    supervision_gap_signal = prior_review_unavailable or len(flawed_or_uncertain) >= 2
+    if not supervision_gap_signal and current_assessment in {"needs_intervention", "misaligned", "degraded"} and current_failure_mode not in {
+        "review_unavailable",
+        "unknown",
+    }:
+        return review
+
+    evidence = list(review.get("evidence") or [])
+    evidence.append(
+        f"Verifier flagged {len(flawed_or_uncertain)} recent attempt(s) as flawed or uncertain before this trainer review."
+    )
+    if prior_review_unavailable:
+        evidence.append("A prior trainer trace review already degraded to review_unavailable on this branch.")
+
+    interventions = list(review.get("targeted_interventions") or [])
+    interventions.append(
+        {
+            "kind": "routing",
+            "target": "trainer supervision policy",
+            "description": (
+                "When verifier findings repeatedly mark a branch flawed or uncertain, interrupt passive retry loops and "
+                "force a trainer-authored corrective plan or user-facing clarification."
+            ),
+            "priority": "high",
+        }
+    )
+    interventions.append(
+        {
+            "kind": "tooling",
+            "target": "trace review robustness",
+            "description": (
+                "Treat repeated verifier failures as first-class supervision evidence, and keep trainer review available "
+                "even when model output is partially structured or noisy."
+            ),
+            "priority": "high",
+        }
+    )
+
+    telemetry = list(review.get("telemetry_to_watch") or [])
+    for metric in ["verifier_issue_rate", "trainer_correction_latency"]:
+        if metric not in telemetry:
+            telemetry.append(metric)
+
+    review["overall_assessment"] = "needs_intervention"
+    review["failure_family"] = "trainer_supervision_gap"
+    review["primary_failure_mode"] = "uncorrected_verifier_failures"
+    if not str(review.get("summary") or "").strip():
+        review["summary"] = (
+            "Verifier findings repeatedly marked this branch flawed or uncertain, but trainer supervision did not "
+            "convert those findings into a concrete correction."
+        )
+    review["evidence"] = evidence
+    review["targeted_interventions"] = interventions
+    rationale = str(review.get("rationale") or "").strip()
+    review["rationale"] = (
+        rationale + " " if rationale else ""
+    ) + "Repeated verifier concerns without a concrete trainer correction indicate a supervision gap, not just a task-level retry problem."
+    review["telemetry_to_watch"] = telemetry
+    return review
+
+
 async def review_trace(
     model_adapter,
     *,
     trace_kind: str,
     trace_summary: Dict[str, Any],
-    reviewer_tier: str = "strong",
+    reviewer_tier: str = "trainer",
     candidate_change_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_kind = str(trace_kind or "generic_trace").strip() or "generic_trace"
@@ -393,10 +643,16 @@ async def review_trace(
     prompt = f"""
 You are Strata's trace reviewer.
 Your job is to review this trace, judge it, and suggest targeted interventions.
+You are acting as an investigator, not a passive summarizer.
 
 Trace kind: {normalized_kind}
-Reviewer tier: {str(reviewer_tier or 'strong').lower()}
+Reviewer tier: {str(reviewer_tier or 'trainer').lower()}
 {_trace_focus(normalized_kind)}
+
+Rules:
+- Treat prior plan reviews, verifier outputs, and model claims as hypotheses to test against the trace, not facts to inherit.
+- If verifier artifacts already indicate repeated flawed or uncertain outputs, explain why supervision failed to correct course.
+- Prefer bounded system-side corrections over generic advice like "retry" or "be more careful."
 
 Return only JSON with this schema:
 {{
@@ -438,10 +694,31 @@ Trace summary:
     try:
         response = await model_adapter.chat([{"role": "user", "content": prompt}], temperature=0.1)
         raw_content = response.get("content", "")
-        review = _normalize_review_fields(_extract_json_object(raw_content), trace_kind=normalized_kind)
-        review["status"] = "ok"
+        parsed = model_adapter.extract_structured_object(raw_content)
+        parse_error = str((parsed or {}).get("error") or "").strip()
+        if parse_error:
+            parsed = {
+                "summary": "Trace review model did not return usable structured output.",
+                "overall_assessment": "review_unavailable",
+                "failure_family": "review_unavailable",
+                "primary_failure_mode": "review_unavailable",
+                "evidence": [parse_error],
+                "targeted_interventions": [],
+                "predicted_outcome": "uncertain",
+                "predicted_delta": {},
+                "confidence": 0.0,
+                "expected_value": 0.0,
+                "risk": {},
+                "domains_affected": [normalized_kind],
+                "rationale": "",
+                "telemetry_to_watch": [],
+            }
+        review = _normalize_review_fields(parsed, trace_kind=normalized_kind)
+        review = _apply_repo_fact_check_overrides(review, trace_summary)
+        review = _apply_verifier_supervision_overrides(review, trace_summary)
+        review["status"] = "unavailable" if review.get("overall_assessment") == "review_unavailable" else "ok"
         review["trace_kind"] = normalized_kind
-        review["reviewer_tier"] = str(reviewer_tier or "strong").lower()
+        review["reviewer_tier"] = str(reviewer_tier or "trainer").lower()
         review["recorded_at"] = datetime.now(timezone.utc).isoformat()
         review["trace_summary"] = trace_summary
         review["raw_response"] = _clip(raw_content, 1600)
@@ -450,7 +727,7 @@ Trace summary:
         return {
             "status": "unavailable",
             "trace_kind": normalized_kind,
-            "reviewer_tier": str(reviewer_tier or "strong").lower(),
+            "reviewer_tier": str(reviewer_tier or "trainer").lower(),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "summary": "Trace review could not be completed.",
             "overall_assessment": "review_unavailable",
@@ -551,7 +828,7 @@ def emit_trace_review_attention_signal(
     )
     preview = summary or f"{normalized_kind} review: {primary_failure_mode}"
     note = (
-        f"{normalized_kind} reviewed by {str(reviewer_tier or 'strong').lower()}; "
+        f"{normalized_kind} reviewed by {str(reviewer_tier or 'trainer').lower()}; "
         f"assessment={normalized_assessment or 'unknown'}; "
         f"failure_mode={primary_failure_mode or 'unknown'}; "
         f"interventions={len(interventions)}."
@@ -571,7 +848,7 @@ def emit_trace_review_attention_signal(
         observed_outcome=observed_outcome,
         metadata={
             "trace_kind": normalized_kind,
-            "reviewer_tier": str(reviewer_tier or "strong").strip().lower(),
+            "reviewer_tier": str(reviewer_tier or "trainer").strip().lower(),
             "overall_assessment": normalized_assessment,
             "primary_failure_mode": primary_failure_mode,
             "confidence": confidence,

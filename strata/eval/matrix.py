@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from strata.eval.harness_eval import EVAL_PROFILES, run_harness_response
 from strata.eval.structured_eval import _grade_response, load_suite
 from strata.models.adapter import ModelAdapter
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 
 
 @dataclass
@@ -34,9 +34,9 @@ class EvalMatrixSample:
 
 
 def _build_context(mode: str, run_id: str):
-    if mode == "strong":
-        return StrongExecutionContext(run_id=run_id)
-    return WeakExecutionContext(run_id=run_id)
+    if mode == "trainer":
+        return TrainerExecutionContext(run_id=run_id)
+    return AgentExecutionContext(run_id=run_id)
 
 
 async def _run_direct_response(mode: str, prompt: str, run_id: str) -> tuple[str, float, Dict[str, Any]]:
@@ -155,7 +155,7 @@ async def run_eval_matrix(
             variants.append(
                 {
                     "variant_id": f"weak_{profile}",
-                    "mode": "weak",
+                    "mode": "agent",
                     "profile": profile,
                     "context_files": None if include_context else [],
                 }
@@ -165,7 +165,7 @@ async def run_eval_matrix(
             variants.append(
                 {
                     "variant_id": f"strong_{profile}",
-                    "mode": "strong",
+                    "mode": "trainer",
                     "profile": profile,
                     "context_files": None if include_context else [],
                 }

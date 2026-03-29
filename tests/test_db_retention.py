@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from strata.experimental.experiment_runner import ExperimentResult, ExperimentRunner, normalize_experiment_report
@@ -77,7 +78,7 @@ def test_metric_retention_preserves_rollup_signal_in_snapshot():
                 metric_name="benchmark_harness_score",
                 value=8.0,
                 run_mode="weak_eval",
-                execution_context="weak",
+                execution_context="agent",
                 candidate_change_id="candidate-old",
             ),
             MetricModel(
@@ -85,7 +86,7 @@ def test_metric_retention_preserves_rollup_signal_in_snapshot():
                 metric_name="benchmark_harness_score",
                 value=9.0,
                 run_mode="weak_eval",
-                execution_context="weak",
+                execution_context="agent",
                 candidate_change_id="candidate-new",
             ),
         ]
@@ -194,6 +195,21 @@ def test_experiment_report_retention_compacts_older_unpromoted_payloads():
     assert stale_payload["payload_compacted"] is True
     assert stale_payload["summary"]["benchmark_report_count"] == 2
     assert "baseline_metrics" not in stale_payload
+
+
+def test_retention_maintenance_skips_cleanly_when_database_is_locked(monkeypatch):
+    storage = make_storage()
+    set_policy(storage)
+
+    def locked_attempts(*args, **kwargs):
+        raise OperationalError("UPDATE parameters ...", {}, Exception("database is locked"))
+
+    monkeypatch.setattr("strata.storage.retention.compact_attempts", locked_attempts)
+
+    summary = run_retention_maintenance(storage, force=True)
+
+    assert summary["skipped"] is True
+    assert summary["reason"] == "database_locked"
 
 
 def test_active_task_linked_report_stays_hot_and_task_gets_back_reference():

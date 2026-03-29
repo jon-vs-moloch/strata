@@ -301,11 +301,11 @@ def register_experiment_routes(
         bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
         proposer_tiers = [
             str(tier).lower()
-            for tier in payload.get("proposer_tiers", bootstrap_policy.get("default_proposer_tiers", ["weak", "strong"]))
+            for tier in payload.get("proposer_tiers", bootstrap_policy.get("default_proposer_tiers", ["agent", "trainer"]))
         ]
-        proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+        proposer_tiers = [tier for tier in proposer_tiers if tier in {"agent", "trainer"}]
         if not proposer_tiers:
-            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'agent' or 'trainer'")
         auto_promote = bool(payload.get("auto_promote", True))
         suite_name = payload.get("suite_name", "bootstrap_mcq_v1")
         run_count = max(1, int(payload.get("run_count", bootstrap_policy.get("default_run_count", 2)) or 1))
@@ -328,7 +328,7 @@ def register_experiment_routes(
                 storage,
                 kind="bootstrap_cycle",
                 title="Bootstrap Cycle",
-                description="Queued strong-over-weak bootstrap cycle.",
+                description="Queued trainer-over-agent bootstrap cycle.",
                 payload=normalized_payload,
                 session_id=payload.get("session_id"),
                 dedupe_signature={
@@ -443,10 +443,10 @@ def register_experiment_routes(
         from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 
         payload = payload or {}
-        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["weak"])]
-        proposer_tiers = [tier for tier in proposer_tiers if tier in {"weak", "strong"}]
+        proposer_tiers = [str(tier).lower() for tier in payload.get("proposer_tiers", ["agent"])]
+        proposer_tiers = [tier for tier in proposer_tiers if tier in {"agent", "trainer"}]
         if not proposer_tiers:
-            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'weak' or 'strong'")
+            raise HTTPException(status_code=400, detail="At least one proposer tier must be 'agent' or 'trainer'")
         tool_name = payload.get("tool_name", "bootstrap_history_tool")
         task_description = str(
             payload.get(
@@ -547,7 +547,7 @@ def register_experiment_routes(
             proposal_metadata = report.get("proposal_metadata") or {}
             recommendation = report.get("recommendation")
             weak_gain = report_has_weak_gain(report)
-            if proposal_metadata.get("proposer_tier") == "weak" and recommendation == "promote" and weak_gain:
+            if proposal_metadata.get("proposer_tier") == "agent" and recommendation == "promote" and weak_gain:
                 matching_report = report
                 break
 
@@ -561,7 +561,7 @@ def register_experiment_routes(
                 "recommendation": matching_report.get("recommendation"),
                 "proposal_metadata": matching_report.get("proposal_metadata") or {},
                 "weak_gain_detected": True,
-                "reason": "Weak-originated candidate was promoted after improving weak-tier eval metrics.",
+                "reason": "Agent-originated candidate was promoted after improving agent-tier eval metrics.",
             }
         if not current_candidate:
             return {"status": "ok", "detected": False, "reason": "No promoted eval candidate is currently active."}
@@ -608,7 +608,7 @@ def register_experiment_routes(
             storage.commit()
             return {"status": "ok", "audit_artifact": audit_artifact, "attention_signal": attention_signal}
         trace_kind = str(payload.get("trace_kind") or "generic_trace").strip() or "generic_trace"
-        reviewer_tier = str(payload.get("reviewer_tier") or "strong").strip().lower() or "strong"
+        reviewer_tier = str(payload.get("reviewer_tier") or "trainer").strip().lower() or "trainer"
         if payload.get("queue"):
             queued = await queue_eval_system_job(
                 storage,

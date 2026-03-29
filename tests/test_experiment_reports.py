@@ -78,7 +78,7 @@ def make_row(key, value):
 def make_report(
     candidate_change_id,
     *,
-    proposer_tier="weak",
+    proposer_tier="agent",
     recommendation="promote",
     benchmark_delta=0.0,
     structured_delta=0.0,
@@ -157,8 +157,8 @@ def test_get_persisted_experiment_report_handles_raw_and_wrapped_rows():
 
 
 def test_build_dashboard_snapshot_counts_promotions_and_detects_ignition(monkeypatch):
-    weak_report = make_report("weak_candidate", proposer_tier="weak", benchmark_delta=1.0)
-    strong_report = make_report("strong_candidate", proposer_tier="strong", benchmark_delta=0.5)
+    weak_report = make_report("weak_candidate", proposer_tier="agent", benchmark_delta=1.0)
+    strong_report = make_report("strong_candidate", proposer_tier="trainer", benchmark_delta=0.5)
     rows = [
         make_row("experiment_report:weak_candidate", {"current": weak_report, "history": []}),
         make_row("experiment_report:strong_candidate", strong_report),
@@ -218,8 +218,8 @@ def test_build_dashboard_snapshot_counts_promotions_and_detects_ignition(monkeyp
 
     snapshot = api_main._build_dashboard_snapshot(storage, limit=10)
 
-    assert snapshot["promotion_counts"]["weak"] == 1
-    assert snapshot["promotion_counts"]["strong"] == 1
+    assert snapshot["promotion_counts"]["agent"] == 1
+    assert snapshot["promotion_counts"]["trainer"] == 1
     assert snapshot["ignition"]["detected"] is True
     assert snapshot["ignition"]["candidate_change_id"] == "weak_candidate"
     assert snapshot["reports"][0]["candidate_change_id"] == "weak_candidate"
@@ -254,10 +254,10 @@ def test_secondary_ignition_status_is_stable(current_candidate, report_rows, exp
 
 def test_experiment_history_returns_real_candidate_ids():
     rows = [
-        make_row("experiment_report:raw_candidate", make_report("raw_candidate", proposer_tier="weak")),
+        make_row("experiment_report:raw_candidate", make_report("raw_candidate", proposer_tier="agent")),
         make_row(
             "experiment_report:wrapped_candidate",
-            {"current": make_report("wrapped_candidate", proposer_tier="strong"), "history": []},
+            {"current": make_report("wrapped_candidate", proposer_tier="trainer"), "history": []},
         ),
     ]
     storage = FakeStorage(
@@ -352,8 +352,8 @@ def test_prediction_history_and_calibration_endpoints_surface_persisted_records(
         {
             "promoted_eval_candidates": {"current": "raw_candidate", "history": []},
             JUDGE_TRUST_KEY: {
-                "by_tier": {"strong": {"trust": 0.88, "count": 3}},
-                "by_domain": {"strong:eval": {"trust": 0.82, "count": 2}},
+                "by_tier": {"trainer": {"trust": 0.88, "count": 3}},
+                "by_domain": {"trainer:eval": {"trust": 0.82, "count": 2}},
                 "by_failure_family": {},
             },
         },
@@ -365,7 +365,7 @@ def test_prediction_history_and_calibration_endpoints_surface_persisted_records(
 
     assert history["history"][0]["prediction_record"]["predicted_outcome"] == "improve"
     assert calibration["average_calibration_score"] > 0.0
-    assert trust["trust"]["by_tier"]["strong"]["trust"] == 0.88
+    assert trust["trust"]["by_tier"]["trainer"]["trust"] == 0.88
 
 
 def test_emit_eval_attention_signal_marks_unexpected_failure_as_urgent():

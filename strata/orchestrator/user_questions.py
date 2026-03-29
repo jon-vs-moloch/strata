@@ -67,6 +67,13 @@ def _derive_brief_question(question: str) -> str:
     return text[:177].rstrip() + "..." if len(text) > 180 else text
 
 
+def _default_session_title_for_question(source_type: str, brief_question: str) -> str:
+    if str(source_type or "").strip().lower() == "task_blocked":
+        return "Needs Your Input"
+    brief = str(brief_question or "").strip()
+    return brief[:80] if brief else "System Question"
+
+
 def enqueue_user_question(
     storage,
     *,
@@ -78,11 +85,12 @@ def enqueue_user_question(
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     rows = _load_questions(storage)
+    brief_question = _derive_brief_question(question)
     resolved_lane = (
         normalize_lane(lane)
         or normalize_lane((context or {}).get("lane"))
         or infer_lane_from_session_id(session_id)
-        or "strong"
+        or "trainer"
     )
     resolved_session_id = canonical_session_id_for_lane(resolved_lane, session_id or "default")
     question_id = f"uq_{uuid4().hex[:12]}"
@@ -90,7 +98,7 @@ def enqueue_user_question(
         "question_id": question_id,
         "session_id": resolved_session_id,
         "question": str(question).strip(),
-        "brief_question": _derive_brief_question(question),
+        "brief_question": brief_question,
         "source_type": source_type,
         "source_id": source_id,
         "context": context or {},
@@ -112,11 +120,15 @@ def enqueue_user_question(
             source_actor="orchestrator_question_queue",
             opened_reason=source_type,
             tags=["question", source_type],
-            topic_summary=_derive_brief_question(question),
+            topic_summary=brief_question,
+            session_title=_default_session_title_for_question(source_type, brief_question),
             communicative_act="question",
             urgency="high" if source_type == "task_blocked" else "normal",
         )
-        deliver_communication_decision(storage, decision)
+        delivery = deliver_communication_decision(storage, decision)
+        delivered_session_id = str((delivery or {}).get("session_id") or "").strip()
+        if delivered_session_id:
+            item["session_id"] = delivered_session_id
         item["status"] = "asked"
         item["updated_at"] = _now()
         _save_questions(storage, rows)

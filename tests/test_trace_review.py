@@ -41,6 +41,9 @@ class FakeModelAdapter:
             )
         }
 
+    def extract_structured_object(self, raw_content):
+        return __import__("json").loads(raw_content)
+
 
 def test_build_task_trace_summary_includes_attempts_children_and_messages():
     storage = make_storage()
@@ -80,6 +83,61 @@ def test_build_task_trace_summary_includes_attempts_children_and_messages():
     assert summary["child_tasks"][0]["parent_task_id"] == task.task_id
     assert summary["messages"][0]["associated_task_id"] == task.task_id
     assert summary["associated_reports"][0]["candidate_change_id"] == "candidate_a"
+    assert summary["repo_fact_checks"] == []
+
+
+def test_build_task_trace_summary_fact_checks_canonical_spec_paths():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Alignment task",
+        description="Check whether the canonical spec files exist.",
+        session_id="trace-session",
+        state=TaskState.BLOCKED,
+        type=TaskType.RESEARCH,
+        constraints={
+            "spec_paths": [".knowledge/specs/constitution.md", ".knowledge/specs/project_spec.md"],
+        },
+    )
+    storage.commit()
+
+    summary = build_task_trace_summary(storage, task_id=task.task_id)
+
+    checks = {item["path"]: item for item in summary["repo_fact_checks"]}
+    assert checks[".knowledge/specs/constitution.md"]["exists"] is True
+    assert checks[".knowledge/specs/project_spec.md"]["exists"] is True
+
+
+def test_build_task_trace_summary_includes_attempt_note_excerpt(monkeypatch, tmp_path):
+    repo_root = tmp_path
+    note_path = repo_root / ".knowledge" / "wip_research_demo.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(
+        "Missing canonical spec files at `.knowledge/specs/constitution.md` and "
+        "`.knowledge/specs/project_spec.md`.",
+        encoding="utf-8",
+    )
+
+    import strata.experimental.trace_review as trace_review
+
+    monkeypatch.setattr(trace_review, "_repo_root", lambda: repo_root)
+
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Alignment task",
+        description="Inspect repo state.",
+        session_id="trace-session",
+        state=TaskState.BLOCKED,
+        type=TaskType.RESEARCH,
+    )
+    attempt = storage.attempts.create(task_id=task.task_id)
+    attempt.outcome = AttemptOutcome.FAILED
+    attempt.reason = "Agent iteration limit reached. Partial context saved to durable `.knowledge` library at: ./.knowledge/wip_research_demo.md"
+    storage.commit()
+
+    summary = trace_review.build_task_trace_summary(storage, task_id=task.task_id)
+
+    assert summary["attempt_note_excerpts"][0]["path"] == ".knowledge/wip_research_demo.md"
+    assert "Missing canonical spec files" in summary["attempt_note_excerpts"][0]["excerpt"]
 
 
 def test_review_trace_supports_weak_reviewer_tier():
@@ -90,15 +148,140 @@ def test_review_trace_supports_weak_reviewer_tier():
             adapter,
             trace_kind="generic_trace",
             trace_summary={"foo": "bar"},
-            reviewer_tier="weak",
+            reviewer_tier="agent",
             candidate_change_id="candidate_x",
         )
     )
 
     assert result["status"] == "ok"
-    assert result["reviewer_tier"] == "weak"
-    assert adapter.bound_context.mode == "weak"
+    assert result["reviewer_tier"] == "agent"
+    assert adapter.bound_context.mode == "agent"
     assert adapter.bound_context.evaluation_run is True
+
+
+def test_review_trace_overrides_stale_missing_file_premise_with_repo_fact_check():
+    adapter = FakeModelAdapter()
+
+    result = asyncio.run(
+        review_trace(
+            adapter,
+            trace_kind="task_trace",
+            trace_summary={
+                "task": {
+                    "title": "Alignment task",
+                    "description": "Investigate whether `.knowledge/specs/project_spec.md` is missing.",
+                },
+                "attempts": [
+                    {
+                        "reason": (
+                            "Observed repository contains neither `.knowledge/specs/constitution.md` "
+                            "nor `.knowledge/specs/project_spec.md`."
+                        )
+                    }
+                ],
+                "messages": [],
+                "repo_fact_checks": [
+                    {"path": ".knowledge/specs/constitution.md", "exists": True, "is_file": True},
+                    {"path": ".knowledge/specs/project_spec.md", "exists": True, "is_file": True},
+                ],
+            },
+            reviewer_tier="trainer",
+        )
+    )
+
+    assert result["overall_assessment"] == "needs_intervention"
+    assert result["primary_failure_mode"] == "repo_fact_miss"
+    assert any("Deterministic repo fact-check" in item for item in result["evidence"])
+    assert "repo_fact_mismatch_rate" in result["telemetry_to_watch"]
+
+
+def test_review_trace_uses_attempt_note_excerpt_for_repo_fact_override():
+    adapter = FakeModelAdapter()
+
+    result = asyncio.run(
+        review_trace(
+            adapter,
+            trace_kind="task_trace",
+            trace_summary={
+                "task": {
+                    "title": "Alignment task",
+                    "description": "Inspect repo state.",
+                },
+                "attempts": [
+                    {
+                        "reason": "Agent iteration limit reached. Partial context saved to durable `.knowledge` library at: ./.knowledge/wip_research_demo.md"
+                    }
+                ],
+                "messages": [],
+                "attempt_note_excerpts": [
+                    {
+                        "path": ".knowledge/wip_research_demo.md",
+                        "excerpt": (
+                            "Missing canonical spec files at `.knowledge/specs/constitution.md` and "
+                            "`.knowledge/specs/project_spec.md`."
+                        ),
+                    }
+                ],
+                "repo_fact_checks": [
+                    {"path": ".knowledge/specs/constitution.md", "exists": True, "is_file": True},
+                    {"path": ".knowledge/specs/project_spec.md", "exists": True, "is_file": True},
+                ],
+            },
+            reviewer_tier="trainer",
+        )
+    )
+
+    assert result["primary_failure_mode"] == "repo_fact_miss"
+
+
+def test_review_trace_escalates_repeated_verifier_failures_into_supervision_gap():
+    adapter = FakeModelAdapter()
+
+    result = asyncio.run(
+        review_trace(
+            adapter,
+            trace_kind="task_trace",
+            trace_summary={
+                "task": {
+                    "title": "Procedure: Operator Onboarding",
+                    "constraints": {
+                        "verifier_reviews": [
+                            {
+                                "verdict": "uncertain",
+                                "recommended_action": "verify_more",
+                            }
+                        ],
+                        "trace_reviews": [
+                            {
+                                "overall_assessment": "review_unavailable",
+                            }
+                        ],
+                    },
+                },
+                "attempts": [
+                    {
+                        "reason": "Agent iteration limit reached.",
+                        "artifacts": {
+                            "verifier": {
+                                "verdict": "flawed",
+                                "recommended_action": "revise",
+                            }
+                        },
+                    }
+                ],
+                "messages": [],
+                "repo_fact_checks": [],
+                "attempt_note_excerpts": [],
+            },
+            reviewer_tier="trainer",
+        )
+    )
+
+    assert result["overall_assessment"] == "needs_intervention"
+    assert result["primary_failure_mode"] == "uncorrected_verifier_failures"
+    assert any("Verifier flagged" in item for item in result["evidence"])
+    assert "verifier_issue_rate" in result["telemetry_to_watch"]
+    assert "trainer_correction_latency" in result["telemetry_to_watch"]
 
 
 def test_session_trace_summary_includes_feedback_events():
@@ -134,7 +317,7 @@ def test_append_trace_review_to_session_persists_slim_reviews():
         review={
             "recorded_at": "2026-03-28T00:00:00+00:00",
             "trace_kind": "session_trace",
-            "reviewer_tier": "strong",
+            "reviewer_tier": "trainer",
             "overall_assessment": "needs_intervention",
             "primary_failure_mode": "missed_feedback",
             "recommended_title": "Feedback Repair",
@@ -180,7 +363,7 @@ def test_trace_review_job_persists_result_and_attaches_to_task():
                 "payload": {
                     "trace_kind": "task_trace",
                     "task_id": target.task_id,
-                    "reviewer_tier": "strong",
+                    "reviewer_tier": "trainer",
                     "persist_to_task": True,
                 },
             }
@@ -235,7 +418,7 @@ def test_review_task_trace_endpoint_persists_inline_review():
     try:
         result = asyncio.run(
             api_main.review_task_trace(
-                payload={"task_id": target.task_id, "reviewer_tier": "weak", "persist_to_task": True},
+                payload={"task_id": target.task_id, "reviewer_tier": "agent", "persist_to_task": True},
                 storage=storage,
             )
         )
@@ -245,7 +428,7 @@ def test_review_task_trace_endpoint_persists_inline_review():
     storage.session.expire_all()
     reloaded_target = storage.tasks.get_by_id(target.task_id)
     assert result["status"] == "ok"
-    assert result["review"]["reviewer_tier"] == "weak"
+    assert result["review"]["reviewer_tier"] == "agent"
     assert result["review"]["timeline_artifact_id"]
     assert result["review"]["audit_artifact_id"]
     assert result["attention_signal"]["signal_kind"] == "surprise"
@@ -285,7 +468,7 @@ def test_review_endpoint_supports_recursive_audit_of_prior_audit():
     try:
         first = asyncio.run(
             api_main.review_task_trace(
-                payload={"task_id": target.task_id, "reviewer_tier": "weak", "persist_to_task": False},
+                payload={"task_id": target.task_id, "reviewer_tier": "agent", "persist_to_task": False},
                 storage=storage,
             )
         )
@@ -375,7 +558,7 @@ def test_review_signal_endpoint_treats_signal_as_auditable_trace():
                 payload={
                     "trace_kind": "feedback_signal_trace",
                     "signal_id": signal["signal_id"],
-                    "reviewer_tier": "strong",
+                    "reviewer_tier": "trainer",
                 },
                 storage=storage,
             )

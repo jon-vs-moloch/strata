@@ -30,6 +30,6 @@ async def review_eval_trace(
         model_adapter,
         trace_kind="eval_trace",
         trace_summary=trace_summary,
-        reviewer_tier="strong",
+        reviewer_tier="trainer",
         candidate_change_id=candidate_change_id,
     )

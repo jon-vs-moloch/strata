@@ -211,7 +211,13 @@ async def lifespan(app: FastAPI):
             description=SETTINGS_PARAMETER_DESCRIPTION,
         ) or {}
         GLOBAL_SETTINGS.update(_normalized_settings(persisted_settings))
-        run_retention_maintenance(storage)
+        try:
+            run_retention_maintenance(storage)
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            logger.warning("Skipping startup retention maintenance due to database lock contention.")
+            storage.rollback()
         try:
             scan_codebase_context_pressure(storage, base_dir=_BASE_DIR)
             storage.commit()

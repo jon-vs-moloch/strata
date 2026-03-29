@@ -31,7 +31,7 @@ def test_deliver_communication_can_open_new_autonomous_session():
         storage,
         role="assistant",
         content="Autonomous alignment review queued.",
-        lane="weak",
+        lane="agent",
         channel="new_session",
         audience="user",
         source_kind="autonomous_alignment",
@@ -43,7 +43,7 @@ def test_deliver_communication_can_open_new_autonomous_session():
     storage.commit()
 
     assert result["status"] == "ok"
-    assert result["session_id"].startswith("weak:session-")
+    assert result["session_id"].startswith("agent:session-")
     metadata = storage.parameters.peek_parameter(f"session_metadata:{result['session_id']}", default_value={})
     assert metadata["opened_by"] == "system_opened"
     assert metadata["opened_reason"] == "idle_alignment_review"
@@ -58,9 +58,9 @@ def test_deliver_communication_can_append_to_existing_session():
         storage,
         role="system",
         content="User reacted to assistant message with thumbs up.",
-        lane="strong",
+        lane="trainer",
         channel="existing_session_message",
-        session_id="strong:default",
+        session_id="trainer:default",
         source_kind="feedback_event",
         source_actor="system_opened",
         opened_reason="message_feedback",
@@ -68,10 +68,10 @@ def test_deliver_communication_can_append_to_existing_session():
     )
     storage.commit()
 
-    assert result["session_id"] == "strong:default"
-    messages = storage.messages.get_all(session_id="strong:default")
+    assert result["session_id"] == "trainer:default"
+    messages = storage.messages.get_all(session_id="trainer:default")
     assert len(messages) == 1
-    metadata = storage.parameters.peek_parameter("session_metadata:strong:default", default_value={})
+    metadata = storage.parameters.peek_parameter("session_metadata:trainer:default", default_value={})
     assert metadata["opened_reason"] == "message_feedback"
 
 
@@ -81,9 +81,9 @@ def test_deliver_communication_decision_records_act_and_response_kind():
     decision = build_communication_decision(
         role="assistant",
         content="Here is the answer.",
-        lane="strong",
+        lane="trainer",
         channel="existing_session_message",
-        session_id="strong:default",
+        session_id="trainer:default",
         communicative_act="response",
         response_kind="answer",
         source_kind="chat_reply",
@@ -92,7 +92,7 @@ def test_deliver_communication_decision_records_act_and_response_kind():
     storage.commit()
 
     assert result["status"] == "ok"
-    metadata = storage.parameters.peek_parameter("session_metadata:strong:default", default_value={})
+    metadata = storage.parameters.peek_parameter("session_metadata:trainer:default", default_value={})
     assert metadata["last_communicative_act"] == "response"
     assert metadata["last_response_kind"] == "answer"
     assert metadata["last_communication_source_kind"] == "chat_reply"
@@ -112,15 +112,15 @@ def test_route_communication_decision_keeps_responses_in_existing_session():
         build_communication_decision(
             role="assistant",
             content="reply",
-            lane="strong",
-            session_id="strong:default",
+            lane="trainer",
+            session_id="trainer:default",
             communicative_act="response",
             source_kind="chat_reply",
         ),
     )
 
     assert routed["channel"] == "existing_session_message"
-    assert routed["session_id"] == "strong:default"
+    assert routed["session_id"] == "trainer:default"
 
 
 def test_route_communication_decision_allows_explicit_new_session_response():
@@ -131,9 +131,9 @@ def test_route_communication_decision_allows_explicit_new_session_response():
         build_communication_decision(
             role="assistant",
             content="Starting a fresh thread for that topic.",
-            lane="strong",
+            lane="trainer",
             channel="new_session",
-            session_id="strong:default",
+            session_id="trainer:default",
             communicative_act="response",
             response_kind="handoff",
             source_kind="chat_reply",
@@ -152,10 +152,10 @@ def test_route_communication_decision_opens_new_session_for_autonomous_notice():
         build_communication_decision(
             role="assistant",
             content="autonomous update",
-            lane="weak",
+            lane="agent",
             communicative_act="notification",
             source_kind="autonomous_alignment",
-            session_id="weak:default",
+            session_id="agent:default",
         ),
     )
 
@@ -169,7 +169,7 @@ def test_route_communication_decision_reuses_matching_system_session_for_autonom
         storage,
         role="assistant",
         content="Initial autonomous alignment review.",
-        lane="weak",
+        lane="agent",
         channel="new_session",
         audience="user",
         source_kind="autonomous_alignment",
@@ -180,13 +180,13 @@ def test_route_communication_decision_reuses_matching_system_session_for_autonom
     )
     storage.commit()
 
-    existing_session_id = storage.messages.get_session_summaries(lane="weak")[0]["session_id"]
+    existing_session_id = storage.messages.get_session_summaries(lane="agent")[0]["session_id"]
     routed = route_communication_decision(
         storage,
         build_communication_decision(
             role="assistant",
             content="follow-up autonomous update",
-            lane="weak",
+            lane="agent",
             communicative_act="notification",
             source_kind="autonomous_alignment",
             source_actor="system_opened",
@@ -205,9 +205,9 @@ def test_route_communication_decision_can_reuse_topical_user_opened_session():
         storage,
         role="user",
         content="Please audit the alignment plan.",
-        lane="weak",
+        lane="agent",
         channel="existing_session_message",
-        session_id="weak:default",
+        session_id="agent:default",
         audience="user",
         source_kind="user",
         source_actor="user_opened",
@@ -215,7 +215,7 @@ def test_route_communication_decision_can_reuse_topical_user_opened_session():
         tags=["chat"],
     )
     storage.parameters.set_parameter(
-        "session_metadata:weak:default",
+        "session_metadata:agent:default",
         {
             "opened_by": "user_opened",
             "opened_reason": "direct_chat",
@@ -233,7 +233,7 @@ def test_route_communication_decision_can_reuse_topical_user_opened_session():
         build_communication_decision(
             role="assistant",
             content="autonomous alignment update",
-            lane="weak",
+            lane="agent",
             communicative_act="notification",
             source_kind="autonomous_alignment",
             source_actor="system_opened",
@@ -244,7 +244,7 @@ def test_route_communication_decision_can_reuse_topical_user_opened_session():
     )
 
     assert routed["channel"] == "existing_session_message"
-    assert routed["session_id"] == "weak:default"
+    assert routed["session_id"] == "agent:default"
 
 
 def test_route_communication_decision_can_forbid_user_opened_session_reuse():
@@ -253,9 +253,9 @@ def test_route_communication_decision_can_forbid_user_opened_session_reuse():
         storage,
         role="user",
         content="Please audit the alignment plan.",
-        lane="weak",
+        lane="agent",
         channel="existing_session_message",
-        session_id="weak:default",
+        session_id="agent:default",
         audience="user",
         source_kind="user",
         source_actor="user_opened",
@@ -263,7 +263,7 @@ def test_route_communication_decision_can_forbid_user_opened_session_reuse():
         tags=["chat"],
     )
     storage.parameters.set_parameter(
-        "session_metadata:weak:default",
+        "session_metadata:agent:default",
         {
             "opened_by": "user_opened",
             "opened_reason": "direct_chat",
@@ -281,7 +281,7 @@ def test_route_communication_decision_can_forbid_user_opened_session_reuse():
         build_communication_decision(
             role="assistant",
             content="autonomous alignment update",
-            lane="weak",
+            lane="agent",
             communicative_act="notification",
             source_kind="autonomous_alignment",
             source_actor="system_opened",
@@ -298,7 +298,7 @@ def test_route_communication_decision_can_forbid_user_opened_session_reuse():
 
 def test_message_metadata_can_track_seen_and_read_state():
     storage = make_storage()
-    message = storage.messages.create(role="user", content="hello", session_id="strong:default")
+    message = storage.messages.create(role="user", content="hello", session_id="trainer:default")
     initialize_message_metadata(
         storage,
         message_id=message.message_id,

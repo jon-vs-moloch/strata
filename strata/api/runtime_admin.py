@@ -20,7 +20,8 @@ from fastapi.responses import StreamingResponse
 from strata.core.lanes import normalize_lane
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.procedures.registry import get_procedure, list_procedures, queue_procedure, save_procedure
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 
 
 def register_runtime_admin_routes(
@@ -199,18 +200,18 @@ def register_runtime_admin_routes(
                 }
             )
 
-        chat_route = resolve_route("Strong", StrongExecutionContext(run_id="admin-chat-routing"))
-        weak_route = resolve_route("Weak", WeakExecutionContext(run_id="admin-weak-routing"))
+        trainer_route = resolve_route("trainer", TrainerExecutionContext(run_id="admin-chat-routing"))
+        agent_route = resolve_route("agent", AgentExecutionContext(run_id="admin-agent-routing"))
 
         return {
             "status": "ok",
             "routing": {
                 "chat": {
-                    **chat_route,
-                    "description": "Chat requests use the strong tier by default and fall back to weak if the cloud endpoint rejects the instruction/tool format.",
+                    **trainer_route,
+                    "description": "Chat requests use the trainer route by default and fall back to the agent route if the cloud endpoint rejects the instruction or tool format.",
                 },
-                "strong": chat_route,
-                "weak": weak_route,
+                "trainer": trainer_route,
+                "agent": agent_route,
                 "supervision": {
                     "launcher_default_enabled": True,
                     "active_jobs": supervision_jobs,
@@ -253,6 +254,40 @@ def register_runtime_admin_routes(
         with open(log_path, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
         return {"logs": [line.strip() for line in lines[-limit:]]}
+
+    @app.get("/admin/procedures")
+    async def get_procedure_list(storage=Depends(get_storage)):
+        return {"status": "ok", "procedures": list_procedures(storage)}
+
+    @app.get("/admin/procedures/{procedure_id}")
+    async def get_procedure_detail(procedure_id: str, storage=Depends(get_storage)):
+        try:
+            procedure = get_procedure(storage, procedure_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"status": "ok", "procedure": procedure}
+
+    @app.post("/admin/procedures")
+    async def upsert_procedure(payload: Dict[str, Any], storage=Depends(get_storage)):
+        procedure = save_procedure(storage, payload)
+        storage.commit()
+        return {"status": "ok", "procedure": procedure}
+
+    @app.post("/admin/procedures/{procedure_id}/queue")
+    async def enqueue_procedure(procedure_id: str, payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
+        payload = dict(payload or {})
+        try:
+            task = queue_procedure(
+                storage,
+                worker,
+                procedure_id=procedure_id,
+                session_id=payload.get("session_id"),
+                lane=payload.get("lane"),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        await worker.enqueue(task.task_id)
+        return {"status": "queued", "task_id": task.task_id, "procedure_id": procedure_id}
 
     @app.post("/admin/reboot")
     async def reboot_api():
@@ -306,12 +341,23 @@ def register_runtime_admin_routes(
         Base.metadata.create_all(engine)
 
         restored = storage.__class__()
+        onboarding_task_id = None
         try:
             restored.parameters.set_parameter(
                 key=settings_parameter_key,
                 value=preserved_settings,
                 description=settings_parameter_description,
             )
+            onboarding_task = None
+            try:
+                onboarding_task = queue_procedure(
+                    restored,
+                    worker,
+                    procedure_id="operator_onboarding",
+                )
+                onboarding_task_id = str(getattr(onboarding_task, "task_id", "") or "") or None
+            except Exception:
+                onboarding_task = None
             restored.commit()
         finally:
             restored.close()
@@ -324,6 +370,8 @@ def register_runtime_admin_routes(
             "aborted_active_task": bool(aborted),
             "cleared_queue": cleared_queue,
             "preserved_settings": True,
+            "seeded_onboarding": bool(onboarding_task),
+            "onboarding_task_id": onboarding_task_id,
         }
 
     @app.post("/admin/fresh-start")
@@ -344,7 +392,7 @@ def register_runtime_admin_routes(
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
-                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+                raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         worker.pause(normalized_lane)
         return {"status": "paused", "lane": normalized_lane}
 
@@ -354,7 +402,7 @@ def register_runtime_admin_routes(
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
-                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+                raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         worker.resume(normalized_lane)
         replayed = await worker.enqueue_runnable_tasks(normalized_lane)
         return {"status": "running", "lane": normalized_lane, "replayed": replayed}
@@ -365,7 +413,7 @@ def register_runtime_admin_routes(
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
-                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+                raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         aborted = worker.stop_current(normalized_lane)
         return {"status": "stopped", "aborted": aborted, "lane": normalized_lane}
 

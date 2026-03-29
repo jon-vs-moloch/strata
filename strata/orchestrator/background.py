@@ -24,8 +24,22 @@ from strata.orchestrator.worker.resolution_policy import determine_resolution, a
 from strata.orchestrator.worker.plan_review import generate_plan_review
 from strata.orchestrator.worker.routing_policy import select_model_tier
 from strata.eval.job_runner import run_eval_job_task
+from strata.experimental.verifier import emit_verifier_attention_signal, verify_task_output
 
 logger = logging.getLogger(__name__)
+
+
+def resolution_from_plan_review(review: Optional[dict]):
+    recommendation = str((review or {}).get("recommendation") or "").strip().lower()
+    if recommendation not in {"decompose", "internal_replan", "abandon_to_parent"}:
+        return None
+    from strata.schemas.core import AttemptResolutionSchema
+
+    return AttemptResolutionSchema(
+        reasoning=str((review or {}).get("rationale") or f"Plan review recommended {recommendation}.").strip(),
+        resolution=recommendation,
+        new_subtasks=[],
+    )
 
 
 def emit_task_execution_attention_signal(
@@ -146,7 +160,7 @@ async def queue_task_attention_review(storage, *, task, signal: dict) -> Optiona
         payload={
             "trace_kind": "task_trace",
             "task_id": task.task_id,
-            "reviewer_tier": "strong",
+            "reviewer_tier": "trainer",
             "emit_followups": True,
             "persist_to_task": True,
             "spec_scope": "project",
@@ -156,7 +170,7 @@ async def queue_task_attention_review(storage, *, task, signal: dict) -> Optiona
         session_id=session_id,
         dedupe_signature={
             "trace_kind": "task_trace",
-            "reviewer_tier": "strong",
+            "reviewer_tier": "trainer",
             "task_id": task.task_id,
         },
     )
@@ -182,9 +196,9 @@ async def ensure_continuous_supervision_job(
     bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
     proposer_tiers = [
         str(tier).lower()
-        for tier in bootstrap_policy.get("continuous_proposer_tiers", ["weak", "strong"])
-        if str(tier).lower() in {"weak", "strong"}
-    ] or ["weak", "strong"]
+        for tier in bootstrap_policy.get("continuous_proposer_tiers", ["agent", "trainer"])
+        if str(tier).lower() in {"agent", "trainer"}
+    ] or ["agent", "trainer"]
     run_count = max(max(1, int(minimum_run_count or 1)), int(bootstrap_policy.get("continuous_run_count", 1) or 1))
     suite_name = "bootstrap_mcq_v1"
 
@@ -194,7 +208,7 @@ async def ensure_continuous_supervision_job(
             storage,
             kind="bootstrap_cycle",
             title="Bootstrap Cycle",
-            description="Queued strong-over-weak bootstrap cycle.",
+            description="Queued trainer-over-agent bootstrap cycle.",
             payload={
                 "proposer_tiers": proposer_tiers,
                 "auto_promote": True,
@@ -202,7 +216,7 @@ async def ensure_continuous_supervision_job(
                 "run_count": run_count,
                 "baseline_change_id": "baseline",
             },
-            session_id="strong:default",
+            session_id="trainer:default",
             dedupe_signature={
                 "suite_name": suite_name,
                 "run_count": run_count,
@@ -237,26 +251,26 @@ async def ensure_blocked_weak_task_review(
             .all()
         )
         for candidate in weak_blocked_tasks:
-            if normalize_lane(infer_lane_from_task(candidate)) != "weak":
+            if normalize_lane(infer_lane_from_task(candidate)) != "agent":
                 continue
             return await queue_system_job(
                 storage,
                 kind="trace_review",
-                title=f"Weak Supervision Review: {str(candidate.title or candidate.task_id)[:72]}",
-                description="Queued strong-tier review for blocked weak-lane work before another bootstrap cycle.",
+                title=f"Agent Supervision Review: {str(candidate.title or candidate.task_id)[:72]}",
+                description="Queued trainer-agent review for blocked agent-lane work before another bootstrap cycle.",
                 payload={
                     "trace_kind": "task_trace",
                     "task_id": candidate.task_id,
-                    "reviewer_tier": "strong",
+                    "reviewer_tier": "trainer",
                     "emit_followups": True,
                     "persist_to_task": True,
                     "spec_scope": "project",
                     "supervision_reason": "weak_blocked_task",
                 },
-                session_id="strong:default",
+                session_id="trainer:default",
                 dedupe_signature={
                     "trace_kind": "task_trace",
-                    "reviewer_tier": "strong",
+                    "reviewer_tier": "trainer",
                     "task_id": candidate.task_id,
                     "supervision_reason": "weak_blocked_task",
                 },
@@ -285,7 +299,7 @@ class BackgroundWorker:
         self._current_task_lane: Optional[str] = None
         self._current_task_id: Optional[str] = None
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
-        self._tier_health = {"Strong": "unknown", "Weak": "unknown"}
+        self._tier_health = {"trainer": "unknown", "agent": "unknown"}
 
     def _settings(self) -> dict:
         try:
@@ -298,15 +312,15 @@ class BackgroundWorker:
         if self._running:
             return
             
-        # 1. Deep Preflight Model Check (Strong + Weak)
-        logger.info("Performing Deep Preflight Check (Strong + Weak tiers)...")
-        from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+        # 1. Deep preflight model check (trainer-agent + agent)
+        logger.info("Performing deep preflight check (trainer-agent + agent tiers)...")
+        from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
         settings = self._settings()
         allow_cloud_only_boot = bool(settings.get("allow_cloud_only_boot", False))
         
         contexts = [
-            ("Strong", StrongExecutionContext(run_id="preflight")),
-            ("Weak", WeakExecutionContext(run_id="preflight"))
+            ("trainer", TrainerExecutionContext(run_id="preflight")),
+            ("agent", AgentExecutionContext(run_id="preflight"))
         ]
         
         for name, ctx in contexts:
@@ -320,19 +334,19 @@ class BackgroundWorker:
                 logger.info(f"  -> {name} tier is reachable.")
                 self._tier_health[name] = "ok"
             except Exception as e:
-                # Special Case: If it's the Strong tier failing because of a missing API key,
-                # we don't necessarily want to HARD fail if the Weak tier (local) is alive
-                # and the user hasn't provided a key yet. BUT we should log it loudly.
+                # Special case: if the trainer-agent tier is missing a cloud key,
+                # we do not necessarily want to hard-fail if the local agent tier is alive.
+                # We still log it loudly so the operator knows bootstrap quality is degraded.
                 logger.error(f"  -> {name} tier FAILED check: {e}")
                 self._tier_health[name] = "error"
-                if name == "Weak":
-                    if allow_cloud_only_boot and self._tier_health.get("Strong") == "ok":
-                        logger.warning("Worker proceeding in cloud-only mode because Weak tier is unavailable.")
+                if name == "agent":
+                    if allow_cloud_only_boot and self._tier_health.get("trainer") == "ok":
+                        logger.warning("Worker proceeding in cloud-only mode because the agent tier is unavailable.")
                     else:
-                        raise Exception(f"Worker cannot start: Local (Weak) model is unreachable. ({e})")
+                        raise Exception(f"Worker cannot start: the local agent tier is unreachable. ({e})")
                 else:
-                    # Strong (Cloud) is optional but critical for high-level reasoning.
-                    logger.warning(f"Worker proceeding without {name} model tier (unreachable/misconfigured).")
+                    # Trainer-agent is optional but critical for high-level reasoning.
+                    logger.warning("Worker proceeding without the trainer-agent tier (unreachable or misconfigured).")
 
         # 2. Start Recovery Sweep
         await recover_tasks(
@@ -477,9 +491,9 @@ class BackgroundWorker:
             return
 
         if (
-            self._tier_health.get("Strong") == "ok"
-            and "strong" not in self._paused_lanes
-            and not self._lane_has_runnable_or_active_work("strong")
+            self._tier_health.get("trainer") == "ok"
+            and "trainer" not in self._paused_lanes
+            and not self._lane_has_runnable_or_active_work("trainer")
         ):
             try:
                 review_seed = await ensure_blocked_weak_task_review(
@@ -487,7 +501,7 @@ class BackgroundWorker:
                     enabled=True,
                 )
                 if review_seed and review_seed.get("status") == "queued":
-                    logger.info("Queued blocked weak-task supervision review %s for idle strong lane.", review_seed.get("task_id"))
+                    logger.info("Queued blocked agent-task supervision review %s for idle trainer lane.", review_seed.get("task_id"))
                 else:
                     seeded = await ensure_continuous_supervision_job(
                         self._storage_factory,
@@ -495,16 +509,16 @@ class BackgroundWorker:
                         minimum_run_count=3 if settings.get("heavy_reflection_mode", False) else 1,
                     )
                     if seeded and seeded.get("status") == "queued":
-                        logger.info("Queued continuous supervision job %s for idle strong lane.", seeded.get("task_id"))
+                        logger.info("Queued continuous supervision job %s for idle trainer lane.", seeded.get("task_id"))
             except Exception as exc:
-                logger.warning("Unable to ensure continuous supervision job for strong lane: %s", exc)
+                logger.warning("Unable to ensure continuous supervision job for the trainer lane: %s", exc)
 
         if (
             settings.get("automatic_task_generation", False)
-            and self._tier_health.get("Weak") != "error"
-            and "weak" not in self._paused_lanes
+            and self._tier_health.get("agent") != "error"
+            and "agent" not in self._paused_lanes
         ):
-            if not self._lane_has_runnable_or_active_work("weak"):
+            if not self._lane_has_runnable_or_active_work("agent"):
                 await run_idle_tasks(self._storage_factory, self._model, self._queue)
 
     def _update_task_control_state(
@@ -612,14 +626,14 @@ class BackgroundWorker:
             # --- ROUTING ---
             from strata.orchestrator.worker.routing_policy import select_model_tier
             context = select_model_tier(task)
-            if self._tier_health.get("Weak") != "ok" and self._tier_health.get("Strong") == "ok":
-                from strata.schemas.execution import StrongExecutionContext
-                context = StrongExecutionContext(run_id=f"run_{task_id}_cloud_only")
+            if self._tier_health.get("agent") != "ok" and self._tier_health.get("trainer") == "ok":
+                from strata.schemas.execution import TrainerExecutionContext
+                context = TrainerExecutionContext(run_id=f"run_{task_id}_cloud_only")
             
             # Application of experimental override if active
             if self._active_experiment_id:
-                from strata.schemas.execution import WeakExecutionContext
-                context = WeakExecutionContext(
+                from strata.schemas.execution import AgentExecutionContext
+                context = AgentExecutionContext(
                     run_id=f"exp_{task_id}",
                     candidate_change_id=self._active_experiment_id,
                     evaluation_run=True
@@ -695,11 +709,19 @@ class BackgroundWorker:
                         )
 
             if not success:
-                # --- RESOLUTION ---
-                resolution_data = await determine_resolution(task, error, self._model, storage)
-                
-                # Update attempt outcome to FAILED
+                # Update attempt outcome to FAILED before review so the reviewer sees the actual failure state.
                 storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.FAILED, reason=str(error))
+
+                review = None
+                try:
+                    review = await generate_plan_review(task, attempt, self._model, storage)
+                    storage.attempts.set_plan_review(attempt.attempt_id, review)
+                    storage.commit()
+                except Exception as review_err:
+                    logger.error(f"Failed to generate failure-time plan review for attempt {attempt.attempt_id}: {review_err}")
+
+                # --- RESOLUTION ---
+                resolution_data = resolution_from_plan_review(review) or await determine_resolution(task, error, self._model, storage)
                 
                 # Map string resolution to Enum
                 from strata.storage.models import AttemptResolution
@@ -769,11 +791,45 @@ class BackgroundWorker:
                 )
                 _record_attempt_efficiency_metrics("succeeded")
                 storage.commit()
+
+            # --- LIGHTWEIGHT VERIFICATION ---
+            try:
+                verification = await verify_task_output(
+                    storage,
+                    task=task,
+                    attempt=attempt,
+                    model_adapter=self._model,
+                    context=context,
+                )
+                if verification:
+                    verifier_signal = emit_verifier_attention_signal(
+                        storage,
+                        task=task,
+                        verification=verification,
+                    )
+                    if verifier_signal:
+                        queued_review = await queue_task_attention_review(
+                            storage,
+                            task=task,
+                            signal=verifier_signal,
+                        )
+                        logger.info(
+                            "Verifier flagged task %s as %s%s",
+                            task.task_id,
+                            verification.get("verdict"),
+                            f" and queued review {queued_review.get('task_id')}" if queued_review else "",
+                        )
+                    storage.commit()
+            except Exception as verifier_err:
+                logger.error(f"Failed to verify attempt {attempt.attempt_id}: {verifier_err}")
             
             # --- REVIEW ---
             try:
-                review = await generate_plan_review(task, attempt, self._model, storage)
-                storage.attempts.set_plan_review(attempt.attempt_id, review)
+                existing_review = dict(getattr(attempt, "plan_review", {}) or {})
+                review = existing_review
+                if not review or not str(review.get("recommendation") or "").strip():
+                    review = await generate_plan_review(task, attempt, self._model, storage)
+                    storage.attempts.set_plan_review(attempt.attempt_id, review)
                 attention_signal = emit_task_execution_attention_signal(
                     storage,
                     task=task,
@@ -892,7 +948,7 @@ class BackgroundWorker:
             "paused_lanes": sorted(self._paused_lanes),
             "tiers": self._tier_health,
             "lanes": {
-                "strong": self.lane_status("strong"),
-                "weak": self.lane_status("weak"),
+                "trainer": self.lane_status("trainer"),
+                "agent": self.lane_status("agent"),
             },
         }

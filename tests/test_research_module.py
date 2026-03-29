@@ -1,4 +1,4 @@
-from strata.orchestrator.research import _build_research_system_prompt
+from strata.orchestrator.research import _build_research_system_prompt, _should_return_raw_file
 
 
 def test_research_prompt_includes_local_exploration_guidance_for_codebase_tasks():
@@ -25,3 +25,19 @@ def test_research_prompt_omits_codebase_nudge_for_non_codebase_scope():
     )
 
     assert "[CODEBASE-FIRST BEHAVIOR]" not in prompt
+
+
+def test_canonical_spec_reads_bypass_progressive_summary_cache():
+    assert _should_return_raw_file(
+        filepath=".knowledge/specs/project_spec.md",
+        target_scope="codebase",
+        task_description="Identify an alignment gap in the repository.",
+        spec_paths=[".knowledge/specs/constitution.md", ".knowledge/specs/project_spec.md"],
+    )
+
+    assert not _should_return_raw_file(
+        filepath="docs/spec/codemap.md",
+        target_scope="world",
+        task_description="Research public best practices for agent telemetry.",
+        spec_paths=[],
+    )

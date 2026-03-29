@@ -105,24 +105,24 @@ The point of storing structured outcomes is to answer questions like:
 
 - which routing choices work for which task types
 - which validators are catching real problems
-- which decompositions help weak models succeed
-- whether a system change improved the weak tier in practice
+- which decompositions help the agent tier succeed
+- whether a system change improved the agent tier in practice
 - whether a desired property actually improved after a change
 
 The system should evolve from measured outcomes, not from intuition alone.
 
-## Weak/Strong Separation
+## Agent/Trainer Separation
 
-The strong/weak split is intentional and foundational.
+The trainer/agent split is intentional and foundational.
 
-- The `strong` tier exists to bootstrap progress, propose improvements, and explore higher-capability changes.
-- The `weak` tier represents the constrained local model the system is ultimately trying to empower.
+- The `trainer` tier exists to bootstrap progress, propose improvements, and explore higher-capability changes.
+- The `agent` tier represents the constrained local model the system is ultimately trying to empower.
 
 These are role boundaries, not permanent provider categories.
 
-- by default, `strong` means the bootstrap/supervision lane
-- by default, `weak` means the normal execution lane
-- the current operational assumption remains `strong -> cloud-preferred` and `weak -> local-preferred`
+- by default, `trainer` means the bootstrap/supervision lane
+- by default, `agent` means the normal execution lane
+- the current operational assumption remains `trainer -> cloud-preferred` and `agent -> local-preferred`
 - but either pool may eventually point at local or cloud inference depending on the active config
 
 The important distinction is:
@@ -130,7 +130,7 @@ The important distinction is:
 - in-pool escalation is normal strategy behavior
 - cross-pool escalation is a separate policy boundary
 
-By default, Strata should not silently escalate weak work into strong. If cross-pool escalation is introduced later, it should be explicit, telemetered, and policy-controlled.
+By default, Strata should not silently escalate agent work into trainer. If cross-pool escalation is introduced later, it should be explicit, telemetered, and policy-controlled.
 
 This separation is not merely an implementation convenience. It encodes the developmental strategy of the project.
 
@@ -138,29 +138,38 @@ This separation is not merely an implementation convenience. It encodes the deve
 
 The intended improvement loop is:
 
-1. run a strong model inside the harness
+1. run a trainer model inside the harness
 2. let it propose or implement a system change
-3. evaluate the weak model with that change in place
-4. record telemetry about whether the weak model improved
+3. evaluate the agent model with that change in place
+4. record telemetry about whether the agent model improved
 5. adjust the system based on that telemetry
 6. repeat
 
 In day-to-day operation, this should not collapse into "every tier proposes everything all the time."
 
-- The weak tier should keep doing normal system work, including user-facing tasks and bounded autonomous work inside the harness.
-- The strong tier should primarily supervise the weak tier: diagnose failures, propose harness repairs, run targeted evaluations, and decide which mutations are worth promoting.
-- Extra eval sampling is useful as telemetry, but should stay subordinate to the real goal of improving weak-tier behavior.
+- The agent tier should keep doing normal system work, including user-facing tasks and bounded autonomous work inside the harness.
+- The trainer tier should primarily supervise the agent tier: diagnose failures, propose harness repairs, run targeted evaluations, and decide which mutations are worth promoting.
+- Extra eval sampling is useful as telemetry, but should stay subordinate to the real goal of improving agent-tier behavior.
 
-The target state is not just "the strong model can improve Strata."
+The target state is not just "the trainer model can improve Strata."
 
-The target state is that repeated system improvements eventually enable the weak model to make a meaningful improvement to the system by itself, such as:
+The target state is that repeated system improvements eventually enable the agent model to make a meaningful improvement to the system by itself, such as:
 
 - completing a broader class of tasks
 - using tools more reliably
 - decomposing work more effectively
 - adding or refining a capability under evaluation
 
-At that point, the system is no longer merely compensating for a weak model. It is teaching a weak model how to be useful.
+At that point, the system is no longer merely compensating for a constrained model. It is teaching the agent how to be useful.
+
+That only works if the trainer behaves like a real supervisor. In practice, the trainer should:
+
+- investigate traces instead of inheriting their premises
+- treat verifier judgments and deterministic checks as supervision evidence
+- notice when repeated verifier warnings are not changing system behavior
+- convert those situations into bounded corrective interventions rather than generic retry pressure
+
+If the trainer cannot produce a perfect structured review, the system should still preserve the strongest grounded fallback diagnosis it can justify. A degraded review is still better than silently losing supervisory signal.
 
 ## Why The Repository Looks Like This
 

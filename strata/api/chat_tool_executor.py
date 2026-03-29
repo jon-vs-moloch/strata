@@ -110,7 +110,7 @@ class ChatToolExecutor:
                         payload={
                             "trace_kind": "session_trace",
                             "session_id": target_session_id,
-                            "reviewer_tier": "strong",
+                            "reviewer_tier": "trainer",
                             "emit_followups": True,
                             "persist_to_task": False,
                             "spec_scope": "project",
@@ -119,7 +119,7 @@ class ChatToolExecutor:
                         session_id=target_session_id,
                         dedupe_signature={
                             "trace_kind": "session_trace",
-                            "reviewer_tier": "strong",
+                            "reviewer_tier": "trainer",
                             "session_id": target_session_id,
                         },
                     )

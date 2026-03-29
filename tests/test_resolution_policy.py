@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 import sys
 
-from strata.orchestrator.worker.resolution_policy import apply_resolution
+from strata.orchestrator.worker.resolution_policy import apply_resolution, determine_resolution
 from strata.schemas.core import AttemptResolutionSchema
 from strata.storage.models import TaskState, TaskType
 
@@ -93,7 +93,7 @@ def test_improve_tooling_marks_broken_tools_as_bug_fix():
 
 def test_blocked_weak_task_queues_strong_escalation_review(monkeypatch):
     storage = DummyStorage()
-    task = DummyTask(session_id="weak:default")
+    task = DummyTask(session_id="agent:default")
     resolution = AttemptResolutionSchema(
         reasoning="Need higher-level judgment on whether this requires user clarification.",
         resolution="blocked",
@@ -128,5 +128,21 @@ def test_blocked_weak_task_queues_strong_escalation_review(monkeypatch):
     assert len(queued_review_payloads) == 1
     payload = queued_review_payloads[0]
     assert payload["kind"] == "trace_review"
-    assert payload["payload"]["supervision_reason"] == "weak_blocked_escalation"
-    assert payload["payload"]["reviewer_tier"] == "strong"
+    assert payload["payload"]["supervision_reason"] == "agent_blocked_escalation"
+    assert payload["payload"]["reviewer_tier"] == "trainer"
+
+
+def test_research_iteration_limit_prefers_decompose():
+    task = DummyTask()
+    task.type = TaskType.RESEARCH
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            RuntimeError("Agent iteration limit reached. Partial context saved."),
+            model_adapter=None,
+            storage=None,
+        )
+    )
+
+    assert resolution.resolution == "decompose"

@@ -40,11 +40,11 @@ const PROVIDER_SETUP_LINKS = [
   { label: 'OpenRouter Keys', href: 'https://openrouter.ai/settings/keys' },
 ];
 
-const CHAT_LANES = ['strong', 'weak'];
+const CHAT_LANES = ['trainer', 'agent'];
 
 const defaultSessionIdForLane = (lane) => `${lane}:default`;
 const draftSessionIdForLane = (lane) => `${lane}:draft-${Date.now()}`;
-const isDraftSessionId = (sessionId) => typeof sessionId === 'string' && /^(strong|weak):draft-\d+$/.test(sessionId);
+const isDraftSessionId = (sessionId) => typeof sessionId === 'string' && /^(trainer|agent):draft-\d+$/.test(sessionId);
 const draftHasContent = (draft) => {
   if (!draft) return false;
   const title = String(draft.title || '').trim();
@@ -52,21 +52,65 @@ const draftHasContent = (draft) => {
   return Boolean(body) || (Boolean(title) && title !== 'New Session');
 };
 
+const normalizeLaneKey = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'trainer' || normalized === 'strong') return 'trainer';
+  if (normalized === 'agent' || normalized === 'weak') return 'agent';
+  return '';
+};
+
 const laneForSessionId = (sessionId) => {
-  if (typeof sessionId !== 'string') return 'strong';
-  if (sessionId.startsWith('weak:')) return 'weak';
-  if (sessionId.startsWith('strong:')) return 'strong';
-  return 'strong';
+  if (typeof sessionId !== 'string') return 'trainer';
+  if (sessionId.startsWith('agent:')) return 'agent';
+  if (sessionId.startsWith('trainer:')) return 'trainer';
+  if (sessionId.startsWith('weak:')) return 'agent';
+  if (sessionId.startsWith('strong:')) return 'trainer';
+  return 'trainer';
 };
 
 const explicitLaneForSessionId = (sessionId) => {
   if (typeof sessionId !== 'string') return null;
-  if (sessionId.startsWith('weak:')) return 'weak';
-  if (sessionId.startsWith('strong:')) return 'strong';
+  if (sessionId.startsWith('agent:')) return 'agent';
+  if (sessionId.startsWith('trainer:')) return 'trainer';
+  if (sessionId.startsWith('weak:')) return 'agent';
+  if (sessionId.startsWith('strong:')) return 'trainer';
   return null;
 };
 
 const sessionMatchesLane = (sessionId, lane) => laneForSessionId(sessionId) === lane;
+
+const laneForTask = (task) => {
+  const explicitLane = normalizeLaneKey(task?.lane);
+  if (explicitLane) return explicitLane;
+  return laneForSessionId(task?.session_id);
+};
+
+const normalizeLaneStatusMap = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    trainer: source.trainer || source.strong || 'IDLE',
+    agent: source.agent || source.weak || 'IDLE',
+  };
+};
+
+const normalizeTierStatusMap = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    trainer: source.trainer || source.Trainer || source.strong || source.Strong || 'unknown',
+    agent: source.agent || source.Agent || source.weak || source.Weak || 'unknown',
+  };
+};
+
+const normalizeRoutingSummary = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : null;
+  if (!source) return null;
+  return {
+    ...source,
+    trainer: source.trainer || source.strong || null,
+    agent: source.agent || source.weak || null,
+    chat: source.chat || source.trainer || source.strong || null,
+  };
+};
 
 const fallbackSessionTitle = (sessionId) => {
   const visibleSessionId = displaySessionId(sessionId);
@@ -78,8 +122,8 @@ const fallbackSessionTitle = (sessionId) => {
 
 const displaySessionId = (sessionId) => {
   if (typeof sessionId !== 'string') return 'default';
-  if (sessionId.startsWith('weak:')) return sessionId.slice('weak:'.length);
-  if (sessionId.startsWith('strong:')) return sessionId.slice('strong:'.length);
+  if (sessionId.startsWith('agent:')) return sessionId.slice('agent:'.length);
+  if (sessionId.startsWith('trainer:')) return sessionId.slice('trainer:'.length);
   return sessionId;
 };
 
@@ -169,23 +213,46 @@ const REACTION_OPTIONS = [
 ];
 
 const LANE_ACCENTS = {
-  strong: {
-    bubbleBg: 'linear-gradient(135deg, rgba(130,87,229,0.94), rgba(79,70,229,0.92))',
-    bubbleBorder: 'rgba(167,137,255,0.42)',
-    bubbleShadow: '0 12px 28px rgba(101,76,198,0.28)',
-    chip: '#d8c8ff',
+  trainer: {
+    bubbleBg: 'linear-gradient(135deg, rgba(205,96,52,0.94), rgba(152,51,39,0.92))',
+    bubbleBorder: 'rgba(255,163,112,0.38)',
+    bubbleShadow: '0 12px 28px rgba(129,57,35,0.28)',
+    chip: '#ffd7c3',
   },
-  weak: {
-    bubbleBg: 'linear-gradient(135deg, rgba(0,187,145,0.9), rgba(20,141,128,0.92))',
-    bubbleBorder: 'rgba(84,244,201,0.28)',
-    bubbleShadow: '0 12px 28px rgba(10,118,102,0.24)',
-    chip: '#baffea',
+  agent: {
+    bubbleBg: 'linear-gradient(135deg, rgba(93,131,137,0.92), rgba(63,112,103,0.92))',
+    bubbleBorder: 'rgba(140,196,188,0.3)',
+    bubbleShadow: '0 12px 28px rgba(36,76,73,0.24)',
+    chip: '#d2f1ea',
   },
   user: {
     bubbleBg: '#15161b',
     bubbleBorder: 'rgba(255,255,255,0.08)',
     bubbleShadow: 'none',
     chip: '#c9ccd8',
+  },
+};
+
+const LANE_THEME = {
+  trainer: {
+    label: 'Trainer',
+    chipText: '#ffd7c3',
+    chipBg: 'rgba(205,96,52,0.12)',
+    chipBorder: 'rgba(255,163,112,0.24)',
+    glow: 'rgba(205,96,52,0.16)',
+    title: '#ffd7c3',
+    preview: 'rgba(255,215,195,0.72)',
+    activeTitle: '#fff1e8',
+  },
+  agent: {
+    label: 'Agent',
+    chipText: '#d2f1ea',
+    chipBg: 'rgba(93,131,137,0.14)',
+    chipBorder: 'rgba(140,196,188,0.24)',
+    glow: 'rgba(93,131,137,0.16)',
+    title: '#d2f1ea',
+    preview: 'rgba(210,241,234,0.72)',
+    activeTitle: '#ebfaf6',
   },
 };
 
@@ -249,7 +316,11 @@ const eventAlignmentForMessage = (message) => {
 
 const getMessageLane = (message, fallbackLane) => {
   if (message?.role === 'user') return 'user';
-  return fallbackLane === 'weak' ? 'weak' : 'strong';
+  const explicitLane = normalizeLaneKey(message?.message_metadata?.lane);
+  if (explicitLane) return explicitLane;
+  const sessionLane = explicitLaneForSessionId(message?.session_id);
+  if (sessionLane) return sessionLane;
+  return fallbackLane === 'agent' ? 'agent' : 'trainer';
 };
 
 const participantLabel = (value, participantNames = {}) => {
@@ -257,8 +328,8 @@ const participantLabel = (value, participantNames = {}) => {
   if (!normalized) return '';
   if (normalized === 'user') return participantNames.user || 'you';
   if (normalized === 'system') return participantNames.system || 'system';
-  if (normalized === 'strong') return participantNames.strong || 'Strong';
-  if (normalized === 'weak') return participantNames.weak || 'Weak';
+  if (normalized === 'trainer') return participantNames.trainer || 'Trainer';
+  if (normalized === 'agent') return participantNames.agent || 'Agent';
   if (normalized === 'chat_runtime') return participantNames.system || 'Strata';
   return value;
 };
@@ -340,7 +411,9 @@ const messageSenderKey = (message, lane) => {
 const messageSenderTitle = (message, lane, participantNames = {}) => {
   if (message?.role === 'user') return participantNames?.user || 'You';
   if (isDirectCommunication(message)) {
-    return lane === 'weak' ? participantNames?.weak || 'Weak' : participantNames?.strong || 'Strong';
+    const messageLane = getMessageLane(message, lane);
+    if (messageLane === 'agent') return participantNames?.agent || 'Agent';
+    return participantNames?.trainer || 'Trainer';
   }
   return participantNames?.system || 'System';
 };
@@ -512,7 +585,7 @@ const MessageActionPill = ({
 const MessageMetaRow = ({ message, lane, participantNames }) => {
   const metadata = message?.message_metadata || {};
   const direct = isDirectCommunication(message);
-  const laneAccent = LANE_ACCENTS[getMessageLane(message, lane)] || LANE_ACCENTS.strong;
+  const laneAccent = LANE_ACCENTS[getMessageLane(message, lane)] || LANE_ACCENTS.trainer;
   const timestamp = formatAbsoluteTime(message.created_at);
   const lifecycle = formatMessageLifecycle(message, participantNames);
   const isUser = message?.role === 'user';
@@ -563,7 +636,7 @@ const MessageCard = ({
   const display = formatMessageForDisplay(message.content);
   const direct = isDirectCommunication(message);
   const laneKey = getMessageLane(message, lane);
-  const laneAccent = LANE_ACCENTS[laneKey] || LANE_ACCENTS.strong;
+  const laneAccent = LANE_ACCENTS[laneKey] || LANE_ACCENTS.trainer;
   const eventDescriptor = describeEventMessage(message);
   const showReactionButton = message.role !== 'user' && !message.pending && !message.failed;
   const reactionMenuOpen = openReactionMenuId === message.id;
@@ -739,8 +812,8 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Model Registry Settings
-  const [registryConfig, setRegistryConfig] = useState({ strong: [], weak: [] });
-  const [registryPresets, setRegistryPresets] = useState({ strong: {}, weak: {} });
+  const [registryConfig, setRegistryConfig] = useState({ trainer: [], agent: [] });
+  const [registryPresets, setRegistryPresets] = useState({ trainer: {}, agent: {} });
   const [savingRegistry, setSavingRegistry] = useState(false);
 
   const loadSettings = useCallback(async () => {
@@ -770,7 +843,7 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
     try {
       const res = await axios.get(`${apiUrl}/admin/registry/presets`);
       if (res.data.status === 'ok') {
-        setRegistryPresets(res.data.presets || { strong: {}, weak: {} });
+        setRegistryPresets(res.data.presets || { trainer: {}, agent: {} });
       }
     } catch (e) {
       console.error('Failed to load registry presets', e);
@@ -790,10 +863,10 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
     next[pool][index][field] = value;
     
     // Ensure default transport if missing
-    if (pool === 'strong') next[pool][index].transport = 'cloud';
-    if (pool === 'weak') next[pool][index].transport = 'local';
+    if (pool === 'trainer') next[pool][index].transport = 'cloud';
+    if (pool === 'agent') next[pool][index].transport = 'local';
     // Ensure default provider if missing
-    if (!next[pool][index].provider) next[pool][index].provider = pool === 'strong' ? 'openrouter' : 'lmstudio';
+    if (!next[pool][index].provider) next[pool][index].provider = pool === 'trainer' ? 'openrouter' : 'lmstudio';
     
     setRegistryConfig({ ...next });
     
@@ -884,15 +957,15 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
     display: 'flex', flexDirection: 'column', gap: '8px'
   };
 
-  const visiblePools = currentScope === 'home' ? ['strong', 'weak'] : [currentScope];
+  const visiblePools = currentScope === 'home' ? ['trainer', 'agent'] : [currentScope];
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <DashboardPanel title="SETTINGS SCOPE">
         <div style={{ fontSize: '13px', color: '#c7c8d6', lineHeight: 1.6 }}>
           {currentScope === 'home'
-            ? 'Global settings view. Shared controls are shown here, along with both strong and weak model-pool configuration.'
-            : `${currentScope === 'strong' ? 'Strong' : 'Weak'} scope. This page is focused on settings relevant to the currently selected agent lane.`}
+            ? 'Global settings view. Shared controls are shown here, along with both trainer and agent model-pool configuration.'
+            : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} scope. This page is focused on settings relevant to the currently selected lane.`}
         </div>
       </DashboardPanel>
 
@@ -950,14 +1023,14 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
             ))}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}>
-            {visiblePools.includes('strong') && (
+            {visiblePools.includes('trainer') && (
             <div>
               <div style={{ ...sectionLabel, marginBottom: '6px' }}>STRONG PRESETS</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                {Object.keys(registryPresets.strong || {}).map((presetKey) => (
+                {Object.keys(registryPresets.trainer || {}).map((presetKey) => (
                   <button
                     key={presetKey}
-                    onClick={() => applyPreset('strong', presetKey)}
+                    onClick={() => applyPreset('trainer', presetKey)}
                     style={{
                       background: 'rgba(130,87,229,0.15)',
                       border: '1px solid rgba(130,87,229,0.3)',
@@ -974,14 +1047,14 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
               </div>
             </div>
             )}
-            {visiblePools.includes('weak') && (
+            {visiblePools.includes('agent') && (
             <div>
               <div style={{ ...sectionLabel, marginBottom: '6px' }}>WEAK PRESETS</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                {Object.keys(registryPresets.weak || {}).map((presetKey) => (
+                {Object.keys(registryPresets.agent || {}).map((presetKey) => (
                   <button
                     key={presetKey}
-                    onClick={() => applyPreset('weak', presetKey)}
+                    onClick={() => applyPreset('agent', presetKey)}
                     style={{
                       background: 'rgba(0,217,255,0.12)',
                       border: '1px solid rgba(0,217,255,0.25)',
@@ -1001,87 +1074,87 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {/* Strong Pool */}
-            {visiblePools.includes('strong') && (
+            {/* Trainer Pool */}
+            {visiblePools.includes('trainer') && (
             <div style={inputGroupStyle}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL (CLOUD)</div>
-              {registryConfig.strong?.[0]?.provider && API_KEY_LINKS[registryConfig.strong[0].provider] && (
+              {registryConfig.trainer?.[0]?.provider && API_KEY_LINKS[registryConfig.trainer[0].provider] && (
                 <a
-                  href={API_KEY_LINKS[registryConfig.strong[0].provider]}
+                  href={API_KEY_LINKS[registryConfig.trainer[0].provider]}
                   target="_blank"
                   rel="noreferrer"
                   style={{ fontSize: '11px', color: '#bca9ff', textDecoration: 'none' }}
                 >
-                  Open {registryConfig.strong[0].provider} API key page
+                  Open {registryConfig.trainer[0].provider} API key page
                 </a>
               )}
               <input 
                 style={infoValue} placeholder="Model (e.g. anthropic/claude-3.5-sonnet)"
-                value={registryConfig.strong?.[0]?.model || ''}
-                onChange={e => handleUpdateRegistry('strong', 'model', e.target.value)}
+                value={registryConfig.trainer?.[0]?.model || ''}
+                onChange={e => handleUpdateRegistry('trainer', 'model', e.target.value)}
               />
               <input 
                 style={infoValue} placeholder="Endpoint URL (e.g. https://openrouter.ai/api/v1/chat/completions)"
-                value={registryConfig.strong?.[0]?.endpoint_url || ''}
-                onChange={e => handleUpdateRegistry('strong', 'endpoint_url', e.target.value)}
+                value={registryConfig.trainer?.[0]?.endpoint_url || ''}
+                onChange={e => handleUpdateRegistry('trainer', 'endpoint_url', e.target.value)}
               />
               <input 
                 style={infoValue} placeholder="API Key Env (e.g. OPENROUTER_API_KEY)"
-                value={registryConfig.strong?.[0]?.api_key_env || ''}
-                onChange={e => handleUpdateRegistry('strong', 'api_key_env', e.target.value)}
+                value={registryConfig.trainer?.[0]?.api_key_env || ''}
+                onChange={e => handleUpdateRegistry('trainer', 'api_key_env', e.target.value)}
               />
               <input
                 type="number"
                 style={infoValue} placeholder="Requests / minute (optional)"
-                value={registryConfig.strong?.[0]?.requests_per_minute || ''}
-                onChange={e => handleUpdateRegistry('strong', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)}
+                value={registryConfig.trainer?.[0]?.requests_per_minute || ''}
+                onChange={e => handleUpdateRegistry('trainer', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
               <input
                 type="number"
                 style={infoValue} placeholder="Max concurrency (optional)"
-                value={registryConfig.strong?.[0]?.max_concurrency || ''}
-                onChange={e => handleUpdateRegistry('strong', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)}
+                value={registryConfig.trainer?.[0]?.max_concurrency || ''}
+                onChange={e => handleUpdateRegistry('trainer', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
               <input
                 type="number"
                 style={infoValue} placeholder="Min interval ms (optional)"
-                value={registryConfig.strong?.[0]?.min_interval_ms || ''}
-                onChange={e => handleUpdateRegistry('strong', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
+                value={registryConfig.trainer?.[0]?.min_interval_ms || ''}
+                onChange={e => handleUpdateRegistry('trainer', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
             </div>
             )}
 
-            {/* Weak Pool */}
-            {visiblePools.includes('weak') && (
+            {/* Agent Pool */}
+            {visiblePools.includes('agent') && (
             <div style={inputGroupStyle}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#00d9ff', marginBottom: '4px', letterSpacing: '0.05em' }}>WEAK POOL (LOCAL)</div>
               <input 
                 style={infoValue} placeholder="Model (e.g. qwen3.5-9b-distilled)"
-                value={registryConfig.weak?.[0]?.model || ''}
-                onChange={e => handleUpdateRegistry('weak', 'model', e.target.value)}
+                value={registryConfig.agent?.[0]?.model || ''}
+                onChange={e => handleUpdateRegistry('agent', 'model', e.target.value)}
               />
               <input 
                 style={infoValue} placeholder="Endpoint URL (e.g. http://127.0.0.1:1234/v1/chat/completions)"
-                value={registryConfig.weak?.[0]?.endpoint_url || ''}
-                onChange={e => handleUpdateRegistry('weak', 'endpoint_url', e.target.value)}
+                value={registryConfig.agent?.[0]?.endpoint_url || ''}
+                onChange={e => handleUpdateRegistry('agent', 'endpoint_url', e.target.value)}
               />
               <input
                 type="number"
                 style={infoValue} placeholder="Requests / minute (optional)"
-                value={registryConfig.weak?.[0]?.requests_per_minute || ''}
-                onChange={e => handleUpdateRegistry('weak', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)}
+                value={registryConfig.agent?.[0]?.requests_per_minute || ''}
+                onChange={e => handleUpdateRegistry('agent', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
               <input
                 type="number"
                 style={infoValue} placeholder="Max concurrency (optional)"
-                value={registryConfig.weak?.[0]?.max_concurrency || ''}
-                onChange={e => handleUpdateRegistry('weak', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)}
+                value={registryConfig.agent?.[0]?.max_concurrency || ''}
+                onChange={e => handleUpdateRegistry('agent', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
               <input
                 type="number"
                 style={infoValue} placeholder="Min interval ms (optional)"
-                value={registryConfig.weak?.[0]?.min_interval_ms || ''}
-                onChange={e => handleUpdateRegistry('weak', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
+                value={registryConfig.agent?.[0]?.min_interval_ms || ''}
+                onChange={e => handleUpdateRegistry('agent', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
             </div>
             )}
@@ -1173,7 +1246,7 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
               <span>
                 Allow cloud-only boot
                 <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
-                  Lets the worker start on the strong tier when the local weak endpoint is unavailable instead of failing startup.
+                  Lets the worker start on the trainer tier when the local agent endpoint is unavailable instead of failing startup.
                 </div>
               </span>
             </label>
@@ -1190,7 +1263,7 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
               <span>
                 Heavy reflection mode
                 <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
-                  Makes the strong lane seed larger bootstrap supervision batches when idle so overnight runs synthesize telemetry faster.
+                  Makes the trainer lane seed larger bootstrap supervision batches when idle so overnight runs synthesize telemetry faster.
                 </div>
               </span>
             </label>
@@ -1284,13 +1357,12 @@ const SessionRow = ({ session, active, onClick, onDelete, onRename, showLaneBadg
   const isDraft = Boolean(session?.draft) || isDraftSessionId(session?.session_id);
   const sessionTime = isDraft ? session.created_at : session.last_message_at;
   const lane = laneForSessionId(session?.session_id);
-  const laneBadge = lane === 'weak'
-    ? { label: 'Weak', color: '#92f7ce', bg: 'rgba(0,242,148,0.08)', border: 'rgba(0,242,148,0.18)' }
-    : { label: 'Strong', color: '#d7c8ff', bg: 'rgba(130,87,229,0.12)', border: 'rgba(130,87,229,0.24)' };
-  const iconBg = active ? laneBadge.bg : lane === 'weak' ? 'rgba(0,242,148,0.1)' : 'rgba(130,87,229,0.14)';
+  const laneTheme = LANE_THEME[lane] || LANE_THEME.trainer;
+  const laneBadge = { label: laneTheme.label, color: laneTheme.chipText, bg: laneTheme.chipBg, border: laneTheme.chipBorder };
+  const iconBg = active ? laneBadge.bg : laneTheme.chipBg;
   const iconBorder = `1px solid ${laneBadge.border}`;
-  const titleColor = active ? '#f1eaff' : lane === 'weak' ? '#a8f7d8' : '#dccfff';
-  const previewColor = active ? 'rgba(233,240,255,0.82)' : lane === 'weak' ? 'rgba(168,247,216,0.76)' : 'rgba(220,207,255,0.74)';
+  const titleColor = active ? laneTheme.activeTitle : laneTheme.title;
+  const previewColor = active ? 'rgba(233,240,255,0.82)' : laneTheme.preview;
 
   return (
     <div
@@ -1302,7 +1374,7 @@ const SessionRow = ({ session, active, onClick, onDelete, onRename, showLaneBadg
         background: active ? 'rgba(255,255,255,0.03)' : hovered ? 'rgba(255,255,255,0.02)' : 'transparent',
         cursor: 'pointer', display: 'flex', alignItems: 'center',
         justifyContent: 'space-between',
-        color: active ? '#8257e5' : '#888',
+        color: active ? laneTheme.title : '#888',
         fontSize: '13px', transition: 'all 0.15s'
       }}
     >
@@ -1322,7 +1394,7 @@ const SessionRow = ({ session, active, onClick, onDelete, onRename, showLaneBadg
             fontWeight: 800,
             flexShrink: 0,
             position: 'relative',
-            boxShadow: active ? `0 0 14px ${lane === 'weak' ? 'rgba(0,242,148,0.12)' : 'rgba(130,87,229,0.16)'}` : 'none',
+            boxShadow: active ? `0 0 14px ${laneTheme.glow}` : 'none',
           }}
         >
           {unreadCount > 0 ? (
@@ -1343,7 +1415,7 @@ const SessionRow = ({ session, active, onClick, onDelete, onRename, showLaneBadg
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: titleColor }}>{baseLabel}</span>
             )}
             {autonomous && (
-              <span style={{ fontSize: '9px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#92f7ce', background: 'rgba(0,242,148,0.08)', border: '1px solid rgba(0,242,148,0.18)', borderRadius: '999px', padding: '2px 5px', flexShrink: 0 }}>
+              <span style={{ fontSize: '9px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: laneTheme.chipText, background: laneTheme.chipBg, border: `1px solid ${laneTheme.chipBorder}`, borderRadius: '999px', padding: '2px 5px', flexShrink: 0 }}>
                 Auto
               </span>
             )}
@@ -1384,22 +1456,23 @@ function App() {
   const [messages, setMessages]       = useState([]);
   const [tasks, setTasks]             = useState([]);
   const [inputText, setInputText]     = useState('');
-  const [laneDrafts, setLaneDrafts]   = useState({ strong: [], weak: [] });
+  const [laneDrafts, setLaneDrafts]   = useState({ trainer: [], agent: [] });
   const [isSending, setIsSending]     = useState(false);
   const [sendError, setSendError]     = useState('');
   const [reactionBusyKey, setReactionBusyKey] = useState('');
   const [openReactionMenuId, setOpenReactionMenuId] = useState('');
   const [replyTarget, setReplyTarget] = useState(null);
-  const [chatLane, setChatLane]       = useState('strong');
-  const [currentScope, setCurrentScope] = useState('strong');
+  const [chatLane, setChatLane]       = useState('trainer');
+  const [currentScope, setCurrentScope] = useState('trainer');
   const [scopeSessionIds, setScopeSessionIds] = useState({
     home: null,
-    strong: defaultSessionIdForLane('strong'),
-    weak: defaultSessionIdForLane('weak'),
+    trainer: defaultSessionIdForLane('trainer'),
+    agent: defaultSessionIdForLane('agent'),
   });
   const [sessionList, setSessionList] = useState([]);
-  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'knowledge' | 'dashboard'
+  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'tasks' | 'knowledge' | 'dashboard' | 'settings'
   const [apiStatus, setApiStatus]     = useState('connecting'); // 'ok' | 'error' | 'connecting'
+  const [workerApiStatus, setWorkerApiStatus] = useState('connecting'); // 'ok' | 'error' | 'connecting'
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const sessionListRef = useRef([]);
@@ -1412,7 +1485,7 @@ function App() {
   const refreshTimerRef = useRef(null);
   const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
-  const [laneStatuses, setLaneStatuses] = useState({ strong: 'IDLE', weak: 'IDLE' });
+  const [laneStatuses, setLaneStatuses] = useState({ trainer: 'IDLE', agent: 'IDLE' });
   const [globalPaused, setGlobalPaused] = useState(false);
   const [pausedLanes, setPausedLanes] = useState([]);
   const [rebooting, setRebooting] = useState(false);
@@ -1452,7 +1525,7 @@ function App() {
     });
   }, []);
 
-  const [tiers, setTiers] = useState({ Strong: 'unknown', Weak: 'unknown' });
+  const [tiers, setTiers] = useState({ trainer: 'unknown', agent: 'unknown' });
   const [showCloudModal, setShowCloudModal] = useState(false);
   const sessionId = scopeSessionIds[currentScope] || (currentScope === 'home' ? null : defaultSessionIdForLane(currentScope));
   const effectiveLane = currentScope === 'home'
@@ -1475,7 +1548,14 @@ function App() {
   const suggestedSessionTitle = currentSessionMetadata?.recommended_title && currentSessionMetadata?.recommended_title !== sessionLabel
     ? currentSessionMetadata.recommended_title
     : '';
-  const participantNames = currentSessionMetadata?.participant_names || { user: 'You', strong: 'Strong', weak: 'Weak', system: 'System' };
+  const participantNames = {
+    user: currentSessionMetadata?.participant_names?.user || 'You',
+    trainer: currentSessionMetadata?.participant_names?.trainer === 'Trainer-agent'
+      ? 'Trainer'
+      : (currentSessionMetadata?.participant_names?.trainer || 'Trainer'),
+    agent: currentSessionMetadata?.participant_names?.agent || 'Agent',
+    system: currentSessionMetadata?.participant_names?.system || 'System',
+  };
   const replyTargetSender = replyTarget ? messageSenderTitle(replyTarget, effectiveLane, participantNames) : '';
   const showSessionPane = activeNav === 'chat';
   const showTaskPane = activeNav === 'chat' || activeNav === 'dashboard';
@@ -1514,15 +1594,19 @@ function App() {
     const request = (async () => {
       try {
         const res = await axios.get(`${API}/admin/worker/status`);
+        setWorkerApiStatus('ok');
         setWorkerStatus(res.data.status.worker);
         setGlobalPaused(Boolean(res.data.status.global_paused));
-        setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes : []);
-        setLaneStatuses(res.data.status.lanes || { strong: 'IDLE', weak: 'IDLE' });
-        setTiers(res.data.status.tiers);
-        if (res.data.status.tiers.Strong === 'error' && !localStorage.getItem('skipCloudWarning')) {
+        setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes.map(normalizeLaneKey).filter(Boolean) : []);
+        const nextLaneStatuses = normalizeLaneStatusMap(res.data.status.lanes);
+        const nextTiers = normalizeTierStatusMap(res.data.status.tiers);
+        setLaneStatuses(nextLaneStatuses);
+        setTiers(nextTiers);
+        if (nextTiers.trainer === 'error' && !localStorage.getItem('skipCloudWarning')) {
           setShowCloudModal(true);
         }
       } catch (e) {
+        setWorkerApiStatus('error');
         console.error('Failed to fetch worker status', e);
       } finally {
         workerStatusPromiseRef.current = null;
@@ -1554,7 +1638,7 @@ function App() {
       await axios.post(`${API}/admin/reboot`);
       setTimeout(() => {
         setRebooting(false);
-        fetchData(true);
+        void Promise.all([fetchWorkerStatus(), fetchData(true)]);
       }, 3000);
     } catch (e) {
       console.error('Reboot failed', e);
@@ -1663,7 +1747,13 @@ function App() {
             if (currentScope === 'home') return Boolean(explicitLaneForSessionId(session.session_id));
             return sessionMatchesLane(session.session_id, effectiveLane);
           });
-        if (sessionId && !sessions.some((s) => s.session_id === sessionId)) {
+        const shouldIncludeCurrentSession =
+          Boolean(sessionId) &&
+          !sessions.some((s) => s.session_id === sessionId) &&
+          (currentScope === 'home'
+            ? Boolean(explicitLaneForSessionId(sessionId))
+            : sessionMatchesLane(sessionId, effectiveLane));
+        if (shouldIncludeCurrentSession) {
           const existingSession = sessionListRef.current.find((session) => session.session_id === sessionId);
           sessions.push({
             session_id: sessionId,
@@ -1681,7 +1771,7 @@ function App() {
         setProviderTelemetry(providerTelemetryRes.data.providers || {});
         setDashboard(dashboardRes.data.dashboard || null);
         setLoadedContext(loadedContextRes.data.loaded || { files: [], budget_tokens: 0 });
-        setRoutingSummary(routingRes.data.routing || null);
+        setRoutingSummary(normalizeRoutingSummary(routingRes.data.routing));
         setSpecsSnapshot(specsRes.data.specs || null);
         setSpecProposalSnapshot(specProposalsRes.data.proposals || []);
         setKnowledgePagesSnapshot(knowledgePagesRes.data.pages || []);
@@ -1816,6 +1906,93 @@ function App() {
     };
   }, [API, activeNav, knowledgeQuery, selectedKnowledgeSlug]);
 
+  const handleCreateKnowledgePage = useCallback(async () => {
+    const title = window.prompt('Title for the new knowledge page:', '');
+    if (title == null) return;
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle) return;
+    const summary = window.prompt('Short summary (optional):', '') ?? '';
+    const body = window.prompt('Page body:', summary || normalizedTitle);
+    if (body == null) return;
+    const normalizedBody = body.trim();
+    if (!normalizedBody) return;
+    try {
+      const res = await axios.post(`${API}/admin/knowledge/pages`, {
+        title: normalizedTitle,
+        summary: summary.trim() || undefined,
+        body: normalizedBody,
+        created_by: 'operator',
+        updated_reason: 'manual_create',
+        domain: 'project',
+      });
+      const slug = res?.data?.page?.slug || '';
+      if (slug) {
+        setSelectedKnowledgeSlug(slug);
+        setSelectedKnowledgePage(res.data.page || null);
+      }
+      setKnowledgeQuery('');
+    } catch (err) {
+      console.error('Failed to create knowledge page', err);
+      window.alert('Failed to create knowledge page.');
+    }
+  }, [API]);
+
+  const handleEditKnowledgePage = useCallback(async () => {
+    if (!selectedKnowledgePage) return;
+    const nextTitle = window.prompt('Edit page title:', selectedKnowledgePage.title || selectedKnowledgePage.slug || '');
+    if (nextTitle == null) return;
+    const normalizedTitle = nextTitle.trim();
+    if (!normalizedTitle) return;
+    const nextSummary = window.prompt('Edit summary:', selectedKnowledgePage.summary || '') ?? '';
+    const nextBody = window.prompt('Edit page body:', selectedKnowledgePage.body || selectedKnowledgePage.summary || '');
+    if (nextBody == null) return;
+    const normalizedBody = nextBody.trim();
+    if (!normalizedBody) return;
+    try {
+      const res = await axios.post(`${API}/admin/knowledge/pages`, {
+        slug: selectedKnowledgePage.slug,
+        title: normalizedTitle,
+        summary: nextSummary.trim() || undefined,
+        body: normalizedBody,
+        tags: selectedKnowledgePage.tags || [],
+        aliases: selectedKnowledgePage.aliases || [],
+        related_pages: selectedKnowledgePage.related_pages || [],
+        confidence: selectedKnowledgePage.confidence,
+        created_by: 'operator',
+        updated_reason: 'manual_edit',
+        domain: selectedKnowledgePage.domain || 'project',
+      });
+      const slug = res?.data?.page?.slug || selectedKnowledgePage.slug;
+      setSelectedKnowledgeSlug(slug);
+      setSelectedKnowledgePage(res.data.page || null);
+    } catch (err) {
+      console.error('Failed to edit knowledge page', err);
+      window.alert('Failed to edit knowledge page.');
+    }
+  }, [API, selectedKnowledgePage]);
+
+  const handleQueueKnowledgeSource = useCallback(async () => {
+    const sourceTitle = window.prompt('Name this source or note:', '');
+    if (sourceTitle == null) return;
+    const normalizedTitle = sourceTitle.trim();
+    if (!normalizedTitle) return;
+    const sourceNotes = window.prompt('What should be integrated from this source?', '') ?? '';
+    try {
+      await axios.post(`${API}/admin/knowledge/update`, {
+        title: normalizedTitle,
+        reason: `Integrate staged source into the knowledge base. ${sourceNotes.trim()}`.trim(),
+        evidence_hints: sourceNotes.trim() ? [sourceNotes.trim()] : [],
+        target_scope: 'knowledge_source',
+        domain: 'project',
+        session_id: sessionId || defaultSessionIdForLane(effectiveLane),
+      });
+      setOperatorNotice(`Queued source integration for ${normalizedTitle}`);
+    } catch (err) {
+      console.error('Failed to queue knowledge source integration', err);
+      window.alert('Failed to queue source integration.');
+    }
+  }, [API, effectiveLane, sessionId]);
+
   const handleSendMessage = async () => {
     if (!inputText.trim() || isSending) return;
     const text = inputText;
@@ -1936,7 +2113,7 @@ function App() {
         last_message_at: null,
         last_message_preview: 'Draft',
         session_metadata: {
-          participant_names: { user: 'You', strong: 'Strong', weak: 'Weak', system: 'System' },
+          participant_names: { user: 'You', trainer: 'Trainer', agent: 'Agent', system: 'System' },
         },
       }, ...(prev[draftLane] || [])],
     }));
@@ -2066,11 +2243,11 @@ function App() {
     await axios.post(`${API}/admin/fresh-start`);
     localStorage.removeItem('archivedTasks');
     setSessionList([]);
-    setLaneDrafts({ strong: [], weak: [] });
+    setLaneDrafts({ trainer: [], agent: [] });
     setScopeSessionIds({
       home: null,
-      strong: defaultSessionIdForLane('strong'),
-      weak: defaultSessionIdForLane('weak'),
+      trainer: defaultSessionIdForLane('trainer'),
+      agent: defaultSessionIdForLane('agent'),
     });
     setMessages([]);
     setTasks([]);
@@ -2145,7 +2322,7 @@ function App() {
   const tasksForScope = React.useMemo(() => {
     if (currentScope === 'home') return tasks;
     return tasks.filter((task) => {
-      const lane = String(task.lane || '').toLowerCase();
+      const lane = laneForTask(task);
       return !lane || lane === currentScope;
     });
   }, [currentScope, tasks]);
@@ -2265,42 +2442,50 @@ function App() {
   // ── Icon Nav items ───────────────────────────────────────────────────────────
   const navItems = [
     { id: 'chat',      Icon: MessageSquare,   label: 'Chat'      },
+    { id: 'tasks',     Icon: Activity,        label: 'Tasks'     },
     { id: 'knowledge', Icon: BookOpen,        label: 'Knowledge' },
     { id: 'dashboard', Icon: LayoutDashboard, label: 'Dashboard' },
     { id: 'settings',  Icon: Settings,        label: 'Settings'  },
   ];
   const topTabs = [
     { id: 'home', label: 'Global', subtitle: 'System-wide view and controls', accent: 'neutral' },
-    { id: 'strong', label: 'Strong', subtitle: 'Bootstrap / supervision instance', accent: 'strong' },
-    { id: 'weak', label: 'Weak', subtitle: 'Weak-model execution instance', accent: 'weak' },
+    { id: 'agent', label: 'Agent', subtitle: 'Agent-model execution instance', accent: 'agent' },
+    { id: 'trainer', label: 'Trainer', subtitle: 'Bootstrap / supervision instance', accent: 'trainer' },
   ];
 
   const finishedTaskTree = taskTree.filter(task => ['complete', 'abandoned', 'cancelled'].includes(task.status));
   const activeTaskTree = taskTree.filter(task => !['complete', 'abandoned', 'cancelled'].includes(task.status));
-  const laneVisibleTasks = activeNav === 'chat' && currentScope !== 'home'
-    ? activeTaskTree.filter(task => {
-        const lane = String(task.lane || '').toLowerCase();
-        return !lane || lane === effectiveLane;
+  const scopeFilterLane = currentScope === 'home' ? null : effectiveLane;
+  const scopedActiveTaskTree = scopeFilterLane
+    ? activeTaskTree.filter((task) => {
+        const lane = laneForTask(task);
+        return !lane || lane === scopeFilterLane;
       })
     : activeTaskTree;
-  const laneFinishedTasks = activeNav === 'chat' && currentScope !== 'home'
-    ? finishedTaskTree.filter(task => {
-        const lane = String(task.lane || '').toLowerCase();
-        return !lane || lane === effectiveLane;
+  const scopedFinishedTaskTree = scopeFilterLane
+    ? finishedTaskTree.filter((task) => {
+        const lane = laneForTask(task);
+        return !lane || lane === scopeFilterLane;
       })
+    : finishedTaskTree;
+  const laneVisibleTasks = activeNav === 'chat' && currentScope !== 'home'
+    ? scopedActiveTaskTree
+    : activeTaskTree;
+  const laneFinishedTasks = activeNav === 'chat' && currentScope !== 'home'
+    ? scopedFinishedTaskTree
     : finishedTaskTree;
   const visibleTaskTree = activeNav === 'dashboard' ? taskTree : laneVisibleTasks;
   const visibleSessionList = React.useMemo(() => {
     const list = Array.isArray(sessionList) ? sessionList.slice() : [];
     const drafts = (currentScope === 'home'
-      ? [...(laneDrafts.strong || []), ...(laneDrafts.weak || [])]
+      ? [...(laneDrafts.trainer || []), ...(laneDrafts.agent || [])]
       : (laneDrafts[effectiveLane] || []))
       .slice()
       .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     const persisted = list.filter((session) => {
       if (drafts.some((draft) => draft.session_id === session.session_id)) return false;
       if (currentScope === 'home') return Boolean(explicitLaneForSessionId(session.session_id));
-      return true;
+      return sessionMatchesLane(session.session_id, effectiveLane);
     });
     return [...drafts, ...persisted];
   }, [currentScope, effectiveLane, laneDrafts, sessionList]);
@@ -2312,7 +2497,12 @@ function App() {
       friendlyProviderLabel(route?.provider),
       friendlyModelLabel(route?.selected_model || route?.model),
     ].filter(Boolean);
-    return parts.join(' · ') || 'route pending';
+    if (parts.length) return parts.join(' · ');
+    const laneStatus = laneStatuses?.[lane] || 'IDLE';
+    const tierStatus = tiers?.[lane] || 'unknown';
+    const defaultHint = lane === 'trainer' ? 'cloud preferred' : 'local preferred';
+    if (workerApiStatus === 'ok') return `${defaultHint} · ${laneStatus.toLowerCase()} · tier ${tierStatus}`;
+    return `${defaultHint} · routing unavailable`;
   };
   const pickFocusedTask = (nodes = []) => {
     if (!nodes.length) return null;
@@ -2329,7 +2519,7 @@ function App() {
   const getFocusedTaskPath = (scopeId) => {
     if (scopeId === 'home') return [];
     const scopedTree = activeTaskTree.filter((task) => {
-      const lane = String(task.lane || '').toLowerCase();
+      const lane = laneForTask(task);
       return !lane || lane === scopeId;
     });
     const root = pickFocusedTask(scopedTree);
@@ -2348,13 +2538,13 @@ function App() {
   const buildScopeTaskProgress = (scopeId) => {
     if (scopeId === 'home') {
       const scopedTasks = tasks;
-      const strongActive = tasks.some((task) => String(task.lane || '').toLowerCase() === 'strong' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
-      const weakActive = tasks.some((task) => String(task.lane || '').toLowerCase() === 'weak' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
+      const trainerActive = tasks.some((task) => laneForTask(task) === 'trainer' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
+      const agentActive = tasks.some((task) => laneForTask(task) === 'agent' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
       const blocked = scopedTasks.filter((task) => task.status === 'blocked').length;
       const working = scopedTasks.filter((task) => task.status === 'working').length;
-      const activeLanes = [strongActive, weakActive].filter(Boolean).length;
+      const activeLanes = [trainerActive, agentActive].filter(Boolean).length;
       return {
-        percent: activeLanes === 0 ? 0 : Math.round(((strongActive ? 1 : 0) + (weakActive ? 1 : 0)) / 2 * 100),
+        percent: activeLanes === 0 ? 0 : Math.round(((trainerActive ? 1 : 0) + (agentActive ? 1 : 0)) / 2 * 100),
         summary: `${activeLanes || 0} active lane${activeLanes === 1 ? '' : 's'}`,
         currentTitle: blocked > 0 ? `${blocked} blocked` : working > 0 ? `${working} working` : 'Idle',
         label: blocked > 0 ? `${blocked} blocked` : working > 0 ? `${working} working` : 'Idle',
@@ -2367,7 +2557,7 @@ function App() {
     const path = getFocusedTaskPath(scopeId);
     const root = path[0];
     if (!root) {
-      const blocked = tasks.filter((task) => String(task.lane || '').toLowerCase() === scopeId && task.status === 'blocked').length;
+      const blocked = tasks.filter((task) => laneForTask(task) === scopeId && task.status === 'blocked').length;
       return {
         percent: 0,
         summary: buildLaneMeta(scopeId),
@@ -2457,7 +2647,7 @@ function App() {
         <div className="modal-overlay">
           <div className="modal-content glass">
             <h2>☁️ Cloud Inference Offline</h2>
-            <p>The <b>Strong</b> model tier (OpenRouter) is currently unreachable or missing an API key.</p>
+            <p>The <b>trainer</b> tier is currently unreachable or missing an API key.</p>
             <div className="modal-actions">
               <button 
                 className="secondary" 
@@ -2472,7 +2662,7 @@ function App() {
                 className="primary" 
                 onClick={() => {
                   setShowCloudModal(false);
-                  setCurrentScope('strong');
+                  setCurrentScope('trainer');
                   setActiveNav('settings');
                 }}
               >
@@ -2511,16 +2701,13 @@ function App() {
               <div style={{ fontSize: '16px', fontWeight: 800, letterSpacing: '0.04em', color: '#f0f1f7' }}>
                 Strata
               </div>
-              <div style={{ fontSize: '11px', color: '#7a7e90' }}>
-                Global home and system overview
-              </div>
             </div>
           </button>
           <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
           {topTabs.map((tab) => {
             const active = currentScope === tab.id;
             const showGlobalControls = tab.id === 'home';
-            const isLane = tab.id === 'strong' || tab.id === 'weak';
+            const isLane = tab.id === 'trainer' || tab.id === 'agent';
             const progress = buildScopeTaskProgress(tab.id);
             const agentEnabled = tab.id === 'home'
               ? (workerStatus !== 'PAUSED' && workerStatus !== 'STOPPED')
@@ -2536,8 +2723,8 @@ function App() {
                 status={tab.id === 'home' ? workerStatus : (laneStatuses?.[tab.id] || 'IDLE')}
                 agentEnabled={agentEnabled}
                 agentSuppressedByGlobal={agentSuppressedByGlobal}
-                apiStatus={apiStatus}
-                showControls={apiStatus === 'ok' && (isLane || showGlobalControls)}
+                apiStatus={workerApiStatus}
+                showControls={workerApiStatus === 'ok' && (isLane || showGlobalControls)}
                 progress={progress}
                 onPause={showGlobalControls ? (() => handlePause()) : (isLane ? (() => handlePause(tab.id)) : undefined)}
                 onResume={showGlobalControls ? (() => handleResume()) : (isLane ? (() => handleResume(tab.id)) : undefined)}
@@ -2685,9 +2872,11 @@ function App() {
             ) : (
               <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
                 {activeNav === 'dashboard'
-                  ? (currentScope === 'home' ? 'Strata Home' : `${currentScope === 'strong' ? 'Strong' : 'Weak'} Dashboard`)
+                  ? (currentScope === 'home' ? 'Strata Home' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Dashboard`)
+                  : activeNav === 'tasks'
+                  ? (currentScope === 'home' ? 'Tasks' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Tasks`)
                   : activeNav === 'knowledge'
-                  ? (currentScope === 'home' ? 'Knowledge Base' : `${currentScope === 'strong' ? 'Strong' : 'Weak'} Knowledge`)
+                  ? (currentScope === 'home' ? 'Knowledge Base' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Knowledge`)
                   : 'Settings'}
               </h1>
             )}
@@ -2695,6 +2884,8 @@ function App() {
               <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>
                 {activeNav === 'dashboard'
                 ? (currentScope === 'home' ? 'Shared telemetry, routing, and operator surfaces' : 'Scoped operational telemetry and runtime detail')
+                : activeNav === 'tasks'
+                ? (currentScope === 'home' ? 'Canonical queue, execution, and completion view' : 'Scoped task queue, execution progress, and recent completions')
                 : activeNav === 'knowledge'
                 ? (currentScope === 'home' ? 'Navigable system wiki' : 'Knowledge visible within this scope')
                 : activeNav === 'settings'
@@ -2721,7 +2912,11 @@ function App() {
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <span style={{ fontSize: '11px', color: '#ff4d4d', fontWeight: 600 }}>API DOWN</span>
                 <button 
-                  onClick={() => fetchData(true)}
+                  onClick={() => {
+                    setApiStatus('connecting');
+                    setWorkerApiStatus('connecting');
+                    void Promise.all([fetchWorkerStatus(), fetchData(true)]);
+                  }}
                   style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', color: '#8257e5', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 800, cursor: 'pointer' }}
                 >
                   RECONNECT
@@ -2789,6 +2984,21 @@ function App() {
             selectedSlug={selectedKnowledgeSlug}
             onQueryChange={setKnowledgeQuery}
             onSelectSlug={setSelectedKnowledgeSlug}
+            onCreatePage={handleCreateKnowledgePage}
+            onEditPage={handleEditKnowledgePage}
+            onQueueSource={handleQueueKnowledgeSource}
+          />
+        ) : activeNav === 'tasks' ? (
+          <TasksView
+            currentScope={currentScope}
+            activeTasks={scopedActiveTaskTree}
+            finishedTasks={scopedFinishedTaskTree}
+            workerStatus={workerStatus}
+            laneStatuses={laneStatuses}
+            scopeOperationalMetrics={scopeOperationalMetrics}
+            scopeAttemptMetrics={scopeAttemptMetrics}
+            onArchiveTask={handleArchiveTask}
+            nowMs={activityNowMs}
           />
         ) : activeNav === 'settings' ? (
           <SettingsView
@@ -2827,8 +3037,8 @@ function App() {
                 style={{ textAlign: 'center', color: '#333', marginTop: 'auto', marginBottom: 'auto', padding: '48px 32px' }}
               >
                 <Zap size={32} color="#2a2a35" style={{ margin: '0 auto 16px' }} />
-                <div style={{ fontSize: '15px', fontWeight: 600, color: '#3d3d4d', marginBottom: '6px' }}>Formation at rest</div>
-                <div style={{ fontSize: '13px', color: '#2d2d38' }}>Describe a goal to initialize the formation</div>
+                <div style={{ fontSize: '15px', fontWeight: 600, color: '#3d3d4d', marginBottom: '6px' }}>No messages yet</div>
+                <div style={{ fontSize: '13px', color: '#2d2d38' }}>Describe a goal to get started</div>
               </MotionDiv>
             )}
 
@@ -2857,7 +3067,7 @@ function App() {
         )}
 
         {/* Input bar */}
-        {activeNav !== 'dashboard' && activeNav !== 'knowledge' && (
+        {activeNav === 'chat' && (
         <div style={{ padding: '20px 28px', borderTop: '1px solid rgba(255,255,255,0.05)', flexShrink: 0 }}>
           {sendError && (
             <div style={{ marginBottom: '10px', background: 'rgba(255,92,92,0.08)', border: '1px solid rgba(255,92,92,0.22)', borderRadius: '10px', padding: '10px 12px', color: '#ffb3b3', fontSize: '12px' }}>
@@ -2922,10 +3132,10 @@ function App() {
                         onClick={() => setChatLane(lane)}
                         style={{
                           background: active
-                            ? (lane === 'weak' ? 'rgba(0,187,145,0.2)' : 'rgba(130,87,229,0.22)')
+                            ? (lane === 'agent' ? 'rgba(0,187,145,0.2)' : 'rgba(130,87,229,0.22)')
                             : 'transparent',
                           color: active
-                            ? (lane === 'weak' ? '#baffea' : '#dccfff')
+                            ? (lane === 'agent' ? '#baffea' : '#dccfff')
                             : '#8f94a7',
                           border: 'none',
                           borderRadius: '999px',
@@ -2967,7 +3177,7 @@ function App() {
                 }
               }}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-              placeholder="Describe a goal or intervene…"
+              placeholder="Describe a goal..."
               style={{ flex: 1, background: 'transparent', border: 'none', color: '#edeeef', outline: 'none', fontSize: '14px', lineHeight: 1.5 }}
             />
             <button
@@ -3173,19 +3383,19 @@ const TopModeTab = ({
       inactiveBg: 'rgba(255,255,255,0.04)',
       inactiveBorder: 'rgba(255,255,255,0.12)',
     },
-    strong: {
-      activeBg: 'linear-gradient(135deg, rgba(130,87,229,0.3), rgba(81,117,255,0.18))',
-      activeBorder: 'rgba(130,87,229,0.5)',
-      activeText: '#f3edff',
-      inactiveBg: 'rgba(130,87,229,0.05)',
-      inactiveBorder: 'rgba(130,87,229,0.14)',
+    trainer: {
+      activeBg: 'linear-gradient(135deg, rgba(205,96,52,0.3), rgba(156,63,41,0.18))',
+      activeBorder: 'rgba(235,141,94,0.46)',
+      activeText: '#fff1e8',
+      inactiveBg: 'rgba(205,96,52,0.05)',
+      inactiveBorder: 'rgba(235,141,94,0.14)',
     },
-    weak: {
-      activeBg: 'linear-gradient(135deg, rgba(0,242,148,0.2), rgba(42,179,125,0.16))',
-      activeBorder: 'rgba(0,242,148,0.3)',
-      activeText: '#e9fff7',
-      inactiveBg: 'rgba(0,242,148,0.04)',
-      inactiveBorder: 'rgba(0,242,148,0.12)',
+    agent: {
+      activeBg: 'linear-gradient(135deg, rgba(93,131,137,0.24), rgba(63,112,103,0.18))',
+      activeBorder: 'rgba(146,196,188,0.32)',
+      activeText: '#ebfaf6',
+      inactiveBg: 'rgba(93,131,137,0.05)',
+      inactiveBorder: 'rgba(146,196,188,0.14)',
     },
   };
   const theme = palette[accent] || palette.neutral;
@@ -3199,7 +3409,9 @@ const TopModeTab = ({
   const statusColor = displayStatus === 'PAUSED'
     ? '#ffb84d'
     : displayStatus === 'RUNNING'
-    ? '#00f294'
+    ? accent === 'trainer'
+      ? '#ffb18c'
+      : '#9ad8cd'
     : displayStatus === 'STOPPED'
     ? '#ff4d4d'
     : displayStatus === 'READY'
@@ -3225,21 +3437,29 @@ const TopModeTab = ({
   const agentToggleTrackBorder = agentSuppressedByGlobal
     ? 'rgba(255,255,255,0.14)'
     : agentEnabled
-    ? 'rgba(0,242,148,0.28)'
+    ? accent === 'trainer'
+      ? 'rgba(235,141,94,0.28)'
+      : 'rgba(146,196,188,0.28)'
     : 'rgba(255,255,255,0.14)';
   const agentToggleTrackBg = agentSuppressedByGlobal
     ? 'rgba(255,255,255,0.08)'
     : agentEnabled
-    ? 'rgba(0,242,148,0.16)'
+    ? accent === 'trainer'
+      ? 'rgba(205,96,52,0.16)'
+      : 'rgba(93,131,137,0.16)'
     : 'rgba(255,255,255,0.08)';
   const agentToggleKnobBg = agentSuppressedByGlobal
     ? '#8f94a6'
     : agentEnabled
-    ? '#00f294'
+    ? accent === 'trainer'
+      ? '#ffb18c'
+      : '#9ad8cd'
     : '#b7bbca';
   const agentToggleKnobShadow = agentSuppressedByGlobal || !agentEnabled
     ? 'none'
-    : '0 0 12px rgba(0,242,148,0.3)';
+    : accent === 'trainer'
+    ? '0 0 12px rgba(205,96,52,0.28)'
+    : '0 0 12px rgba(93,131,137,0.28)';
   return (
     <div
       onClick={onClick}
@@ -3338,10 +3558,10 @@ const TopModeTab = ({
                 const segmentPercent = Math.max(0, Math.min(100, Number(segment?.percent || 0)));
                 const segmentTone = segment?.status === 'blocked'
                   ? 'linear-gradient(90deg, rgba(255,184,77,0.96), rgba(255,92,92,0.8))'
-                  : accent === 'weak'
-                  ? 'linear-gradient(90deg, rgba(0,242,148,0.95), rgba(84,244,201,0.82))'
-                  : accent === 'strong'
-                  ? 'linear-gradient(90deg, rgba(167,137,255,0.96), rgba(130,87,229,0.9))'
+                  : accent === 'agent'
+                  ? 'linear-gradient(90deg, rgba(146,196,188,0.95), rgba(93,131,137,0.82))'
+                  : accent === 'trainer'
+                  ? 'linear-gradient(90deg, rgba(255,177,140,0.96), rgba(205,96,52,0.9))'
                   : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))';
                 return (
                   <div
@@ -3375,10 +3595,10 @@ const TopModeTab = ({
                 width: `${progressValue}%`,
                 height: '100%',
                 borderRadius: '999px',
-                background: accent === 'weak'
-                  ? 'linear-gradient(90deg, rgba(0,242,148,0.95), rgba(84,244,201,0.82))'
-                  : accent === 'strong'
-                  ? 'linear-gradient(90deg, rgba(167,137,255,0.96), rgba(130,87,229,0.9))'
+                background: accent === 'agent'
+                  ? 'linear-gradient(90deg, rgba(146,196,188,0.95), rgba(93,131,137,0.82))'
+                  : accent === 'trainer'
+                  ? 'linear-gradient(90deg, rgba(255,177,140,0.96), rgba(205,96,52,0.9))'
                   : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))',
               transition: 'width 0.22s ease',
             }}
@@ -3393,8 +3613,8 @@ const TopModeTab = ({
                   disabled={!taskControlsEnabled}
                   style={{
                     background: agentActivelyRunnable ? 'rgba(0,242,148,0.1)' : 'rgba(255,255,255,0.08)',
-                    border: `1px solid ${agentActivelyRunnable ? 'rgba(0,242,148,0.22)' : 'rgba(255,255,255,0.14)'}`,
-                    color: agentActivelyRunnable ? '#00f294' : '#9ea4b8',
+                    border: `1px solid ${agentActivelyRunnable ? (accent === 'trainer' ? 'rgba(235,141,94,0.24)' : 'rgba(146,196,188,0.24)') : 'rgba(255,255,255,0.14)'}`,
+                    color: agentActivelyRunnable ? (accent === 'trainer' ? '#ffb18c' : '#9ad8cd') : '#9ea4b8',
                     borderRadius: '8px',
                     padding: '4px',
                     cursor: taskControlsEnabled ? 'pointer' : 'default',
@@ -3403,7 +3623,7 @@ const TopModeTab = ({
                     visibility: 'visible',
                   }}
                 >
-                  <Play size={13} fill={agentActivelyRunnable ? '#00f294' : '#9ea4b8'} />
+                  <Play size={13} fill={agentActivelyRunnable ? (accent === 'trainer' ? '#ffb18c' : '#9ad8cd') : '#9ea4b8'} />
                 </button>
               ) : (
                 <button
@@ -3436,14 +3656,14 @@ const LaneToggle = ({ lane, active, onClick, compact = false }) => (
     onClick={onClick}
     style={{
       background: active
-        ? lane === 'strong'
-          ? 'linear-gradient(135deg, rgba(130,87,229,0.26), rgba(81,117,255,0.18))'
-          : 'linear-gradient(135deg, rgba(0,242,148,0.18), rgba(42,179,125,0.14))'
+        ? lane === 'trainer'
+          ? 'linear-gradient(135deg, rgba(205,96,52,0.26), rgba(156,63,41,0.18))'
+          : 'linear-gradient(135deg, rgba(93,131,137,0.22), rgba(63,112,103,0.16))'
         : 'rgba(255,255,255,0.03)',
       border: active
-        ? lane === 'strong'
-          ? '1px solid rgba(130,87,229,0.45)'
-          : '1px solid rgba(0,242,148,0.28)'
+        ? lane === 'trainer'
+          ? '1px solid rgba(235,141,94,0.45)'
+          : '1px solid rgba(146,196,188,0.28)'
         : '1px solid rgba(255,255,255,0.08)',
       color: active ? '#f2f6ff' : '#9a9cad',
       borderRadius: compact ? '12px' : '16px',
@@ -3464,7 +3684,7 @@ const LaneToggle = ({ lane, active, onClick, compact = false }) => (
   >
     <span>{lane}</span>
     <span style={{ fontSize: compact ? '9px' : '10px', letterSpacing: '0.04em', textTransform: 'none', color: active ? 'rgba(242,246,255,0.8)' : '#6f7183', fontWeight: 600 }}>
-      {lane === 'strong' ? 'Bootstrap / high-capacity lane' : 'Weak-model execution lane'}
+      {lane === 'trainer' ? 'Bootstrap / high-capacity lane' : 'Agent-model execution lane'}
     </span>
   </button>
 );
@@ -3498,6 +3718,107 @@ const Sparkline = ({ values, color = '#8257e5' }) => {
   );
 };
 
+const TasksView = ({
+  currentScope,
+  activeTasks,
+  finishedTasks,
+  workerStatus,
+  laneStatuses,
+  scopeOperationalMetrics,
+  scopeAttemptMetrics,
+  onArchiveTask,
+  nowMs,
+}) => {
+  const [showFinished, setShowFinished] = useState(false);
+  const scopeLabel = currentScope === 'home' ? 'Global' : currentScope === 'trainer' ? 'Trainer' : 'Agent';
+  const scopeHealth = currentScope === 'home' ? workerStatus : (laneStatuses?.[currentScope] || 'IDLE');
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.8fr) minmax(280px, 0.95fr)', gap: '18px', alignItems: 'start' }}>
+        <DashboardPanel title="TASK QUEUE">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            <RoutePill label="SCOPE" value={scopeLabel} tone="neutral" />
+            <RoutePill label="HEALTH" value={scopeHealth} tone={scopeHealth === 'RUNNING' ? 'success' : scopeHealth === 'PAUSED' ? 'warning' : 'neutral'} />
+            <RoutePill label="ACTIVE" value={String(activeTasks.length)} tone="success" />
+            <RoutePill label="RECENT" value={String(finishedTasks.length)} tone="neutral" />
+          </div>
+          <div style={{ color: '#8d8ea1', fontSize: '13px', lineHeight: 1.7 }}>
+            This is the canonical task surface: active work stays visible here, recent completions remain easy to inspect, and the lane-specific task rail can stay focused on chat context.
+          </div>
+        </DashboardPanel>
+
+        <DashboardPanel title="TASK TELEMETRY">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
+            <TelemetryCell value={scopeOperationalMetrics.working || '—'} label="RUNNING" />
+            <TelemetryCell value={scopeOperationalMetrics.queued || '—'} label="QUEUED" />
+            <TelemetryCell value={scopeOperationalMetrics.blocked || '—'} label="BLOCKED" />
+            <TelemetryCell value={scopeOperationalMetrics.needsYou || '—'} label="NEEDS YOU" />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px' }}>
+            <TelemetryCell value={scopeAttemptMetrics.success10 || '—'} label="LAST 10" />
+            <TelemetryCell value={scopeAttemptMetrics.success50 || '—'} label="LAST 50" />
+            <TelemetryCell value={scopeAttemptMetrics.averageDurationLabel || '—'} label="AVG ATTEMPT" />
+          </div>
+        </DashboardPanel>
+      </div>
+
+      <DashboardPanel title="ACTIVE TASKS">
+        {activeTasks.length ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {activeTasks.map((task) => (
+              <TaskCard key={task.id} task={task} onArchive={() => onArchiveTask(task.id)} nowMs={nowMs} />
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: '13px', color: '#8d8ea1', lineHeight: 1.7 }}>
+            No active tasks in this scope right now.
+          </div>
+        )}
+      </DashboardPanel>
+
+      <DashboardPanel title="RECENT COMPLETIONS">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+          <div style={{ fontSize: '13px', color: '#8d8ea1' }}>
+            Finished, abandoned, and cancelled work stays here until you archive it.
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowFinished((value) => !value)}
+            style={{
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              borderRadius: '10px',
+              color: '#d7d9e6',
+              fontSize: '11px',
+              fontWeight: 800,
+              letterSpacing: '0.06em',
+              padding: '8px 10px',
+              cursor: 'pointer',
+              textTransform: 'uppercase',
+            }}
+          >
+            {showFinished ? 'Hide' : 'Show'} {finishedTasks.length}
+          </button>
+        </div>
+        {showFinished ? (
+          finishedTasks.length ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {finishedTasks.map((task) => (
+                <TaskCard key={task.id} task={task} onArchive={() => onArchiveTask(task.id)} nowMs={nowMs} />
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: '13px', color: '#8d8ea1', lineHeight: 1.7 }}>
+              No recent finished tasks yet.
+            </div>
+          )
+        ) : null}
+      </DashboardPanel>
+    </div>
+  );
+};
+
 const KnowledgeView = ({
   pages,
   query,
@@ -3505,31 +3826,56 @@ const KnowledgeView = ({
   selectedSlug,
   onQueryChange,
   onSelectSlug,
+  onCreatePage,
+  onEditPage,
+  onQueueSource,
 }) => {
+  const [knowledgeMode, setKnowledgeMode] = useState('wiki');
   const relatedPages = selectedPage?.related_pages || [];
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: '0', minHeight: 0 }}>
       <div style={{ borderRight: '1px solid rgba(255,255,255,0.05)', background: '#0d0d11', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{ padding: '20px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <div style={{ fontSize: '11px', color: '#7f8091', letterSpacing: '0.12em', fontWeight: 800 }}>KNOWLEDGE INDEX</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '10px 12px' }}>
-            <Search size={15} color="#696a7b" />
-            <input
-              type="text"
-              value={query}
-              onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="Search titles, tags, aliases..."
-              style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px' }}
-            />
+          <div style={{ fontSize: '11px', color: '#7f8091', letterSpacing: '0.12em', fontWeight: 800 }}>
+            {knowledgeMode === 'wiki' ? 'KNOWLEDGE WIKI' : 'KNOWLEDGE SOURCES'}
+          </div>
+          <div style={{ display: 'inline-flex', borderRadius: '14px', padding: '4px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', gap: '4px' }}>
+            {[
+              { id: 'wiki', label: 'Wiki' },
+              { id: 'sources', label: 'Sources' },
+            ].map((mode) => {
+              const active = knowledgeMode === mode.id;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => setKnowledgeMode(mode.id)}
+                  style={{
+                    background: active ? 'rgba(130,87,229,0.18)' : 'transparent',
+                    border: 'none',
+                    borderRadius: '10px',
+                    color: active ? '#f1e8ff' : '#8d8ea1',
+                    padding: '8px 12px',
+                    fontSize: '12px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {mode.label}
+                </button>
+              );
+            })}
           </div>
           <div style={{ fontSize: '12px', color: '#8d8ea1' }}>
-            {pages.length ? `${pages.length} page${pages.length === 1 ? '' : 's'} visible` : 'No indexed pages yet'}
+            {knowledgeMode === 'wiki'
+              ? (pages.length ? `${pages.length} page${pages.length === 1 ? '' : 's'} visible` : 'No indexed pages yet')
+              : 'Source uploads and raw material should land here before integration.'}
           </div>
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px' }}>
-          {pages.map((page) => {
+          {knowledgeMode === 'wiki' && pages.map((page) => {
             const active = page.slug === selectedSlug;
             return (
               <button
@@ -3563,16 +3909,92 @@ const KnowledgeView = ({
             );
           })}
 
-          {!pages.length && (
+          {knowledgeMode === 'wiki' && !pages.length && (
             <div style={{ padding: '18px 12px', color: '#8d8ea1', fontSize: '12px', lineHeight: 1.6 }}>
               Strata supports synthesized knowledge pages, but there are no indexed wiki pages yet. Once pages are compacted or written into the knowledge store, they will show up here.
+            </div>
+          )}
+
+          {knowledgeMode === 'sources' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '10px' }}>
+              <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '14px', padding: '14px' }}>
+                <div style={{ color: '#edeeef', fontSize: '13px', fontWeight: 700, marginBottom: '6px' }}>Raw source staging</div>
+                <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.6 }}>
+                  Uploaded files, notes, and unstructured artifacts should land here first. Integration into the canonical wiki should be queued, reviewed, and compacted separately.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onQueueSource}
+                style={{
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: '12px',
+                  padding: '12px 14px',
+                  color: '#edeeef',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                }}
+              >
+                Add source note and queue integration
+              </button>
             </div>
           )}
         </div>
       </div>
 
       <div style={{ minWidth: 0, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-        {selectedPage ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 'min(460px, 100%)', flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px', padding: '12px 14px', minWidth: 'min(460px, 100%)', flex: 1 }}>
+              <Search size={15} color="#696a7b" />
+              <input
+                type="text"
+                value={query}
+                onChange={(event) => onQueryChange(event.target.value)}
+                placeholder={knowledgeMode === 'wiki' ? 'Search titles, tags, aliases...' : 'Search sources coming soon...'}
+                disabled={knowledgeMode !== 'wiki'}
+                style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px', opacity: knowledgeMode === 'wiki' ? 1 : 0.5 }}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {knowledgeMode === 'wiki' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={onCreatePage}
+                  style={{ background: 'rgba(130,87,229,0.18)', border: '1px solid rgba(130,87,229,0.28)', color: '#f1e8ff', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                >
+                  <Plus size={14} />
+                  Add Page
+                </button>
+                <button
+                  type="button"
+                  onClick={onEditPage}
+                  disabled={!selectedPage}
+                  style={{ background: selectedPage ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)', color: selectedPage ? '#edeeef' : '#666a78', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: selectedPage ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: '8px' }}
+                >
+                  <Pencil size={14} />
+                  Edit Page
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={onQueueSource}
+                style={{ background: 'rgba(0,187,145,0.16)', border: '1px solid rgba(0,187,145,0.28)', color: '#d9fff6', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                <Plus size={14} />
+                Add Source
+              </button>
+            )}
+          </div>
+        </div>
+
+        {knowledgeMode === 'wiki' && selectedPage ? (
           <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
@@ -3644,12 +4066,20 @@ const KnowledgeView = ({
               )}
             </DashboardPanel>
           </>
-        ) : (
+        ) : knowledgeMode === 'wiki' ? (
           <div style={{ margin: 'auto 0', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', textAlign: 'center' }}>
             <BookOpen size={34} color="#2f3040" />
             <div style={{ fontSize: '18px', fontWeight: 700, color: '#c7c8d6' }}>Knowledge wiki is ready</div>
             <div style={{ maxWidth: '520px', fontSize: '14px', lineHeight: 1.7, color: '#8d8ea1' }}>
               This view is wired up, but the indexed knowledge store is currently empty. Once Strata writes or compacts pages into the knowledge base, they will be navigable here like a wiki.
+            </div>
+          </div>
+        ) : (
+          <div style={{ margin: 'auto 0', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', textAlign: 'center' }}>
+            <BookOpen size={34} color="#2f3040" />
+            <div style={{ fontSize: '18px', fontWeight: 700, color: '#c7c8d6' }}>Sources staging area</div>
+            <div style={{ maxWidth: '620px', fontSize: '14px', lineHeight: 1.7, color: '#8d8ea1' }}>
+              Treat sources as the raw intake layer: files, notes, and references land here first, then a queued integration pass distills them into canonical knowledge pages. File upload is the natural next step for this surface.
             </div>
           </div>
         )}
@@ -3687,14 +4117,14 @@ const DashboardView = ({
   onQueueSampleTick,
   onResolveSpecProposal,
 }) => {
-  const scopeLabel = currentScope === 'home' ? 'Global' : currentScope === 'strong' ? 'Strong' : 'Weak';
+  const scopeLabel = currentScope === 'home' ? 'Global' : currentScope === 'trainer' ? 'Trainer' : 'Agent';
   const scopeHealthLabel = currentScope === 'home'
     ? (routingSummary?.supervision?.active_jobs?.length ? 'Supervising' : 'Idle')
     : activeChatRoute?.status || 'unknown';
   const primaryDomainRatings = Object.entries(variantRatingsSnapshot?.by_domain?.['eval_harness_full_eval:bootstrap_mcq_v1'] || {})
     .sort((a, b) => (b[1]?.rating || 0) - (a[1]?.rating || 0))
     .slice(0, 5);
-  const strongTrust = predictionTrustSnapshot?.by_tier?.strong;
+  const strongTrust = predictionTrustSnapshot?.by_tier?.trainer;
   const bootstrapPolicy = proposalConfigSnapshot?.bootstrap || {};
   const bootstrapInference = proposalConfigSnapshot?.inference || {};
   const bootstrapResolution = proposalConfigSnapshot?.resolution || {};
@@ -3749,7 +4179,7 @@ const DashboardView = ({
               {variant.latest_latency_s ? `${variant.latest_latency_s}s` : '—'}
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <Sparkline values={accuracySeries} color={variant.mode === 'strong' ? '#00f294' : '#8257e5'} />
+              <Sparkline values={accuracySeries} color={variant.mode === 'trainer' ? '#00f294' : '#8257e5'} />
             </div>
           </div>
         );
@@ -3788,13 +4218,13 @@ const DashboardView = ({
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
           {activeChatRoute?.error ? activeChatRoute.error : `${chatLane} · ${activeChatRoute?.transport || activeChatRoute?.mode || '—'} · ${activeChatRoute?.provider || '—'} · ${activeChatRoute?.selected_model || activeChatRoute?.model || '—'}`}
         </span>
-        <span style={{ color: '#8d8ea1' }}>Strong tier</span>
+        <span style={{ color: '#8d8ea1' }}>Trainer tier</span>
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
-          {routingSummary?.strong?.error ? routingSummary.strong.error : `${routingSummary?.strong?.transport || '—'} · ${routingSummary?.strong?.provider || '—'} · ${routingSummary?.strong?.selected_model || routingSummary?.strong?.model || '—'} (${routingSummary?.strong?.status || 'unknown'})`}
+          {routingSummary?.trainer?.error ? routingSummary.trainer.error : `${routingSummary?.trainer?.transport || '—'} · ${routingSummary?.trainer?.provider || '—'} · ${routingSummary?.trainer?.selected_model || routingSummary?.trainer?.model || '—'} (${routingSummary?.trainer?.status || 'unknown'})`}
         </span>
-        <span style={{ color: '#8d8ea1' }}>Weak tier</span>
+        <span style={{ color: '#8d8ea1' }}>Agent tier</span>
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
-          {routingSummary?.weak?.error ? routingSummary.weak.error : `${routingSummary?.weak?.transport || '—'} · ${routingSummary?.weak?.provider || '—'} · ${routingSummary?.weak?.selected_model || routingSummary?.weak?.model || '—'} (${routingSummary?.weak?.status || 'unknown'})`}
+          {routingSummary?.agent?.error ? routingSummary.agent.error : `${routingSummary?.agent?.transport || '—'} · ${routingSummary?.agent?.provider || '—'} · ${routingSummary?.agent?.selected_model || routingSummary?.agent?.model || '—'} (${routingSummary?.agent?.status || 'unknown'})`}
         </span>
         <span style={{ color: '#8d8ea1' }}>Supervision</span>
         <span style={{ color: '#e7e8ef' }}>
@@ -3821,7 +4251,7 @@ const DashboardView = ({
         </span>
         <span style={{ color: '#8d8ea1' }}>Proposal temps</span>
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
-          weak {bootstrapInference?.weak?.temperature ?? '—'} · strong {bootstrapInference?.strong?.temperature ?? '—'}
+          agent {bootstrapInference?.agent?.temperature ?? '—'} · trainer {bootstrapInference?.trainer?.temperature ?? '—'}
         </span>
         <span style={{ color: '#8d8ea1' }}>Novelty retry</span>
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
@@ -4074,7 +4504,7 @@ const DashboardView = ({
 
     <DashboardPanel title="PREDICTION TRUST">
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-        <TelemetryCell value={strongTrust ? strongTrust.trust.toFixed(3) : '—'} label="STRONG TRUST" />
+        <TelemetryCell value={strongTrust ? strongTrust.trust.toFixed(3) : '—'} label="TRAINER TRUST" />
         <TelemetryCell value={strongTrust?.count ?? '—'} label="JUDGMENTS" />
         <TelemetryCell value={Object.keys(predictionTrustSnapshot?.by_failure_family || {}).length || '—'} label="FAIL FAMILIES" />
       </div>

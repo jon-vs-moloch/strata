@@ -25,7 +25,7 @@ class ModelPool(BaseModel):
     """
     @summary Filtered collection of model endpoints for a specific execution tier.
     """
-    name: str = Field(..., description="Name of the pool (e.g., 'strong', 'weak').")
+    name: str = Field(..., description="Name of the pool (e.g., 'trainer', 'agent').")
     allow_cloud: bool = Field(True, description="Whether cloud-backed endpoints are allowed by default for this pool.")
     allow_local: bool = Field(True, description="Whether local endpoints are allowed by default for this pool.")
     preferred_transport: Optional[Literal["local", "cloud"]] = Field(

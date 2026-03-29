@@ -26,7 +26,7 @@ def test_extract_json_object_handles_fenced_json():
 def test_generate_eval_candidate_from_tier_falls_back_on_malformed_json():
     async def run():
         result = await generate_eval_candidate_from_tier(
-            "weak",
+            "agent",
             {"system_prompt": "base prompt", "context_files": ["README.md"]},
             lambda: DummyAdapter(),
         )
@@ -50,10 +50,10 @@ def test_summarize_eval_variant_metrics_groups_latest_and_series():
             self.model_id = details.get("variant_id")
 
     rows = [
-        Row("eval_sample_tick_accuracy", 0.4, 1, {"variant_id": "weak_raw_model", "mode": "weak", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
-        Row("eval_sample_tick_accuracy", 0.6, 2, {"variant_id": "weak_raw_model", "mode": "weak", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
-        Row("eval_sample_tick_latency_s", 12.0, 2, {"variant_id": "weak_raw_model", "mode": "weak", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
-        Row("eval_sample_tick_accuracy", 0.8, 3, {"variant_id": "weak_harness_no_capes", "mode": "weak", "profile": "harness_no_capes", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_accuracy", 0.4, 1, {"variant_id": "weak_raw_model", "mode": "agent", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_accuracy", 0.6, 2, {"variant_id": "weak_raw_model", "mode": "agent", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_latency_s", 12.0, 2, {"variant_id": "weak_raw_model", "mode": "agent", "profile": "raw_model", "suite_name": "mmlu_mini_v1", "include_context": False}),
+        Row("eval_sample_tick_accuracy", 0.8, 3, {"variant_id": "weak_harness_no_capes", "mode": "agent", "profile": "harness_no_capes", "suite_name": "mmlu_mini_v1", "include_context": False}),
     ]
 
     summary = summarize_eval_variant_metrics(rows, series_limit=5)

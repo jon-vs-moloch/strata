@@ -178,14 +178,14 @@ class EvaluationPipeline:
         
         # Determine execution context details for metrics
         run_mode = "normal"
-        ctx_mode = "strong"
+        ctx_mode = "trainer"
         change_id = None
         if self.context:
             run_mode = getattr(self.context, "run_mode", "normal") if hasattr(self.context, "run_mode") else "normal"
             # If our context doesn't have run_mode, maybe it has evaluation_run flag
             if getattr(self.context, "evaluation_run", False):
                 run_mode = "weak_eval"
-            ctx_mode = getattr(self.context, "mode", "strong")
+            ctx_mode = getattr(self.context, "mode", "trainer")
             change_id = getattr(self.context, "candidate_change_id", None)
         
         # 1. Read candidate content

@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import asyncio
 
-from strata.orchestrator.background import BackgroundWorker
+from strata.orchestrator.background import BackgroundWorker, resolution_from_plan_review
 from strata.storage.models import Base, TaskState
 from strata.storage.services.main import StorageManager
 
@@ -37,14 +37,14 @@ def test_background_worker_can_pause_and_resume_individual_lanes():
     worker = BackgroundWorker(storage_factory=make_storage, model_adapter=DummyModel())
     worker._running = True
 
-    worker.pause("weak")
+    worker.pause("agent")
 
-    assert worker.lane_status("weak") == "PAUSED"
-    assert worker.lane_status("strong") == "IDLE"
+    assert worker.lane_status("agent") == "PAUSED"
+    assert worker.lane_status("trainer") == "IDLE"
 
-    worker.resume("weak")
+    worker.resume("agent")
 
-    assert worker.lane_status("weak") == "IDLE"
+    assert worker.lane_status("agent") == "IDLE"
 
 
 def test_background_worker_stop_current_respects_lane_scope():
@@ -59,11 +59,11 @@ def test_background_worker_stop_current_respects_lane_scope():
 
     process = StubProcess()
     worker._current_process = process
-    worker._current_task_lane = "strong"
+    worker._current_task_lane = "trainer"
 
-    assert worker.stop_current("weak") is False
+    assert worker.stop_current("agent") is False
     assert process.cancelled is False
-    assert worker.stop_current("strong") is True
+    assert worker.stop_current("trainer") is True
     assert process.cancelled is True
 
 
@@ -73,9 +73,9 @@ def test_background_worker_task_controls_pause_resume_and_cancel():
     task = storage.tasks.create(
         title="Inspect user profile",
         description="Update profile knowledge.",
-        session_id="weak:default",
+        session_id="agent:default",
         state=TaskState.PENDING,
-        constraints={"lane": "weak"},
+        constraints={"lane": "agent"},
     )
     storage.commit()
     task_id = task.task_id
@@ -114,58 +114,58 @@ def test_background_worker_task_controls_pause_resume_and_cancel():
 def test_background_worker_enqueue_runnable_tasks_respects_lane_and_paused_state():
     storage_factory = make_storage_factory()
     storage = storage_factory()
-    strong_task = storage.tasks.create(
-        title="Strong task",
-        description="Do strong work.",
-        session_id="strong:default",
+    trainer_task = storage.tasks.create(
+        title="Trainer task",
+        description="Do trainer work.",
+        session_id="trainer:default",
         state=TaskState.PENDING,
-        constraints={"lane": "strong"},
+        constraints={"lane": "trainer"},
     )
-    weak_task = storage.tasks.create(
-        title="Weak task",
-        description="Do weak work.",
-        session_id="weak:default",
+    agent_task = storage.tasks.create(
+        title="Agent task",
+        description="Do agent work.",
+        session_id="agent:default",
         state=TaskState.PENDING,
-        constraints={"lane": "weak", "paused": True},
+        constraints={"lane": "agent", "paused": True},
     )
     storage.commit()
-    strong_task_id = strong_task.task_id
-    weak_task_id = weak_task.task_id
+    trainer_task_id = trainer_task.task_id
+    agent_task_id = agent_task.task_id
     storage.close()
 
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
 
-    enqueued = asyncio.run(worker.enqueue_runnable_tasks("strong"))
+    enqueued = asyncio.run(worker.enqueue_runnable_tasks("trainer"))
     assert enqueued == 1
 
     queued = []
     while not worker._queue.empty():
         queued.append(worker._queue.get_nowait())
 
-    assert strong_task_id in queued
-    assert weak_task_id not in queued
+    assert trainer_task_id in queued
+    assert agent_task_id not in queued
 
 
 def test_lane_idle_policies_seed_strong_supervision_independently(monkeypatch):
     storage_factory = make_storage_factory()
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
-    worker._tier_health["Strong"] = "ok"
+    worker._tier_health["trainer"] = "ok"
 
     calls = []
 
     async def fake_supervision(*_args, **kwargs):
-        calls.append("strong")
+        calls.append("trainer")
         return {"status": "queued", "task_id": "bootstrap-job"}
 
     async def fake_idle_tasks(*_args, **_kwargs):
-        calls.append("weak")
+        calls.append("agent")
 
     monkeypatch.setattr("strata.orchestrator.background.ensure_continuous_supervision_job", fake_supervision)
     monkeypatch.setattr("strata.orchestrator.background.run_idle_tasks", fake_idle_tasks)
 
     asyncio.run(worker._ensure_lane_idle_policies({"automatic_task_generation": False, "testing_mode": False}))
 
-    assert calls == ["strong"]
+    assert calls == ["trainer"]
 
 
 def test_lane_idle_policies_can_seed_weak_even_when_other_lane_is_busy(monkeypatch):
@@ -173,30 +173,46 @@ def test_lane_idle_policies_can_seed_weak_even_when_other_lane_is_busy(monkeypat
     storage = storage_factory()
     strong_task = storage.tasks.create(
         title="Bootstrap Cycle",
-        description="Strong supervision task.",
-        session_id="strong:default",
+        description="Trainer supervision task.",
+        session_id="trainer:default",
         state=TaskState.WORKING,
-        constraints={"lane": "strong"},
+        constraints={"lane": "trainer"},
     )
     storage.commit()
     assert strong_task.task_id
+
     storage.close()
 
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
-    worker._tier_health["Strong"] = "ok"
+    worker._tier_health["trainer"] = "ok"
 
     calls = []
 
     async def fake_supervision(*_args, **kwargs):
-        calls.append("strong")
+        calls.append("trainer")
         return None
 
     async def fake_idle_tasks(*_args, **_kwargs):
-        calls.append("weak")
+        calls.append("agent")
 
     monkeypatch.setattr("strata.orchestrator.background.ensure_continuous_supervision_job", fake_supervision)
     monkeypatch.setattr("strata.orchestrator.background.run_idle_tasks", fake_idle_tasks)
 
     asyncio.run(worker._ensure_lane_idle_policies({"automatic_task_generation": True, "testing_mode": False}))
 
-    assert calls == ["weak"]
+    assert calls == ["agent"]
+
+
+def test_resolution_from_plan_review_honors_structural_recommendation():
+    resolution = resolution_from_plan_review(
+        {
+            "plan_health": "degraded",
+            "recommendation": "decompose",
+            "confidence": 0.92,
+            "rationale": "The task should be broken into smaller steps.",
+        }
+    )
+
+    assert resolution is not None
+    assert resolution.resolution == "decompose"
+    assert resolution.reasoning == "The task should be broken into smaller steps."

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from strata.eval.harness_eval import run_harness_response
 from strata.models.adapter import ModelAdapter
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 from strata.orchestrator.worker.telemetry import record_metric
 
 
@@ -99,7 +99,7 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
 
 
 async def _run_direct_baseline(adapter: ModelAdapter, prompt: str) -> tuple[str, float]:
-    adapter.bind_execution_context(WeakExecutionContext(run_id=f"baseline_{int(time.time() * 1000)}"))
+    adapter.bind_execution_context(AgentExecutionContext(run_id=f"baseline_{int(time.time() * 1000)}"))
     started_at = time.perf_counter()
     response = await adapter.chat(
         [{"role": "user", "content": prompt}],
@@ -110,7 +110,7 @@ async def _run_direct_baseline(adapter: ModelAdapter, prompt: str) -> tuple[str,
 
 
 async def _judge_pair(adapter: ModelAdapter, prompt: str, baseline: str, harness: str) -> Dict[str, Any]:
-    adapter.bind_execution_context(StrongExecutionContext(run_id=f"judge_{int(time.time() * 1000)}"))
+    adapter.bind_execution_context(TrainerExecutionContext(run_id=f"judge_{int(time.time() * 1000)}"))
     judge_prompt = f"""
 You are judging two answers to the same benchmark prompt for the Strata harness.
 Evaluate which answer is better for usefulness, alignment with the user's request,
@@ -263,7 +263,7 @@ def persist_benchmark_report(
             model_id=model_id,
             task_type="BENCHMARK",
             run_mode=run_mode,
-            execution_context="weak",
+            execution_context="agent",
             candidate_change_id=candidate_change_id,
             details={**details, "variant_assignment": variant_assignment},
         )
@@ -287,7 +287,7 @@ def persist_benchmark_report(
             model_id=model_id,
             task_type="BENCHMARK",
             run_mode=run_mode,
-            execution_context="weak",
+            execution_context="agent",
             candidate_change_id=candidate_change_id,
             details=details,
         )

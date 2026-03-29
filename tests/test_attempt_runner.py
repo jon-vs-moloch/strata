@@ -30,10 +30,10 @@ def test_failed_attempt_is_closed_when_task_body_raises(monkeypatch):
     task = storage.tasks.create(
         title="Research task",
         description="Find the answer.",
-        session_id="weak:default",
+        session_id="agent:default",
         state=TaskState.PENDING,
         type=TaskType.RESEARCH,
-        constraints={"lane": "weak"},
+        constraints={"lane": "agent"},
     )
     storage.commit()
 

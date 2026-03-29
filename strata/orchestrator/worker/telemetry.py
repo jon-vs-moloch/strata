@@ -69,7 +69,7 @@ async def synthesize_model_performance(storage_factory):
         )
         
         # 2. Advanced Weak-Model Capability Metrics
-        # (Assuming 'weak' models are identified by name, e.g., 'gpt-3.5-turbo' or 'hermes')
+        # (Assuming 'agent' models are identified by name, e.g., 'gpt-3.5-turbo' or 'hermes')
         # For now we'll just report on all models.
         
         total_attempts = storage.session.query(func.count(AttemptModel.attempt_id)).scalar() or 0
@@ -192,7 +192,7 @@ def build_telemetry_snapshot(storage, limit: int = 25) -> dict:
             func.count(MetricModel.id).label("count"),
             func.avg(MetricModel.value).label("avg_value"),
         )
-        .filter(MetricModel.execution_context == "weak")
+        .filter(MetricModel.execution_context == "agent")
         .group_by(MetricModel.metric_name)
         .order_by(desc("count"))
         .all()
@@ -230,7 +230,7 @@ def build_telemetry_snapshot(storage, limit: int = 25) -> dict:
                 "last_seen": row.last_seen.isoformat() if getattr(row, "last_seen", None) else None,
             }
         for group in archived_groups:
-            if weak_only and group.get("execution_context") != "weak":
+            if weak_only and group.get("execution_context") != "agent":
                 continue
             metric_name = group.get("metric_name")
             if not metric_name:

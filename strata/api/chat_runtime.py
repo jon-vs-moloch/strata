@@ -17,7 +17,7 @@ from strata.api.chat_tool_executor import ChatToolExecutor
 from strata.context.loaded_files import build_loaded_context_block
 from strata.core.lanes import infer_lane_from_session_id
 from strata.models.adapter import ModelAdapter
-from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 
 
 class ChatRuntime:
@@ -90,6 +90,7 @@ class ChatRuntime:
                 {
                     "id": task.task_id,
                     "parent_id": task.parent_task_id,
+                    "session_id": task.session_id,
                     "title": task.title,
                     "description": task.description,
                     "status": task.state.value.lower(),
@@ -335,7 +336,7 @@ Available Tools:
         source_kind: str = "chat_reply",
         urgency: str = "normal",
     ) -> Dict[str, Any]:
-        lane = infer_lane_from_session_id(session_id) or "strong"
+        lane = infer_lane_from_session_id(session_id) or "trainer"
         decision = build_communication_decision(
             role="assistant",
             content=content,
@@ -357,19 +358,19 @@ Available Tools:
         await self.deps["broadcast_event"]({"type": "message", "session_id": session_id})
         return result
 
-    async def run_chat_tool_loop(self, storage, *, session_id: str, content: str, preferred_tier: str = "strong"):
-        preferred_tier = str(preferred_tier or "strong").lower()
+    async def run_chat_tool_loop(self, storage, *, session_id: str, content: str, preferred_tier: str = "trainer"):
+        preferred_tier = str(preferred_tier or "trainer").lower()
         chat_context = (
-            WeakExecutionContext(run_id=f"chat:{session_id}")
-            if preferred_tier == "weak"
-            else StrongExecutionContext(run_id=f"chat:{session_id}")
+            AgentExecutionContext(run_id=f"chat:{session_id}")
+            if preferred_tier == "agent"
+            else TrainerExecutionContext(run_id=f"chat:{session_id}")
         )
         chat_adapter = ModelAdapter(context=chat_context)
         chat_adapter._selected_models = dict(getattr(self.deps["model_adapter"], "_selected_models", {}))
-        weak_fallback_adapter = ModelAdapter(context=WeakExecutionContext(run_id=f"chat-weak:{session_id}"))
-        weak_fallback_adapter._selected_models = dict(chat_adapter._selected_models)
+        agent_fallback_adapter = ModelAdapter(context=AgentExecutionContext(run_id=f"chat-agent:{session_id}"))
+        agent_fallback_adapter._selected_models = dict(chat_adapter._selected_models)
         active_adapter = chat_adapter
-        downgraded_to_weak = preferred_tier == "weak"
+        downgraded_to_agent = preferred_tier == "agent"
         pending_question = self.deps["get_active_question"](storage, session_id)
         messages, active_tools, knowledge_pages, pending_question = self.build_chat_messages(
             storage, session_id=session_id, content=content, pending_question=pending_question
@@ -389,29 +390,29 @@ Available Tools:
                         {
                             "role": "system",
                             "content": (
-                                "The selected strong-tier model rejected tool calling for this request. "
+                                "The selected trainer model rejected tool calling for this request. "
                                 "Answer directly without tools."
                             ),
                         }
                     )
                     continue
                 if (
-                    not downgraded_to_weak
+                    not downgraded_to_agent
                     and active_adapter is chat_adapter
                     and (
                         "Developer instruction is not enabled" in error_message
                         or "Function calling is not enabled" in error_message
                     )
                 ):
-                    downgraded_to_weak = True
-                    active_adapter = weak_fallback_adapter
+                    downgraded_to_agent = True
+                    active_adapter = agent_fallback_adapter
                     active_tools = []
                     messages.append(
                         {
                             "role": "system",
                             "content": (
-                                "The configured strong-tier chat route rejected the current instruction/tool format. "
-                                "Continue this reply on the weak tier without tools, and keep the answer concise."
+                                "The configured trainer chat route rejected the current instruction or tool format. "
+                                "Continue this reply on the agent tier without tools, and keep the answer concise."
                             ),
                         }
                     )

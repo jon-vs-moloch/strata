@@ -57,21 +57,21 @@ def test_list_tasks_payload_filters_by_lane_metadata():
     storage.tasks.create(
         title="Weak Task",
         description="lane weak",
-        session_id="weak:default",
+        session_id="agent:default",
         state=TaskState.PENDING,
-        constraints={"lane": "weak"},
+        constraints={"lane": "agent"},
     )
     storage.tasks.create(
         title="Strong Task",
         description="lane strong",
-        session_id="strong:default",
+        session_id="trainer:default",
         state=TaskState.PENDING,
-        constraints={"lane": "strong"},
+        constraints={"lane": "trainer"},
     )
     storage.commit()
 
-    weak_tasks = runtime.list_tasks_payload(storage, lane="weak")
-    strong_tasks = runtime.list_tasks_payload(storage, lane="strong")
+    weak_tasks = runtime.list_tasks_payload(storage, lane="agent")
+    strong_tasks = runtime.list_tasks_payload(storage, lane="trainer")
 
     assert [task["title"] for task in weak_tasks] == ["Weak Task"]
     assert [task["title"] for task in strong_tasks] == ["Strong Task"]
@@ -84,16 +84,16 @@ def test_list_tasks_payload_infers_lane_from_session_when_missing():
     storage.tasks.create(
         title="Inferred Weak Task",
         description="inferred lane",
-        session_id="weak:session-1",
+        session_id="agent:session-1",
         state=TaskState.PENDING,
         constraints={},
     )
     storage.commit()
 
-    weak_tasks = runtime.list_tasks_payload(storage, lane="weak")
+    weak_tasks = runtime.list_tasks_payload(storage, lane="agent")
 
     assert len(weak_tasks) == 1
-    assert weak_tasks[0]["lane"] == "weak"
+    assert weak_tasks[0]["lane"] == "agent"
 
 
 def test_task_repository_inherits_lane_from_parent_task():
@@ -102,9 +102,9 @@ def test_task_repository_inherits_lane_from_parent_task():
     parent = storage.tasks.create(
         title="Parent Strong Task",
         description="parent",
-        session_id="weak:session-1",
+        session_id="agent:session-1",
         state=TaskState.PENDING,
-        constraints={"lane": "strong"},
+        constraints={"lane": "trainer"},
     )
     child = storage.tasks.create(
         title="Child Task",
@@ -115,40 +115,40 @@ def test_task_repository_inherits_lane_from_parent_task():
     )
     storage.commit()
 
-    assert child.constraints["lane"] == "strong"
+    assert child.constraints["lane"] == "trainer"
 
 
 def test_session_summaries_filter_by_lane():
     storage = make_storage()
 
-    storage.messages.create(role="user", content="weak lane", session_id="weak:default")
-    storage.messages.create(role="user", content="strong lane", session_id="strong:default")
+    storage.messages.create(role="user", content="weak lane", session_id="agent:default")
+    storage.messages.create(role="user", content="strong lane", session_id="trainer:default")
     storage.commit()
 
-    weak_sessions = storage.messages.get_session_summaries(lane="weak")
-    strong_sessions = storage.messages.get_session_summaries(lane="strong")
+    weak_sessions = storage.messages.get_session_summaries(lane="agent")
+    strong_sessions = storage.messages.get_session_summaries(lane="trainer")
 
-    assert [item["session_id"] for item in weak_sessions] == ["weak:default"]
-    assert [item["session_id"] for item in strong_sessions] == ["strong:default"]
+    assert [item["session_id"] for item in weak_sessions] == ["agent:default"]
+    assert [item["session_id"] for item in strong_sessions] == ["trainer:default"]
 
 
 def test_canonical_session_id_for_lane_rehomes_unscoped_or_mismatched_sessions():
-    assert canonical_session_id_for_lane("weak", None) == "weak:default"
-    assert canonical_session_id_for_lane("weak", "default") == "weak:default"
-    assert canonical_session_id_for_lane("weak", "session-123") == "weak:session-123"
-    assert canonical_session_id_for_lane("strong", "weak:session-123") == "strong:session-123"
+    assert canonical_session_id_for_lane("agent", None) == "agent:default"
+    assert canonical_session_id_for_lane("agent", "default") == "agent:default"
+    assert canonical_session_id_for_lane("agent", "session-123") == "agent:session-123"
+    assert canonical_session_id_for_lane("trainer", "agent:session-123") == "trainer:session-123"
 
 
 def test_ensure_generated_session_title_persists_metadata():
     storage = make_storage()
-    storage.messages.create(role="user", content="Help me design the session naming system", session_id="strong:default")
-    storage.messages.create(role="assistant", content="Let's make the titles durable and editable.", session_id="strong:default")
+    storage.messages.create(role="user", content="Help me design the session naming system", session_id="trainer:default")
+    storage.messages.create(role="assistant", content="Let's make the titles durable and editable.", session_id="trainer:default")
     storage.commit()
 
     metadata = asyncio.run(
         ensure_generated_session_title(
             storage,
-            session_id="strong:default",
+            session_id="trainer:default",
             model_adapter=DummyTitleModel("Session Naming"),
         )
     )
@@ -160,22 +160,22 @@ def test_ensure_generated_session_title_persists_metadata():
 
 def test_custom_session_title_takes_priority():
     storage = make_storage()
-    set_session_metadata(storage, "weak:default", {"generated_title": "Generated"})
-    set_session_metadata(storage, "weak:default", {"custom_title": "Operator Renamed"})
+    set_session_metadata(storage, "agent:default", {"generated_title": "Generated"})
+    set_session_metadata(storage, "agent:default", {"custom_title": "Operator Renamed"})
     storage.commit()
 
-    metadata = storage.parameters.peek_parameter("session_metadata:weak:default", default_value={})
+    metadata = storage.parameters.peek_parameter("session_metadata:agent:default", default_value={})
 
     assert metadata["custom_title"] == "Operator Renamed"
 
 
 def test_session_summaries_include_unread_counts_from_assistant_messages():
     storage = make_storage()
-    storage.messages.create(role="user", content="hello", session_id="strong:default")
-    storage.messages.create(role="assistant", content="reply", session_id="strong:default")
+    storage.messages.create(role="user", content="hello", session_id="trainer:default")
+    storage.messages.create(role="assistant", content="reply", session_id="trainer:default")
     storage.commit()
 
-    summaries = storage.messages.get_session_summaries(lane="strong")
+    summaries = storage.messages.get_session_summaries(lane="trainer")
 
     assert summaries[0]["unread_count"] == 1
 
@@ -187,10 +187,10 @@ def test_list_tasks_payload_slims_large_system_job_payloads():
     task = storage.tasks.create(
         title="Bootstrap Cycle",
         description="Queued strong-over-weak bootstrap cycle.",
-        session_id="strong:default",
+        session_id="trainer:default",
         state=TaskState.COMPLETE,
         constraints={
-            "lane": "strong",
+            "lane": "trainer",
             "system_job": {"kind": "bootstrap_cycle", "payload": {"run_count": 3}},
             "system_job_result": {
                 "status": "completed",
@@ -204,7 +204,7 @@ def test_list_tasks_payload_slims_large_system_job_payloads():
     )
     storage.commit()
 
-    payload = runtime.list_tasks_payload(storage, lane="strong")
+    payload = runtime.list_tasks_payload(storage, lane="trainer")
     result = payload[0]["system_job_result"]["result"]
 
     assert result["summary"] == {"evaluated_count": 4, "promoted_count": 4, "skipped_count": 4}

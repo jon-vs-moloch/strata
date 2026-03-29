@@ -112,8 +112,8 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             )
         else:
             # 2. Prompt for Alignment
-            from strata.schemas.execution import WeakExecutionContext
-            model_adapter.bind_execution_context(WeakExecutionContext(run_id="idle_alignment"))
+            from strata.schemas.execution import AgentExecutionContext
+            model_adapter.bind_execution_context(AgentExecutionContext(run_id="idle_alignment"))
             
             sys_prompt = f"""You are the Alignment Module for Strata.
 The system is currently IDLE. Your job is to identify ONE concrete alignment gap between the durable spec and the current repo, then propose exactly one bounded task.
@@ -155,7 +155,7 @@ Rules:
             session_id="default",
             state=TaskState.PENDING,
             constraints={
-                "lane": "weak",
+                "lane": "agent",
                 "target_scope": "codebase",
                 "spec_paths": spec_paths,
                 "repo_snapshot": repo_snapshot,
@@ -175,7 +175,7 @@ Rules:
                 f"The alignment task is grounded in {', '.join(spec_paths[:2])}.\n"
                 f"*{task_desc}*"
             ),
-            lane="weak",
+            lane="agent",
             channel="new_session",
             audience="user",
             source_kind="autonomous_alignment",

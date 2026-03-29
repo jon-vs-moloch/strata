@@ -3,7 +3,7 @@ from sqlalchemy.orm import sessionmaker
 
 from strata.feedback.signals import list_feedback_signals
 from strata.orchestrator.background import emit_task_execution_attention_signal, queue_task_attention_review
-from strata.schemas.execution import WeakExecutionContext
+from strata.schemas.execution import AgentExecutionContext
 from strata.storage.models import Base, AttemptOutcome, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
@@ -33,7 +33,7 @@ def test_first_failed_attempt_emits_unexpected_failure_signal():
         storage,
         task=task,
         attempt=attempt,
-        context=WeakExecutionContext(run_id="test"),
+        context=AgentExecutionContext(run_id="test"),
         plan_review={"plan_health": "uncertain", "recommendation": "reattempt"},
         error=RuntimeError("tool timed out"),
     )
@@ -63,7 +63,7 @@ def test_success_after_failures_emits_unexpected_success_signal():
         storage,
         task=task,
         attempt=current,
-        context=WeakExecutionContext(run_id="test"),
+        context=AgentExecutionContext(run_id="test"),
         plan_review={"plan_health": "healthy", "recommendation": "continue"},
     )
 
@@ -89,7 +89,7 @@ def test_success_with_degraded_plan_emits_surprise_signal():
         storage,
         task=task,
         attempt=attempt,
-        context=WeakExecutionContext(run_id="test"),
+        context=AgentExecutionContext(run_id="test"),
         plan_review={"plan_health": "degraded", "recommendation": "internal_replan"},
     )
 
