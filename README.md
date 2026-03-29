@@ -8,6 +8,8 @@ Strata is an agent orchestration prototype with three main pieces:
 
 The project philosophy and bootstrap strategy are documented in [project-philosophy.md](/Users/jon/Projects/strata/docs/spec/project-philosophy.md). That document is the best explanation of what Strata is trying to accomplish and why the repository is structured the way it is.
 The repository structure itself is mapped in [codemap.md](/Users/jon/Projects/strata/docs/spec/codemap.md), which is the fastest way to find the right module without loading the entire codebase.
+The current staged productization plan lives in [product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md).
+The communication and session-routing contract is documented in [communication-model.md](/Users/jon/Projects/strata/docs/spec/communication-model.md).
 
 Strata now also tracks context pressure explicitly: every time the harness loads specs, session history, semantic memory, eval context files, or synthesized knowledge into model context, it records estimated token cost. On startup it also scans source/docs files for oversized artifacts using token estimates rather than line counts, so context-heavy files can be warned on before they quietly become a small-model tax.
 
@@ -45,6 +47,32 @@ This is why the codebase emphasizes explicit task structure, external state, eva
 By default the backend stores relational state in `strata/runtime/strata.db` and semantic memory in `memory/vector_db/`.
 The API startup path also bootstraps `.knowledge/specs/global_spec.md` and `.knowledge/specs/project_spec.md` so alignment tasks always have stable spec files to inspect.
 
+## Communication Architecture
+
+Strata now treats system-authored communication as a first-class routed surface instead of letting subsystems write directly into chat history whenever they need to say something.
+
+That layer is defined in [communication-model.md](/Users/jon/Projects/strata/docs/spec/communication-model.md) and currently handles:
+
+- direct chat replies
+- autonomous/system-originated notices
+- feedback-event notices
+- task-progress notices
+
+The important rule is:
+
+- user-authored messages are stored directly as user actions
+- non-user-authored messages should go through the communication decision/routing/delivery layer
+
+Session metadata is part of that routing substrate, not just presentation state. Titles, tags, provenance, unread state, audit freshness, and topic summaries are all intended to help Strata decide whether a message belongs in the current thread, an existing related thread, or a fresh session.
+
+The system also now maintains per-message lifecycle metadata so it can distinguish:
+
+- a user message being seen by the system
+- a system message being delivered into a session surface
+- a message later being read by the intended recipient
+
+That is important because correct behavior is not always "reply immediately." Strata still needs durable evidence that a message was received and processed even when the right action is silence.
+
 ## Weak/Strong Bootstrap Loop
 
 The `weak` and `strong` model tiers are intentional. They support the project’s improvement loop:
@@ -56,6 +84,18 @@ The `weak` and `strong` model tiers are intentional. They support the project’
 5. repeat until the weak tier can make meaningful improvements itself
 
 That separation is a core part of the design, not just a configuration detail.
+
+## Roadmap Direction
+
+The current repository is still a local-first prototype, but two medium-term product directions are now explicit:
+
+- Desktop app shell: package Strata as a real desktop application that can live in the taskbar/menu bar, open its own window, and manage the existing local web UI/backend lifecycle without rewriting the product around a desktop-only architecture.
+- Strata-managed local inference: move beyond depending on LM Studio as the operator-managed inference host and teach Strata to launch and supervise a local inference runtime itself while still reusing established engines rather than implementing low-level inference from scratch.
+
+These roadmap items come with two constraints:
+
+- preserve future web/mobile shells by keeping the FastAPI backend and web UI as the core product surface, with desktop behavior added as a wrapper rather than as a forked app
+- prefer level-2 inference ownership, where Strata manages engines such as MLX or vLLM-class runtimes (and potentially Rust-based successors if they prove operationally worthwhile), instead of turning Strata into its own model-serving engine
 
 ## Requirements
 
@@ -111,14 +151,42 @@ Open `http://localhost:5173`.
 
 Running `npm run dev` from the repository root now delegates to `strata_ui/`, which is the single active frontend. The root Vite scaffold is legacy residue and should not be treated as a separate product surface.
 
+### Desktop Shell
+
+An initial desktop shell scaffold now exists under `src-tauri/`.
+
+For development, it uses Tauri to host the current UI and will start or reuse the local Python backend:
+
+```bash
+npm install
+npm run desktop:dev
+```
+
+For a packaged desktop build:
+
+```bash
+npm install
+npm run desktop:build
+```
+
+This shell is intentionally thin. It wraps the existing UI and backend lifecycle rather than creating a desktop-only product surface.
+
+Current requirement:
+
+- Tauri needs a Rust toolchain installed locally before the desktop commands can run.
+
 ## Model Configuration
 
 The default registry is defined in [strata/models/registry.py](/Users/jon/Projects/strata/strata/models/registry.py):
 
-- `strong`: cloud model via OpenRouter, using `OPENROUTER_API_KEY`
-- `weak`: local model via LM Studio at `http://127.0.0.1:1234/v1/chat/completions`
+- `strong`: a higher-capability pool that defaults to preferring cloud transport
+- `weak`: a lower-cost/constrained pool that defaults to preferring local transport
 
 The UI also exposes registry and settings controls through the admin panel.
+
+Those pool names are intentional roles, not permanent transport categories. Over time, either pool may point at local or cloud endpoints as long as the routing policy matches the job being done. The current default assumption remains `strong -> cloud-preferred` and `weak -> local-preferred`.
+
+Within a pool, the real mutable unit is the inference config, not just the bare model ID. That config can eventually include prompt/profile selection, context shaping, inference params, output schema, and in-pool escalation order such as `fast local -> slower local -> bigger local`.
 
 Each model endpoint can also carry pacing controls so the harness can respect cloud rate limits or be gentler on local hardware:
 
@@ -129,6 +197,12 @@ Each model endpoint can also carry pacing controls so the harness can respect cl
 These are enforced in the provider transport layer, so they apply regardless of which orchestrator path ends up calling the model.
 
 The admin API also exposes bootstrap-oriented registry presets, including Cerebras `zai-glm-4.7`, Google-hosted `gemma-3-27b-it`, and `openrouter/free`.
+
+Longer-term direction:
+
+- LM Studio should become one local runtime option rather than the implicit default host
+- Strata-native inference/runtime management should eventually become another registry-backed option, especially for future finetuning and adaptation features
+- by default, cross-pool `weak -> strong` escalation should remain disabled unless an explicit policy enables it
 
 If you are using one of the cloud presets, these are the direct key pages:
 

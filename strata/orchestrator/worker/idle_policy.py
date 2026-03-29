@@ -6,6 +6,7 @@
 import logging
 from datetime import datetime
 from pathlib import Path
+from strata.communication.primitives import deliver_communication
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.specs.bootstrap import load_specs, spec_is_bootstrap_placeholder
 
@@ -154,6 +155,7 @@ Rules:
             session_id="default",
             state=TaskState.PENDING,
             constraints={
+                "lane": "weak",
                 "target_scope": "codebase",
                 "spec_paths": spec_paths,
                 "repo_snapshot": repo_snapshot,
@@ -164,7 +166,8 @@ Rules:
         task.type = TaskType.RESEARCH
         storage.commit()
         
-        storage.messages.create(
+        deliver_communication(
+            storage,
             role="assistant",
             content=(
                 "🧠 **Constitutional Alignment Policy Active**\n"
@@ -172,7 +175,15 @@ Rules:
                 f"The alignment task is grounded in {', '.join(spec_paths[:2])}.\n"
                 f"*{task_desc}*"
             ),
-            session_id="default"
+            lane="weak",
+            channel="new_session",
+            audience="user",
+            source_kind="autonomous_alignment",
+            source_actor="system_opened",
+            opened_reason="idle_alignment_review",
+            tags=["autonomous", "alignment", "operator"],
+            topic_summary=task_desc,
+            session_title="Alignment Review",
         )
         storage.commit()
         await queue.put(task.task_id)

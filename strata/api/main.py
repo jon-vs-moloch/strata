@@ -32,6 +32,7 @@ from strata.api.knowledge_admin import register_knowledge_admin_routes
 from strata.api.retention_admin import register_retention_admin_routes
 from strata.api.spec_admin import register_spec_admin_routes
 from strata.api.runtime_admin import register_runtime_admin_routes
+from strata.core.lanes import infer_lane_from_session_id, normalize_lane
 from strata.memory.semantic import SemanticMemory
 from strata.orchestrator.worker.telemetry import build_telemetry_snapshot
 from strata.models.providers import get_provider_telemetry_snapshot
@@ -85,11 +86,44 @@ _worker = BackgroundWorker(
     memory=_memory,
     settings_provider=lambda: GLOBAL_SETTINGS,
 )
-_event_queue = asyncio.Queue()
+class EventBroadcaster:
+    """Fan out runtime events to active SSE subscribers without retaining an unbounded backlog."""
+
+    def __init__(self, *, queue_size: int = 128):
+        self._queue_size = max(1, int(queue_size))
+        self._subscribers: set[asyncio.Queue] = set()
+        self._lock = asyncio.Lock()
+
+    async def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_size)
+        async with self._lock:
+            self._subscribers.add(queue)
+        return queue
+
+    async def unsubscribe(self, queue: asyncio.Queue) -> None:
+        async with self._lock:
+            self._subscribers.discard(queue)
+
+    async def publish(self, data: Dict[str, Any]) -> None:
+        async with self._lock:
+            subscribers = list(self._subscribers)
+        for queue in subscribers:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(data)
+            except asyncio.QueueFull:
+                continue
+
+
+_event_broadcaster = EventBroadcaster()
 
 async def _broadcast_event(data: Dict[str, Any]):
-    """Push event to SSE queue for UI consumption."""
-    await _event_queue.put(data)
+    """Push event to active SSE subscribers without retaining orphaned backlog."""
+    await _event_broadcaster.publish(data)
 
 # Register worker update listener
 _worker.set_on_update(lambda tid, state: asyncio.create_task(_broadcast_event({"type": "task_update", "task_id": tid, "state": state})))
@@ -267,12 +301,16 @@ async def _enqueue_eval_job_task(
             if existing:
                 return existing
         try:
+            lane = normalize_lane(eval_job.get("reviewer_tier")) or infer_lane_from_session_id(session_id)
             task = storage.tasks.create(
                 title=title,
                 description=description,
                 session_id=session_id,
                 state=TaskState.PENDING,
-                constraints={"eval_job": eval_job},
+                constraints={
+                    "lane": lane,
+                    "eval_job": eval_job,
+                },
             )
             task.type = TaskType.JUDGE
             storage.commit()
@@ -337,6 +375,7 @@ async def _queue_eval_system_job(
         if existing:
             return existing
         try:
+            lane = normalize_lane(payload.get("reviewer_tier")) or infer_lane_from_session_id(session_id)
             task = storage.tasks.create(
                 title=title,
                 description=description,
@@ -344,6 +383,7 @@ async def _queue_eval_system_job(
                 state=TaskState.PENDING,
                 type=TaskType.JUDGE,
                 constraints={
+                    "lane": lane,
                     "system_job": {
                         "kind": kind,
                         "payload": payload,
@@ -468,7 +508,7 @@ globals().update(register_runtime_admin_routes(
     settings_parameter_key=SETTINGS_PARAMETER_KEY,
     settings_parameter_description=SETTINGS_PARAMETER_DESCRIPTION,
     worker=_worker,
-    event_queue=_event_queue,
+    event_broadcaster=_event_broadcaster,
     hotreloader=_hotreloader,
     base_dir=_BASE_DIR,
 ))

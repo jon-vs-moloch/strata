@@ -8,10 +8,24 @@
 
 from typing import List, Dict, Any, Optional
 import time
+from datetime import datetime
 from sqlalchemy import select, desc, distinct, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
-from strata.storage.models import MessageModel
+from strata.core.lanes import session_matches_lane
+from strata.sessions.metadata import _session_metadata_key
+from strata.storage.models import MessageModel, ParameterModel
+
+
+def _parse_timestamp(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        return None
 
 class MessageRepository:
     """
@@ -91,7 +105,7 @@ class MessageRepository:
         results = self.session.scalars(stmt).all()
         return [str(r) for r in results if r is not None] # Ensure non-None and convert to string
 
-    def get_session_summaries(self) -> List[Dict[str, Any]]:
+    def get_session_summaries(self, *, lane: Optional[str] = None) -> List[Dict[str, Any]]:
         rows = (
             self.session.query(
                 MessageModel.session_id,
@@ -106,20 +120,59 @@ class MessageRepository:
         summaries: List[Dict[str, Any]] = []
         for row in rows:
             session_id = str(row.session_id)
+            if not session_matches_lane(session_id, lane):
+                continue
+            metadata_param = self.session.query(ParameterModel).filter_by(key=_session_metadata_key(session_id)).first()
+            metadata = {}
+            if metadata_param and isinstance(metadata_param.value, dict):
+                metadata = dict(metadata_param.value.get("current") or {})
             last_message = (
                 self.session.query(MessageModel)
                 .filter(MessageModel.is_archived == False, MessageModel.session_id == session_id)
                 .order_by(MessageModel.created_at.desc())
                 .first()
             )
+            first_message = (
+                self.session.query(MessageModel)
+                .filter(MessageModel.is_archived == False, MessageModel.session_id == session_id)
+                .order_by(MessageModel.created_at.asc())
+                .first()
+            )
+            role_rows = (
+                self.session.query(
+                    MessageModel.role,
+                    func.count(MessageModel.message_id).label("count"),
+                )
+                .filter(MessageModel.is_archived == False, MessageModel.session_id == session_id)
+                .group_by(MessageModel.role)
+                .all()
+            )
+            role_counts = {str(role or ""): int(count or 0) for role, count in role_rows}
+            last_read_at = _parse_timestamp(metadata.get("last_read_at"))
+            unread_query = (
+                self.session.query(func.count(MessageModel.message_id))
+                .filter(
+                    MessageModel.is_archived == False,
+                    MessageModel.session_id == session_id,
+                    MessageModel.role.in_(["assistant", "system"]),
+                )
+            )
+            if last_read_at is not None:
+                unread_query = unread_query.filter(MessageModel.created_at > last_read_at)
+            unread_count = int(unread_query.scalar() or 0)
             summaries.append(
                 {
                     "session_id": session_id,
                     "message_count": int(row.message_count or 0),
+                    "user_message_count": role_counts.get("user", 0),
+                    "assistant_message_count": role_counts.get("assistant", 0),
+                    "system_message_count": role_counts.get("system", 0),
                     "first_message_at": row.first_message_at.isoformat() if row.first_message_at else None,
+                    "first_message_role": getattr(first_message, "role", None),
                     "last_message_at": row.last_message_at.isoformat() if row.last_message_at else None,
                     "last_message_preview": str(getattr(last_message, "content", "") or "").strip()[:120],
                     "last_message_role": getattr(last_message, "role", None),
+                    "unread_count": unread_count,
                 }
             )
         summaries.sort(key=lambda item: item.get("last_message_at") or "", reverse=True)

@@ -10,6 +10,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from strata.storage.models import TaskModel, TaskState
+from strata.core.lanes import infer_lane_from_session_id, infer_lane_from_task, normalize_lane
 
 class TaskRepository:
     """
@@ -35,6 +36,17 @@ class TaskRepository:
         @outputs the created TaskModel object
         @side_effects adds object to session
         """
+        constraints = dict(kwargs.get("constraints") or {})
+        explicit_lane = normalize_lane(constraints.get("lane"))
+        parent_task = None
+        if not explicit_lane and kwargs.get("parent_task_id"):
+            parent_task = self.get_by_id(kwargs["parent_task_id"])
+            explicit_lane = infer_lane_from_task(parent_task) if parent_task else None
+        if not explicit_lane:
+            explicit_lane = infer_lane_from_session_id(kwargs.get("session_id"))
+        if explicit_lane:
+            constraints["lane"] = explicit_lane
+        kwargs["constraints"] = constraints
         task = TaskModel(**kwargs)
         self.session.add(task)
         self.session.flush() # Ensure ID is generated

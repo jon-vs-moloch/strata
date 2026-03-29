@@ -404,6 +404,7 @@ Return only JSON with this schema:
   "overall_assessment": "short verdict",
   "failure_family": "reusable family label",
   "primary_failure_mode": "short label",
+  "recommended_title": "optional 2-6 word session title if a rename would help, else empty string",
   "evidence": ["specific observation", "specific observation"],
   "targeted_interventions": [
     {{
@@ -455,6 +456,7 @@ Trace summary:
             "overall_assessment": "review_unavailable",
             "failure_family": "review_unavailable",
             "primary_failure_mode": "review_unavailable",
+            "recommended_title": "",
             "evidence": [str(exc)],
             "targeted_interventions": [],
             "predicted_outcome": "uncertain",

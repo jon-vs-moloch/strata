@@ -15,8 +15,9 @@ import os
 from datetime import datetime
 from typing import Any, Dict
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from strata.core.lanes import normalize_lane
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
@@ -32,7 +33,7 @@ def register_runtime_admin_routes(
     settings_parameter_key: str,
     settings_parameter_description: str,
     worker,
-    event_queue,
+    event_broadcaster,
     hotreloader,
     base_dir: str,
 ) -> Dict[str, Any]:
@@ -143,6 +144,17 @@ def register_runtime_admin_routes(
                     context,
                     preferred_model=preferred_model,
                 )
+                pool = model_adapter.registry.pools.get(context.mode)
+                effective_allow_cloud = (
+                    pool.allow_cloud
+                    if pool is not None and context.allow_cloud is None
+                    else context.allow_cloud
+                )
+                effective_allow_local = (
+                    pool.allow_local
+                    if pool is not None and context.allow_local is None
+                    else context.allow_local
+                )
                 return {
                     "label": label,
                     "mode": context.mode,
@@ -151,8 +163,9 @@ def register_runtime_admin_routes(
                     "transport": endpoint.transport,
                     "endpoint_url": endpoint.endpoint_url,
                     "selected_model": preferred_model or endpoint.model,
-                    "allow_cloud": context.allow_cloud,
-                    "allow_local": context.allow_local,
+                    "allow_cloud": effective_allow_cloud,
+                    "allow_local": effective_allow_local,
+                    "preferred_transport": getattr(pool, "preferred_transport", None),
                     "status": worker.status.get("tiers", {}).get(label, "unknown"),
                 }
             except Exception as exc:
@@ -297,29 +310,75 @@ def register_runtime_admin_routes(
         return {"status": worker.status}
 
     @app.post("/admin/worker/pause")
-    async def pause_worker():
-        worker.pause()
-        return {"status": "paused"}
+    async def pause_worker(lane: str | None = None):
+        normalized_lane = normalize_lane(lane)
+        if lane is not None and normalized_lane is None:
+            raw_lane = str(lane or "").strip().lower()
+            if raw_lane:
+                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+        worker.pause(normalized_lane)
+        return {"status": "paused", "lane": normalized_lane}
 
     @app.post("/admin/worker/resume")
-    async def resume_worker():
-        worker.resume()
-        return {"status": "running"}
+    async def resume_worker(lane: str | None = None):
+        normalized_lane = normalize_lane(lane)
+        if lane is not None and normalized_lane is None:
+            raw_lane = str(lane or "").strip().lower()
+            if raw_lane:
+                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+        worker.resume(normalized_lane)
+        replayed = await worker.enqueue_runnable_tasks(normalized_lane)
+        return {"status": "running", "lane": normalized_lane, "replayed": replayed}
 
     @app.post("/admin/worker/stop")
-    async def stop_worker():
-        aborted = worker.stop_current()
-        return {"status": "stopped", "aborted": aborted}
+    async def stop_worker(lane: str | None = None):
+        normalized_lane = normalize_lane(lane)
+        if lane is not None and normalized_lane is None:
+            raw_lane = str(lane or "").strip().lower()
+            if raw_lane:
+                raise HTTPException(status_code=400, detail="lane must be 'strong' or 'weak'")
+        aborted = worker.stop_current(normalized_lane)
+        return {"status": "stopped", "aborted": aborted, "lane": normalized_lane}
+
+    @app.post("/admin/tasks/{task_id}/pause")
+    async def pause_task(task_id: str):
+        paused = worker.pause_task(task_id)
+        if not paused:
+            raise HTTPException(status_code=404, detail="task not found or not pausable")
+        return {"status": "paused", "task_id": task_id}
+
+    @app.post("/admin/tasks/{task_id}/resume")
+    async def resume_task(task_id: str):
+        resumed = await worker.resume_task(task_id)
+        if not resumed:
+            raise HTTPException(status_code=404, detail="task not found or not resumable")
+        return {"status": "running", "task_id": task_id}
+
+    @app.post("/admin/tasks/{task_id}/stop")
+    async def stop_task(task_id: str):
+        stopped = worker.stop_task(task_id)
+        if not stopped:
+            raise HTTPException(status_code=404, detail="task not found or not stoppable")
+        return {"status": "cancelled", "task_id": task_id}
 
     @app.get("/events")
-    async def sse_events():
+    async def sse_events(request: Request):
         async def event_generator():
-            while True:
-                try:
-                    data = await event_queue.get()
-                    yield f"data: {json.dumps(data)}\n\n"
-                except Exception:
-                    break
+            queue = await event_broadcaster.subscribe()
+            try:
+                while True:
+                    try:
+                        if await request.is_disconnected():
+                            break
+                        data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                        yield f"data: {json.dumps(data)}\n\n"
+                    except asyncio.TimeoutError:
+                        # Keep the SSE connection warm without retaining server-side backlog.
+                        yield ": keepalive\n\n"
+                    except Exception:
+                        break
+            finally:
+                await event_broadcaster.unsubscribe(queue)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -13,6 +13,7 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
+from strata.core.lanes import infer_lane_from_task, normalize_lane
 from strata.feedback.signals import register_feedback_signal
 from strata.storage.models import TaskModel, TaskState, AttemptOutcome
 from strata.orchestrator.worker.queue_recovery import recover_tasks
@@ -160,6 +161,109 @@ async def queue_task_attention_review(storage, *, task, signal: dict) -> Optiona
         },
     )
 
+
+async def ensure_continuous_supervision_job(
+    storage_factory,
+    *,
+    queue_system_job=None,
+    get_proposal_config=None,
+    enabled: bool = True,
+) -> Optional[dict]:
+    if not enabled:
+        return None
+
+    if queue_system_job is None:
+        from strata.api.main import _queue_eval_system_job as queue_system_job
+    if get_proposal_config is None:
+        from strata.api.experiment_runtime import get_active_eval_proposal_config as get_proposal_config
+
+    proposal_config = dict(get_proposal_config() or {})
+    bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
+    proposer_tiers = [
+        str(tier).lower()
+        for tier in bootstrap_policy.get("continuous_proposer_tiers", ["weak", "strong"])
+        if str(tier).lower() in {"weak", "strong"}
+    ] or ["weak", "strong"]
+    run_count = max(1, int(bootstrap_policy.get("continuous_run_count", 1) or 1))
+    suite_name = "bootstrap_mcq_v1"
+
+    storage = storage_factory()
+    try:
+        return await queue_system_job(
+            storage,
+            kind="bootstrap_cycle",
+            title="Bootstrap Cycle",
+            description="Queued strong-over-weak bootstrap cycle.",
+            payload={
+                "proposer_tiers": proposer_tiers,
+                "auto_promote": True,
+                "suite_name": suite_name,
+                "run_count": run_count,
+                "baseline_change_id": "baseline",
+            },
+            session_id="strong:default",
+            dedupe_signature={
+                "suite_name": suite_name,
+                "run_count": run_count,
+                "proposer_tiers": proposer_tiers,
+            },
+        )
+    finally:
+        storage.close()
+
+
+async def ensure_blocked_weak_task_review(
+    storage_factory,
+    *,
+    queue_system_job=None,
+    enabled: bool = True,
+) -> Optional[dict]:
+    if not enabled:
+        return None
+
+    if queue_system_job is None:
+        from strata.api.main import _queue_eval_system_job as queue_system_job
+
+    storage = storage_factory()
+    try:
+        weak_blocked_tasks = (
+            storage.session.query(TaskModel)
+            .filter(
+                TaskModel.state == TaskState.BLOCKED,
+                TaskModel.human_intervention_required == True,
+            )
+            .order_by(TaskModel.updated_at.desc())
+            .all()
+        )
+        for candidate in weak_blocked_tasks:
+            if normalize_lane(infer_lane_from_task(candidate)) != "weak":
+                continue
+            return await queue_system_job(
+                storage,
+                kind="trace_review",
+                title=f"Weak Supervision Review: {str(candidate.title or candidate.task_id)[:72]}",
+                description="Queued strong-tier review for blocked weak-lane work before another bootstrap cycle.",
+                payload={
+                    "trace_kind": "task_trace",
+                    "task_id": candidate.task_id,
+                    "reviewer_tier": "strong",
+                    "emit_followups": True,
+                    "persist_to_task": True,
+                    "spec_scope": "project",
+                    "supervision_reason": "weak_blocked_task",
+                },
+                session_id="strong:default",
+                dedupe_signature={
+                    "trace_kind": "task_trace",
+                    "reviewer_tier": "strong",
+                    "task_id": candidate.task_id,
+                    "supervision_reason": "weak_blocked_task",
+                },
+            )
+        return None
+    finally:
+        storage.close()
+
 class BackgroundWorker:
     """
     @summary Managed background loop for asynchronous task execution.
@@ -175,7 +279,10 @@ class BackgroundWorker:
         self._on_update_callback = None
         self._running = False
         self._paused = False
+        self._paused_lanes: set[str] = set()
         self._current_process: Optional[asyncio.Task] = None
+        self._current_task_lane: Optional[str] = None
+        self._current_task_id: Optional[str] = None
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
         self._tier_health = {"Strong": "unknown", "Weak": "unknown"}
 
@@ -230,9 +337,15 @@ class BackgroundWorker:
             recover_orphaned_running=not settings.get("testing_mode", False),
             requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
         )
+        if not settings.get("testing_mode", False):
+            replayed = await self.enqueue_runnable_tasks()
+            if replayed:
+                logger.info("Seeded %s runnable task(s) into the worker queue during startup.", replayed)
 
         # 3. Start Loop
         self._running = True
+        if not settings.get("testing_mode", False):
+            await self._ensure_lane_idle_policies(settings)
         self._running_task = asyncio.create_task(self._loop(), name="background-worker")
         logger.info("BackgroundWorker started (Hardened Startup)")
 
@@ -263,6 +376,139 @@ class BackgroundWorker:
         await self._queue.put(task_id)
         logger.info(f"Enqueued task {task_id}")
 
+    def _lane_for_task_id(self, task_id: str) -> Optional[str]:
+        storage = self._storage_factory()
+        try:
+            task = storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+            if not task:
+                return None
+            return normalize_lane(infer_lane_from_task(task))
+        finally:
+            storage.session.close()
+
+    def _task_is_paused(self, task_id: str) -> bool:
+        storage = self._storage_factory()
+        try:
+            task = storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+            if not task:
+                return False
+            return bool((task.constraints or {}).get("paused"))
+        finally:
+            storage.session.close()
+
+    def _lane_has_runnable_or_active_work(self, lane: str) -> bool:
+        normalized_lane = normalize_lane(lane)
+        if not normalized_lane:
+            return False
+        if self._current_task_lane == normalized_lane:
+            return True
+        storage = self._storage_factory()
+        try:
+            query = storage.session.query(TaskModel).filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
+            for task in query.all():
+                task_lane = normalize_lane(infer_lane_from_task(task))
+                if task_lane != normalized_lane:
+                    continue
+                constraints = dict(task.constraints or {})
+                if constraints.get("paused") or task.human_intervention_required:
+                    continue
+                return True
+            return False
+        finally:
+            storage.session.close()
+
+    async def enqueue_runnable_tasks(self, lane: Optional[str] = None) -> int:
+        normalized_lane = normalize_lane(lane)
+        storage = self._storage_factory()
+        try:
+            query = storage.session.query(TaskModel).filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
+            candidates = query.all()
+            enqueued = 0
+            for task in candidates:
+                if task.human_intervention_required:
+                    continue
+                if task.state == TaskState.BLOCKED:
+                    continue
+                constraints = dict(task.constraints or {})
+                if constraints.get("paused"):
+                    continue
+                task_lane = normalize_lane(infer_lane_from_task(task))
+                if normalized_lane and task_lane != normalized_lane:
+                    continue
+                if task.dependencies and any(dep.state != TaskState.COMPLETE for dep in task.dependencies):
+                    continue
+                if task.task_id == self._current_task_id:
+                    continue
+                await self.enqueue(task.task_id)
+                enqueued += 1
+            return enqueued
+        finally:
+            storage.session.close()
+
+    async def _ensure_lane_idle_policies(self, settings: Optional[dict] = None):
+        settings = settings or self._settings()
+        if settings.get("testing_mode", False) or self._paused:
+            return
+
+        if (
+            self._tier_health.get("Strong") == "ok"
+            and "strong" not in self._paused_lanes
+            and not self._lane_has_runnable_or_active_work("strong")
+        ):
+            try:
+                review_seed = await ensure_blocked_weak_task_review(
+                    self._storage_factory,
+                    enabled=True,
+                )
+                if review_seed and review_seed.get("status") == "queued":
+                    logger.info("Queued blocked weak-task supervision review %s for idle strong lane.", review_seed.get("task_id"))
+                else:
+                    seeded = await ensure_continuous_supervision_job(
+                        self._storage_factory,
+                        enabled=True,
+                    )
+                    if seeded and seeded.get("status") == "queued":
+                        logger.info("Queued continuous supervision job %s for idle strong lane.", seeded.get("task_id"))
+            except Exception as exc:
+                logger.warning("Unable to ensure continuous supervision job for strong lane: %s", exc)
+
+        if settings.get("automatic_task_generation", False) and "weak" not in self._paused_lanes:
+            if not self._lane_has_runnable_or_active_work("weak"):
+                await run_idle_tasks(self._storage_factory, self._model, self._queue)
+
+    def _update_task_control_state(
+        self,
+        task_id: str,
+        *,
+        paused: Optional[bool] = None,
+        state: Optional[TaskState] = None,
+        attempt_outcome: Optional[AttemptOutcome] = None,
+        reason: Optional[str] = None,
+    ) -> bool:
+        storage = self._storage_factory()
+        try:
+            task = storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+            if not task:
+                return False
+            if task.state in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
+                return False
+            constraints = dict(task.constraints or {})
+            if paused is True:
+                constraints["paused"] = True
+            elif paused is False:
+                constraints.pop("paused", None)
+            task.constraints = constraints
+            if state is not None and task.state not in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
+                task.state = state
+            if attempt_outcome is not None:
+                open_attempt = next((row for row in storage.attempts.get_by_task_id(task_id) if row.outcome is None), None)
+                if open_attempt:
+                    storage.attempts.update_outcome(open_attempt.attempt_id, attempt_outcome, reason=reason)
+            storage.commit()
+            return True
+        finally:
+            storage.session.close()
+
     async def _loop(self):
         idle_ticks = 0
         while self._running:
@@ -273,7 +519,18 @@ class BackgroundWorker:
             try:
                 task_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 idle_ticks = 0
+                task_lane = self._lane_for_task_id(task_id)
+                if task_lane and task_lane in self._paused_lanes:
+                    await self._queue.put(task_id)
+                    self._queue.task_done()
+                    await asyncio.sleep(0.1)
+                    continue
+                if self._task_is_paused(task_id):
+                    self._queue.task_done()
+                    continue
                 
+                self._current_task_lane = task_lane
+                self._current_task_id = task_id
                 self._current_process = asyncio.create_task(self._run_task_cycle(task_id))
                 try:
                     await self._current_process
@@ -281,6 +538,9 @@ class BackgroundWorker:
                     logger.info(f"Task process {task_id} was forced STOPPED.")
                 finally:
                     self._current_process = None
+                    self._current_task_lane = None
+                    self._current_task_id = None
+                    await self._ensure_lane_idle_policies()
                     
                 self._queue.task_done()
             except asyncio.TimeoutError:
@@ -289,10 +549,15 @@ class BackgroundWorker:
                     settings = self._settings()
                     if settings.get("testing_mode", False):
                         logger.info("Testing mode active; skipping autonomous idle task generation.")
-                    elif settings.get("automatic_task_generation", False):
-                        await run_idle_tasks(self._storage_factory, self._model, self._queue)
                     else:
-                        logger.info("Automatic task generation disabled; worker remains idle without spawning new tasks.")
+                        replayed = await self.enqueue_runnable_tasks()
+                        if replayed:
+                            logger.info("Worker idle with runnable backlog; re-enqueued %s task(s).", replayed)
+                            idle_ticks = 0
+                            continue
+                        await self._ensure_lane_idle_policies(settings)
+                        if not settings.get("automatic_task_generation", False):
+                            logger.info("Automatic task generation disabled; worker remains idle without spawning new tasks.")
                     await synthesize_model_performance(self._storage_factory)
                     idle_ticks = 0
             except asyncio.CancelledError:
@@ -328,6 +593,11 @@ class BackgroundWorker:
             
             self._model.bind_execution_context(context)
             logger.info(f"Routing task {task_id} to {context.mode} execution context [Exp: {self._active_experiment_id}]")
+
+            constraints = dict(task.constraints or {})
+            if constraints.get("lane") != context.mode:
+                constraints["lane"] = context.mode
+                task.constraints = constraints
 
             storage.commit()
             await self._notify(task_id, task.state.value)
@@ -499,18 +769,96 @@ class BackgroundWorker:
         finally:
             storage.session.close()
 
-    def pause(self):
+    def pause(self, lane: Optional[str] = None):
+        normalized_lane = normalize_lane(lane)
+        if normalized_lane:
+            self._paused_lanes.add(normalized_lane)
+            return
         self._paused = True
-    def resume(self):
+
+    def resume(self, lane: Optional[str] = None):
+        normalized_lane = normalize_lane(lane)
+        if normalized_lane:
+            self._paused_lanes.discard(normalized_lane)
+            return
         self._paused = False
-    def stop_current(self):
+
+    def stop_current(self, lane: Optional[str] = None):
+        normalized_lane = normalize_lane(lane)
+        if normalized_lane and self._current_task_lane != normalized_lane:
+            return False
         if self._current_process:
             self._current_process.cancel()
             return True
         return False
+
+    def pause_task(self, task_id: str) -> bool:
+        updated = self._update_task_control_state(
+            task_id,
+            paused=True,
+            state=TaskState.PENDING,
+            attempt_outcome=AttemptOutcome.CANCELLED if self._current_task_id == task_id else None,
+            reason="Paused by operator.",
+        )
+        if not updated:
+            return False
+        if self._current_task_id == task_id and self._current_process:
+            self._current_process.cancel()
+        return True
+
+    async def resume_task(self, task_id: str) -> bool:
+        updated = self._update_task_control_state(
+            task_id,
+            paused=False,
+            state=TaskState.PENDING,
+        )
+        if not updated:
+            return False
+        await self.enqueue(task_id)
+        return True
+
+    def stop_task(self, task_id: str) -> bool:
+        updated = self._update_task_control_state(
+            task_id,
+            paused=False,
+            state=TaskState.CANCELLED,
+            attempt_outcome=AttemptOutcome.CANCELLED if self._current_task_id == task_id else None,
+            reason="Cancelled by operator.",
+        )
+        if not updated:
+            return False
+        if self._current_task_id == task_id and self._current_process:
+            self._current_process.cancel()
+        storage = self._storage_factory()
+        try:
+            cascades = storage.apply_dependency_cascade()
+            if cascades:
+                logger.info("Cancelled task %s triggered %s dependent cancellation(s).", task_id, cascades)
+        finally:
+            storage.close()
+        return True
+
+    def lane_status(self, lane: str) -> str:
+        normalized_lane = normalize_lane(lane)
+        if not normalized_lane:
+            return "UNKNOWN"
+        if not self._running:
+            return "STOPPED"
+        if self._paused or normalized_lane in self._paused_lanes:
+            return "PAUSED"
+        if self._current_task_lane == normalized_lane:
+            return "RUNNING"
+        return "IDLE"
+
     @property
     def status(self):
         return {
             "worker": "STOPPED" if not self._running else ("PAUSED" if self._paused else "RUNNING"),
-            "tiers": self._tier_health
+            "global_paused": self._paused,
+            "paused_lanes": sorted(self._paused_lanes),
+            "tiers": self._tier_health,
+            "lanes": {
+                "strong": self.lane_status("strong"),
+                "weak": self.lane_status("weak"),
+            },
         }

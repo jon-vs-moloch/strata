@@ -11,57 +11,79 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from strata.communication.primitives import build_communication_decision, deliver_communication_decision
 from strata.observability.context import record_context_load
 from strata.api.chat_tool_executor import ChatToolExecutor
 from strata.context.loaded_files import build_loaded_context_block
+from strata.core.lanes import infer_lane_from_session_id
 from strata.models.adapter import ModelAdapter
 from strata.schemas.execution import StrongExecutionContext, WeakExecutionContext
+
 
 class ChatRuntime:
     def __init__(self, **deps: Any):
         self.deps = deps
         self.tool_executor = ChatToolExecutor(**deps)
 
-    def list_tasks_payload(self, storage) -> List[Dict[str, Any]]:
+    def list_tasks_payload(self, storage, *, lane: Optional[str] = None) -> List[Dict[str, Any]]:
         from sqlalchemy.orm import selectinload
 
         task_model_cls = self.deps["task_model_cls"]
         get_question_for_source = self.deps["get_question_for_source"]
         tasks = storage.session.query(task_model_cls).options(selectinload(task_model_cls.attempts)).all()
-        return [
-            {
-                "id": task.task_id,
-                "parent_id": task.parent_task_id,
-                "title": task.title,
-                "description": task.description,
-                "status": task.state.value.lower(),
-                "type": task.type.value.lower(),
-                "depth": task.depth,
-                "human_intervention_required": task.human_intervention_required,
-                "system_job": (task.constraints or {}).get("system_job"),
-                "system_job_result": (task.constraints or {}).get("system_job_result"),
-                "generated_reports": (task.constraints or {}).get("generated_reports", []),
-                "pending_question": (
-                    get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id).get("question")
-                    if task.human_intervention_required
-                    else None
+        normalized_lane = str(lane or "").strip().lower() or None
+        payload = []
+        for task in tasks:
+            task_lane = (task.constraints or {}).get("lane") or infer_lane_from_session_id(getattr(task, "session_id", None))
+            if normalized_lane and str(task_lane or "").strip().lower() != normalized_lane:
+                continue
+            sorted_attempts = sorted(
+                list(task.attempts or []),
+                key=lambda attempt: (
+                    str(attempt.started_at.isoformat() if attempt.started_at else ""),
+                    str(attempt.ended_at.isoformat() if attempt.ended_at else ""),
                 ),
-                "created_at": task.created_at.isoformat() if task.created_at else None,
-                "updated_at": task.updated_at.isoformat() if task.updated_at else None,
-                "attempts": [
-                    {
-                        "id": attempt.attempt_id,
-                        "outcome": attempt.outcome.value.lower() if attempt.outcome else None,
-                        "resolution": attempt.resolution.value.lower() if attempt.resolution else None,
-                        "started_at": attempt.started_at.isoformat(),
-                        "ended_at": attempt.ended_at.isoformat() if attempt.ended_at else None,
-                        "reason": attempt.reason,
-                    }
-                    for attempt in task.attempts
-                ],
-            }
-            for task in tasks
-        ]
+                reverse=True,
+            )
+            payload.append(
+                {
+                    "id": task.task_id,
+                    "parent_id": task.parent_task_id,
+                    "title": task.title,
+                    "description": task.description,
+                    "status": task.state.value.lower(),
+                    "type": task.type.value.lower(),
+                    "depth": task.depth,
+                    "human_intervention_required": task.human_intervention_required,
+                    "system_job": (task.constraints or {}).get("system_job"),
+                    "system_job_result": (task.constraints or {}).get("system_job_result"),
+                    "generated_reports": (task.constraints or {}).get("generated_reports", []),
+                    "paused": bool((task.constraints or {}).get("paused")),
+                    "lane": task_lane,
+                    "pending_question": (
+                        get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id).get("question")
+                        if task.human_intervention_required
+                        else None
+                    ),
+                    "created_at": task.created_at.isoformat() if task.created_at else None,
+                    "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+                    "attempts": [
+                        {
+                            "id": attempt.attempt_id,
+                            "outcome": attempt.outcome.value.lower() if attempt.outcome else None,
+                            "resolution": attempt.resolution.value.lower() if attempt.resolution else None,
+                            "started_at": attempt.started_at.isoformat(),
+                            "ended_at": attempt.ended_at.isoformat() if attempt.ended_at else None,
+                            "reason": attempt.reason,
+                            "artifacts": dict(attempt.artifacts or {}),
+                            "evidence": dict(attempt.evidence or {}),
+                            "plan_review": dict(attempt.plan_review or {}),
+                        }
+                        for attempt in sorted_attempts
+                    ],
+                }
+            )
+        return payload
 
     async def handle_spec_clarification_reply(self, storage, payload: Dict[str, Any], session_id: str, content: str):
         pending_spec_proposal = self.deps["find_pending_spec_clarification"](storage, session_id)
@@ -119,15 +141,17 @@ class ChatRuntime:
             resolution="resolved",
             response=content,
         )
-        storage.messages.create(
-            role="assistant",
+        await self.emit_chat_communication(
+            storage,
+            session_id=session_id,
             content=(
                 f"I’ve attached your clarification to spec proposal {updated_proposal['proposal_id']} "
                 f"and kicked off a fresh review task ({task.task_id})."
             ),
-            session_id=session_id,
+            communicative_act="response",
+            response_kind="acknowledgement",
+            source_kind="spec_clarification_reply",
         )
-        storage.commit()
         return {
             "status": "ok",
             "reply": (
@@ -156,12 +180,14 @@ class ChatRuntime:
         storage.commit()
         await self.deps["worker"].enqueue(task.task_id)
         self.deps["resolve_question"](storage, pending_question["question_id"], resolution="resolved", response=content)
-        storage.messages.create(
-            role="assistant",
-            content=f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
+        await self.emit_chat_communication(
+            storage,
             session_id=session_id,
+            content=f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
+            communicative_act="response",
+            response_kind="acknowledgement",
+            source_kind="task_clarification_reply",
         )
-        storage.commit()
         return {
             "status": "ok",
             "reply": f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
@@ -257,6 +283,39 @@ Available Tools:
             messages.append({"role": message.role, "content": message.content})
         return messages, active_tools, knowledge_pages, pending_question
 
+    async def emit_chat_communication(
+        self,
+        storage,
+        *,
+        session_id: str,
+        content: str,
+        communicative_act: str = "response",
+        response_kind: str = "answer",
+        source_kind: str = "chat_reply",
+        urgency: str = "normal",
+    ) -> Dict[str, Any]:
+        lane = infer_lane_from_session_id(session_id) or "strong"
+        decision = build_communication_decision(
+            role="assistant",
+            content=content,
+            lane=lane,
+            channel="existing_session_message",
+            session_id=session_id,
+            audience="user",
+            source_kind=source_kind,
+            source_actor="chat_runtime",
+            opened_reason="chat_reply",
+            tags=["chat", response_kind or communicative_act],
+            topic_summary=str(content or "").strip()[:180],
+            communicative_act=communicative_act,
+            response_kind=response_kind,
+            urgency=urgency,
+        )
+        result = deliver_communication_decision(storage, decision)
+        storage.commit()
+        await self.deps["broadcast_event"]({"type": "message", "session_id": session_id})
+        return result
+
     async def run_chat_tool_loop(self, storage, *, session_id: str, content: str, preferred_tier: str = "strong"):
         preferred_tier = str(preferred_tier or "strong").lower()
         chat_context = (
@@ -317,17 +376,29 @@ Available Tools:
                     )
                     continue
                 final_reply = error_message or "I encountered an error processing that."
-                storage.messages.create(role="assistant", content=final_reply, session_id=session_id)
-                storage.commit()
+                await self.emit_chat_communication(
+                    storage,
+                    session_id=session_id,
+                    content=final_reply,
+                    communicative_act="response",
+                    response_kind="error",
+                    source_kind="chat_error",
+                    urgency="high",
+                )
                 return {"status": "ok", "reply": final_reply}
             tool_calls = model_response.get("tool_calls")
             content_val = model_response.get("content")
             chain_of_thought = str(content_val) if content_val else ""
 
             if chain_of_thought and chain_of_thought.strip() and not tool_calls:
-                storage.messages.create(role="assistant", content=chain_of_thought.strip(), session_id=session_id)
-                storage.commit()
-                await self.deps["broadcast_event"]({"type": "message", "session_id": session_id})
+                await self.emit_chat_communication(
+                    storage,
+                    session_id=session_id,
+                    content=chain_of_thought.strip(),
+                    communicative_act="response",
+                    response_kind="answer",
+                    source_kind="chat_reply",
+                )
                 return {"status": "ok", "reply": chain_of_thought.strip()}
 
             if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
@@ -356,19 +427,37 @@ Available Tools:
                     )
                 if tool_outputs_generated:
                     if summary:
-                        storage.messages.create(role="assistant", content=summary, session_id=session_id)
-                        storage.commit()
+                        await self.emit_chat_communication(
+                            storage,
+                            session_id=session_id,
+                            content=summary,
+                            communicative_act="notification",
+                            response_kind="progress",
+                            source_kind="tool_progress",
+                        )
                     iteration += 1
                     continue
                 reply = chain_of_thought.strip() or summary or (" ".join(invocation_updates[:3]).strip() if invocation_updates else "I’ve kicked off the relevant system work.")
                 if reply:
-                    storage.messages.create(role="assistant", content=reply, session_id=session_id)
-                    storage.commit()
+                    await self.emit_chat_communication(
+                        storage,
+                        session_id=session_id,
+                        content=reply,
+                        communicative_act="response",
+                        response_kind="answer",
+                        source_kind="chat_reply",
+                    )
                 return {"status": "ok", "reply": reply, "task_ids": async_task_ids}
 
             final_reply = model_response.get("content", "I encountered an error processing that.")
-            storage.messages.create(role="assistant", content=final_reply, session_id=session_id)
-            storage.commit()
+            await self.emit_chat_communication(
+                storage,
+                session_id=session_id,
+                content=final_reply,
+                communicative_act="response",
+                response_kind="answer",
+                source_kind="chat_reply",
+            )
             return {"status": "ok", "reply": final_reply}
 
         messages.append(
@@ -381,6 +470,12 @@ Available Tools:
         reply = final_response.get("content", "I hit the maximum iteration limit for synchronous tool usage without reaching a conclusion.")
         if not reply or not reply.strip():
             reply = "I couldn't synthesize the final results."
-        storage.messages.create(role="assistant", content=reply, session_id=session_id)
-        storage.commit()
+        await self.emit_chat_communication(
+            storage,
+            session_id=session_id,
+            content=reply,
+            communicative_act="response",
+            response_kind="answer",
+            source_kind="chat_reply",
+        )
         return {"status": "ok", "reply": reply}

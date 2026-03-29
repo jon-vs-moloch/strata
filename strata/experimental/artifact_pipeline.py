@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from strata.experimental.audit_registry import audit_timeline_artifact, persist_timeline_artifact
+from strata.sessions.metadata import record_session_audit, set_session_metadata
 from strata.specs.bootstrap import get_active_spec_record
 
 
@@ -67,6 +68,7 @@ def append_trace_review_to_session(storage, *, session_id: str, review: Dict[str
         "reviewer_tier": review.get("reviewer_tier"),
         "overall_assessment": review.get("overall_assessment"),
         "primary_failure_mode": review.get("primary_failure_mode"),
+        "recommended_title": review.get("recommended_title"),
         "summary": review.get("summary"),
         "targeted_interventions": review.get("targeted_interventions") or [],
         "telemetry_to_watch": review.get("telemetry_to_watch") or [],
@@ -83,6 +85,23 @@ def append_trace_review_to_session(storage, *, session_id: str, review: Dict[str
         session_key,
         payload,
         description=f"Recent trace reviews for chat session {session_id}.",
+    )
+    recommended_title = " ".join(str(review.get("recommended_title") or "").split()).strip()[:80]
+    if recommended_title:
+        set_session_metadata(
+            storage,
+            session_id,
+            {
+                "recommended_title": recommended_title,
+                "title_recommendation_source": "session_trace_review",
+                "title_recommendation_recorded_at": review.get("recorded_at"),
+            },
+        )
+    record_session_audit(
+        storage,
+        session_id=session_id,
+        audited_at=review.get("recorded_at"),
+        reviewer_tier=str(review.get("reviewer_tier") or ""),
     )
     return payload
 

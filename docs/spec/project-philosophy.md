@@ -55,6 +55,19 @@ Useful outputs come from staged processing:
 
 The project treats generation as the beginning of work, not the end of it.
 
+That same principle applies to inference configuration.
+
+The mutable unit is not just "which model to call." The mutable unit is the full inference-shaping config for a lane, including:
+
+- model selection
+- prompt/preamble/profile
+- context payload
+- inference parameters
+- output schema or tool contract
+- in-pool escalation order
+
+This matters because the thing that should be evaluated and promoted is often the mixed strategy, not a single model call in isolation. A fast-first configuration that escalates to a slower lane only when needed may outperform both "always fast" and "always slow" in end-to-end throughput and quality.
+
 ### 3. Desired outcomes should become eval targets
 
 If we want a property from the system, we should turn it into something measurable instead of treating it as a hope or a vibe.
@@ -105,6 +118,20 @@ The strong/weak split is intentional and foundational.
 - The `strong` tier exists to bootstrap progress, propose improvements, and explore higher-capability changes.
 - The `weak` tier represents the constrained local model the system is ultimately trying to empower.
 
+These are role boundaries, not permanent provider categories.
+
+- by default, `strong` means the bootstrap/supervision lane
+- by default, `weak` means the normal execution lane
+- the current operational assumption remains `strong -> cloud-preferred` and `weak -> local-preferred`
+- but either pool may eventually point at local or cloud inference depending on the active config
+
+The important distinction is:
+
+- in-pool escalation is normal strategy behavior
+- cross-pool escalation is a separate policy boundary
+
+By default, Strata should not silently escalate weak work into strong. If cross-pool escalation is introduced later, it should be explicit, telemetered, and policy-controlled.
+
 This separation is not merely an implementation convenience. It encodes the developmental strategy of the project.
 
 ## Intended Bootstrap Sequence
@@ -149,6 +176,8 @@ This structure is meant to help both humans and small models answer the same que
 
 What is this subsystem for, and how does it fit into the improvement loop?
 
+The same principle now applies to communication. Replies, autonomous notices, and operator-facing recommendations should route through one explicit communication substrate rather than being scattered side effects across the codebase. That contract is documented in [communication-model.md](/Users/jon/Projects/strata/docs/spec/communication-model.md).
+
 ## Non-Goal
 
 The project is not primarily trying to demonstrate that a single prompt can turn a small model into a great autonomous engineer.
@@ -166,3 +195,31 @@ When making design decisions in Strata, prefer the option that:
 - helps the system learn from outcomes over time
 
 That is "what we are doing here." The rest is implementation detail.
+
+## Near-Medium-Term Direction
+
+Two productization directions are now intentional parts of the project's trajectory.
+
+### 1. Desktop Shell Without Architectural Lock-In
+
+Strata should eventually become a real desktop application that can launch from the taskbar or menu bar, restore its own window, manage startup/update behavior, and feel like an installable program instead of only a localhost workflow.
+
+That should be accomplished by wrapping the existing web UI and backend lifecycle, not by collapsing the project into a desktop-only architecture.
+
+The design constraint is:
+
+- preserve a backend/API boundary that still allows future web and mobile clients
+
+In other words, desktop should be a shell around Strata, not a fork of Strata.
+
+### 2. Strata-Managed Local Inference
+
+Strata should eventually own more of the local inference lifecycle instead of assuming that LM Studio is always the external operator-managed bridge from model files to inference.
+
+The intended level of ownership is operational rather than kernel-level:
+
+- Strata should be able to download/select models, launch and supervise a local inference engine, health-check it, route requests to it, and recover when it fails
+- Strata should prefer wrapping established engines such as MLX, vLLM-class runtimes, or promising successors if they prove faster and stable enough in practice
+- Strata should avoid taking on the responsibility of implementing low-level inference itself unless that becomes strategically necessary
+
+This keeps the project focused on orchestration, evaluation, and system intelligence while still reducing reliance on manual sidecar tools.

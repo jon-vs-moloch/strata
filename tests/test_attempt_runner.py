@@ -1,0 +1,53 @@
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from strata.orchestrator.worker import attempt_runner
+from strata.storage.models import Base, TaskState, TaskType, AttemptOutcome
+from strata.storage.services.main import StorageManager
+
+
+class DummyModel:
+    last_response = None
+
+
+def make_storage():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+    return StorageManager(session=session)
+
+
+async def _noop_notify(*_args, **_kwargs):
+    return None
+
+
+async def _noop_enqueue(*_args, **_kwargs):
+    return None
+
+
+def test_failed_attempt_is_closed_when_task_body_raises(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Research task",
+        description="Find the answer.",
+        session_id="weak:default",
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "weak"},
+    )
+    storage.commit()
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(attempt_runner, "_run_research", boom)
+
+    success, error, attempt = __import__("asyncio").run(
+        attempt_runner.run_attempt(task, storage, DummyModel(), _noop_notify, _noop_enqueue)
+    )
+
+    assert success is False
+    assert str(error) == "boom"
+    assert attempt.outcome == AttemptOutcome.FAILED
+    assert attempt.ended_at is not None
+

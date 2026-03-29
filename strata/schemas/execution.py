@@ -12,24 +12,30 @@ class ExecutionContext(BaseModel):
     @summary Base runtime context for STRATA tasks.
     """
     mode: Literal["strong", "weak"] = Field(..., description="The context tier.")
-    allow_cloud: bool = Field(..., description="Whether cloud transport is permitted.")
-    allow_local: bool = Field(..., description="Whether local transport is permitted.")
+    allow_cloud: Optional[bool] = Field(
+        None,
+        description="Optional override for whether cloud transport is permitted. If unset, the pool policy decides.",
+    )
+    allow_local: Optional[bool] = Field(
+        None,
+        description="Optional override for whether local transport is permitted. If unset, the pool policy decides.",
+    )
     evaluation_run: bool = Field(default=False, description="Flag for runs that are part of an experiment.")
     run_id: str = Field(..., description="Unique ID for this specific run.")
     candidate_change_id: Optional[str] = Field(None, description="The ID of the candidate change being evaluated.")
 
 class StrongExecutionContext(ExecutionContext):
     """
-    @summary Runtime optimized for complex planning and supervision via cloud.
+    @summary Runtime optimized for complex planning and supervision.
     """
     mode: Literal["strong"] = "strong"
-    allow_cloud: bool = True
-    allow_local: bool = False
+    allow_cloud: Optional[bool] = None
+    allow_local: Optional[bool] = None
 
 class WeakExecutionContext(ExecutionContext):
     """
-    @summary Runtime restricted for local evaluation of task agents.
+    @summary Runtime optimized for constrained or lower-cost execution.
     """
     mode: Literal["weak"] = "weak"
-    allow_cloud: bool = False
-    allow_local: bool = True
+    allow_cloud: Optional[bool] = None
+    allow_local: Optional[bool] = None

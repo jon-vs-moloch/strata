@@ -137,6 +137,7 @@ def test_append_trace_review_to_session_persists_slim_reviews():
             "reviewer_tier": "strong",
             "overall_assessment": "needs_intervention",
             "primary_failure_mode": "missed_feedback",
+            "recommended_title": "Feedback Repair",
             "summary": "The assistant missed an explicit correction signal.",
             "targeted_interventions": [{"kind": "spec", "description": "Tighten feedback handling."}],
             "telemetry_to_watch": ["chat_feedback_negative_rate"],
@@ -148,6 +149,8 @@ def test_append_trace_review_to_session_persists_slim_reviews():
     assert payload["reviews"][0]["primary_failure_mode"] == "missed_feedback"
     stored = storage.parameters.peek_parameter("session_trace_review:trace-session", default_value={})
     assert stored["reviews"][0]["timeline_artifact_id"] == "timeline_demo"
+    session_metadata = storage.parameters.peek_parameter("session_metadata:trace-session", default_value={})
+    assert session_metadata["recommended_title"] == "Feedback Repair"
 
 
 def test_trace_review_job_persists_result_and_attaches_to_task():

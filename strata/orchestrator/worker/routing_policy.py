@@ -14,19 +14,16 @@ from strata.schemas.execution import ExecutionContext, StrongExecutionContext, W
 def select_model_tier(task: TaskModel) -> ExecutionContext:
     """
     @summary Routing logic for resolving the appropriate execution context.
-    @rule Light-First: All tasks default to the Weak tier unless explicitly escalated.
+    @rule Light-First: Background task execution defaults to the Weak tier.
+
+    Strong is reserved for bootstrap/supervision flows unless a future policy
+    explicitly introduces cross-pool escalation. In-pool escalation should be
+    handled inside the selected pool's mutable config, not by silently jumping
+    from weak to strong here.
     """
     run_id = f"run_{task.task_id}"
-    
-    # 1. Check for manual escalation or high-risk overrides
-    is_risky = getattr(task, 'risk', 'low') == "high"
-    
-    # FUTURE: Escalation logic will check Attempt history for repeating failures
-    # For now, we only escalate if it is explicitly marked as high risk.
-    if is_risky:
-        return StrongExecutionContext(run_id=run_id)
-        
-    # 2. Default to Weak (Local) for ALL tasks (Research, Impl, Decomp)
-    # This enforces the "Harnessing the Weak" philosophy where we improve the 
-    # weak model until it can handle these.
+
+    # Default to Weak for normal system work. Future cross-pool escalation, if any,
+    # should be an explicit policy with its own telemetry rather than an implicit
+    # risk-based shortcut.
     return WeakExecutionContext(run_id=run_id)

@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock, Signal } from 'lucide-react';
 
 const MotionDiv = motion.div;
@@ -79,6 +81,19 @@ function formatElapsed(startedAt, endedAt = null) {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function stripInlineMarkdown(content) {
+  return String(content || '')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
   if (tasks.length === 0) return null;
@@ -106,6 +121,59 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive }) => {
             style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
           >
             {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} />)}
+          </MotionDiv>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+const OlderAttemptsGroup = ({ attempts, taskUpdatedAt }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!attempts.length) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+      <button
+        onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+        style={{
+          background: 'rgba(255,255,255,0.03)',
+          border: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          color: '#666',
+          fontSize: '10px',
+          fontWeight: 800,
+          textTransform: 'uppercase',
+          letterSpacing: '0.1em',
+          cursor: 'pointer',
+          padding: '6px 12px',
+          borderRadius: '6px',
+          width: 'fit-content',
+          marginLeft: '12px',
+        }}
+      >
+        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        Older Attempts · {attempts.length}
+      </button>
+      <AnimatePresence>
+        {expanded && (
+          <MotionDiv
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            style={{ display: 'flex', flexDirection: 'column', gap: '6px', overflow: 'hidden' }}
+          >
+            {attempts.map((attempt, idx) => (
+              <AttemptRow
+                key={attempt.id}
+                attempt={attempt}
+                index={idx + 4}
+                taskUpdatedAt={taskUpdatedAt}
+                defaultExpanded={false}
+              />
+            ))}
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -183,11 +251,18 @@ const InterventionWidget = ({ taskId, question, onResolve }) => {
 const TaskCard = ({ task, onArchive, isNested = false }) => {
   const defaultExpanded = useMemo(() => !TERMINAL_STATUSES.has(task.status), [task.status]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const style = STATUS_MAP[task.status] ?? DEFAULT_STATUS;
   const typeInfo = task.type ? TYPE_MAP[task.type] : null;
   const accentColor = typeInfo ? typeInfo.color : style.color;
+  const displayTitle = stripInlineMarkdown(task.title || 'Untitled task') || 'Untitled task';
+  const descriptionText = String(task.description || '');
+  const longDescription = descriptionText.length > 420 || descriptionText.split('\n').length > 8;
 
   const children = task.children || [];
+  const attempts = Array.isArray(task.attempts) ? task.attempts : [];
+  const visibleAttempts = attempts.slice(0, 3);
+  const olderAttempts = attempts.slice(3);
   const pastStatuses = ['complete', 'abandoned', 'cancelled'];
   const futureStatuses = ['pending'];
   
@@ -196,7 +271,7 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
   // Fallback: If it's not past or future, it belongs in present
   const presentTasks = children.filter(c => !pastStatuses.includes(c.status) && !futureStatuses.includes(c.status));
   
-  const hasChildren = children.length > 0 || (task.attempts && task.attempts.length > 0);
+  const hasChildren = children.length > 0 || attempts.length > 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -267,9 +342,51 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
         </div>
 
         <div>
-          <h3 style={{ fontWeight: 600, fontSize: '14px', color: '#edeeef', lineHeight: 1.3 }}>{task.title}</h3>
+          <h3 style={{ fontWeight: 600, fontSize: '14px', color: '#edeeef', lineHeight: 1.3 }}>{displayTitle}</h3>
           {(isExpanded || !isNested) && task.description && (
-            <p style={{ fontSize: '12px', color: '#6b6b7d', marginTop: '6px', lineHeight: '1.4' }}>{task.description}</p>
+            <div>
+              <div
+                className="markdown-body"
+                style={{
+                  fontSize: '12px',
+                  color: '#6b6b7d',
+                  marginTop: '6px',
+                  lineHeight: '1.5',
+                  maxHeight: longDescription && !descriptionExpanded ? '112px' : 'none',
+                  overflow: longDescription && !descriptionExpanded ? 'hidden' : 'visible',
+                  position: 'relative',
+                }}
+              >
+                {longDescription && !descriptionExpanded && (
+                  <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '28px', background: 'linear-gradient(180deg, rgba(20,20,24,0), rgba(20,20,24,0.98))', pointerEvents: 'none' }} />
+                )}
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {task.description}
+                </ReactMarkdown>
+              </div>
+              {longDescription && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setDescriptionExpanded((value) => !value);
+                  }}
+                  style={{
+                    marginTop: '6px',
+                    background: 'none',
+                    border: 'none',
+                    color: accentColor,
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    letterSpacing: '0.04em',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  {descriptionExpanded ? 'Show less' : 'Show full description'}
+                </button>
+              )}
+            </div>
           )}
           <div style={{ display: 'flex', gap: '12px', marginTop: '8px', flexWrap: 'wrap', fontSize: '10px', color: '#626275' }}>
             <span title={formatRelative(task.created_at)}>Created {formatAbsoluteWithRelative(task.created_at)}</span>
@@ -299,12 +416,21 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
             style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '8px', paddingLeft: '12px' }}
           >
             {/* Attempts */}
-            {task.attempts && task.attempts.length > 0 && (
+            {attempts.length > 0 && (
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>ATTEMPTS</div>
-                {task.attempts.map((attempt, idx) => (
-                  <AttemptRow key={attempt.id} attempt={attempt} index={idx + 1} taskUpdatedAt={task.updated_at} />
+                {visibleAttempts.map((attempt, idx) => (
+                  <AttemptRow
+                    key={attempt.id}
+                    attempt={attempt}
+                    index={idx + 1}
+                    taskUpdatedAt={task.updated_at}
+                    defaultExpanded={idx === 0 || attempt.outcome !== 'failed'}
+                  />
                 ))}
+                {olderAttempts.length > 0 && (
+                  <OlderAttemptsGroup attempts={olderAttempts} taskUpdatedAt={task.updated_at} />
+                )}
                </div>
             )}
             
@@ -319,8 +445,8 @@ const TaskCard = ({ task, onArchive, isNested = false }) => {
   );
 };
 
-const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
-  const [expanded, setExpanded] = useState(false);
+const AttemptRow = ({ attempt, index, taskUpdatedAt, defaultExpanded = false }) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [nowMs, setNowMs] = useState(() => Date.now());
   React.useEffect(() => {
     if (attempt.ended_at || attempt.outcome) return undefined;
@@ -328,28 +454,38 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
     return () => window.clearInterval(interval);
   }, [attempt.ended_at, attempt.outcome]);
   const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
-  const isActive = !attempt.ended_at && !attempt.outcome;
+  const hasOpenAttempt = !attempt.ended_at && !attempt.outcome;
   const lastActivityAt = taskUpdatedAt || attempt.started_at;
   const parsedLastActivityAt = parseTimestamp(lastActivityAt);
   const recentlyActive = parsedLastActivityAt ? (nowMs - parsedLastActivityAt.getTime()) < 90000 : false;
+  const parsedStartedAt = parseTimestamp(attempt.started_at);
+  const staleOpenAttempt = hasOpenAttempt && !recentlyActive && parsedStartedAt
+    ? (nowMs - parsedStartedAt.getTime()) > 300000
+    : false;
+  const isActive = hasOpenAttempt && !staleOpenAttempt;
   const artifacts = attempt.artifacts && typeof attempt.artifacts === 'object' ? attempt.artifacts : null;
   const summaryBits = [];
   if (artifacts?.job_kind) summaryBits.push(`job ${artifacts.job_kind}`);
   if (artifacts?.duration_s) summaryBits.push(`${Number(artifacts.duration_s).toFixed(1)}s`);
   if (attempt.resolution) summaryBits.push(`resolution ${attempt.resolution.replace(/_/g, ' ')}`);
+  if (artifacts?.provider || artifacts?.model) summaryBits.push(`${artifacts.provider || 'model'} / ${artifacts.model || 'unknown'}`);
+  if (attempt.plan_review?.plan_health) summaryBits.push(`plan ${attempt.plan_review.plan_health}`);
+  if (attempt.plan_review?.recommendation) summaryBits.push(`review ${String(attempt.plan_review.recommendation).replace(/_/g, ' ')}`);
+  const isFailedAttempt = attempt.outcome === 'failed' || staleOpenAttempt;
+  const collapseableFailedAttempt = isFailedAttempt && index > 1;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginLeft: '12px' }}>
       <button
         onClick={() => setExpanded(!expanded)}
         style={{ 
-          background: isActive ? 'rgba(0,217,255,0.08)' : 'rgba(255,255,255,0.02)', 
-          border: isActive ? '1px solid rgba(0,217,255,0.2)' : '1px solid rgba(255,255,255,0.05)', 
+          background: isActive ? 'rgba(0,217,255,0.08)' : staleOpenAttempt ? 'rgba(255,184,77,0.08)' : 'rgba(255,255,255,0.02)', 
+          border: isActive ? '1px solid rgba(0,217,255,0.2)' : staleOpenAttempt ? '1px solid rgba(255,184,77,0.18)' : '1px solid rgba(255,255,255,0.05)', 
           borderRadius: '10px', 
           padding: '12px 14px',
           display: 'flex',
           alignItems: 'center',
           gap: '10px',
-          borderLeft: `3px solid ${isActive ? '#00d9ff' : `${outcome.color}66`}`,
+          borderLeft: `3px solid ${isActive ? '#00d9ff' : staleOpenAttempt ? '#ffb84d' : `${outcome.color}66`}`,
           textAlign: 'left',
           width: '100%',
           cursor: 'pointer'
@@ -367,29 +503,36 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
             />
             <Signal size={12} color={recentlyActive ? '#00f294' : '#ffb84d'} />
           </div>
+        ) : staleOpenAttempt ? (
+          <Clock size={12} color="#ffb84d" />
         ) : (
           <outcome.Icon size={12} color={outcome.color} />
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-            <div style={{ fontSize: '11px', color: isActive ? '#d8f8ff' : '#888', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              {isActive ? 'Attempt Active' : `Attempt ${attempt.outcome || 'Pending'}`}
+            <div style={{ fontSize: '11px', color: isActive ? '#d8f8ff' : staleOpenAttempt ? '#ffd89a' : '#888', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {isActive ? 'Attempt Active' : staleOpenAttempt ? 'Attempt Stale' : `Attempt ${attempt.outcome || 'Pending'}`}
             </div>
             <div style={{ fontSize: '9px', color: '#555' }}>
               {formatAbsolute(attempt.started_at)}
             </div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginTop: '3px', flexWrap: 'wrap' }}>
-            <div style={{ fontSize: '10px', color: isActive ? '#86dfff' : '#666' }}>
-              {isActive ? `Running for ${formatElapsed(attempt.started_at)}` : `Ran for ${formatElapsed(attempt.started_at, attempt.ended_at)}`}
+            <div style={{ fontSize: '10px', color: isActive ? '#86dfff' : staleOpenAttempt ? '#ffd89a' : '#666' }}>
+              {isActive ? `Running for ${formatElapsed(attempt.started_at)}` : staleOpenAttempt ? `Open for ${formatElapsed(attempt.started_at)}` : `Ran for ${formatElapsed(attempt.started_at, attempt.ended_at)}`}
             </div>
-            <div style={{ fontSize: '10px', color: recentlyActive ? '#00f294' : '#777' }}>
-              {isActive ? (recentlyActive ? 'actively updating' : 'no recent heartbeat') : `ended ${formatRelative(attempt.ended_at)}`}
+            <div style={{ fontSize: '10px', color: isActive ? (recentlyActive ? '#00f294' : '#777') : staleOpenAttempt ? '#ffb84d' : '#777' }}>
+              {isActive ? (recentlyActive ? 'actively updating' : 'no recent heartbeat') : staleOpenAttempt ? 'stale open attempt' : `ended ${formatRelative(attempt.ended_at)}`}
             </div>
           </div>
           {summaryBits.length > 0 && (
             <div style={{ fontSize: '10px', color: '#666', marginTop: '4px', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {summaryBits.join(' · ')}
+            </div>
+          )}
+          {collapseableFailedAttempt && !expanded && (
+            <div style={{ fontSize: '10px', color: '#8a8d9c', marginTop: '4px' }}>
+              Older failed attempt; expand for details
             </div>
           )}
         </div>
@@ -412,6 +555,13 @@ const AttemptRow = ({ attempt, index, taskUpdatedAt }) => {
               {attempt.reason && (
                 <div style={{ fontSize: '11px', color: '#a8a8b5', lineHeight: 1.45 }}>
                   {attempt.reason}
+                </div>
+              )}
+              {attempt.plan_review && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '10px', color: '#8b8d9e' }}>
+                  <span>Plan health: {attempt.plan_review.plan_health || '—'}</span>
+                  <span>Recommendation: {String(attempt.plan_review.recommendation || '—').replace(/_/g, ' ')}</span>
+                  <span>Confidence: {attempt.plan_review.confidence ?? '—'}</span>
                 </div>
               )}
               {artifacts && (

@@ -4,12 +4,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  Plus, RefreshCw, Zap,
-  MessageSquare, Send, History, Cpu,
+  Plus, Zap,
+  MessageSquare, Send,
   Terminal, AlertCircle, X, Settings,
   Activity, Trash2, Database, LayoutDashboard,
-  Pause, Play, Square, ChevronDown, ChevronRight,
-  BookOpen, Search, ThumbsUp, ThumbsDown, Heart
+  Pause, Play, Square, ChevronDown, ChevronRight, Pencil,
+  BookOpen, Search, ThumbsUp, ThumbsDown, Heart, Reply, Sparkles
 } from 'lucide-react';
 import TaskCard from './components/TaskCard';
 
@@ -22,6 +22,18 @@ const API_KEY_LINKS = {
   openrouter: 'https://openrouter.ai/settings/keys',
 };
 
+const PROVIDER_FRIENDLY_NAMES = {
+  google: 'Google',
+  openrouter: 'OpenRouter',
+  lmstudio: 'LM Studio',
+  cerebras: 'Cerebras',
+};
+
+const TRANSPORT_FRIENDLY_NAMES = {
+  cloud: 'Cloud',
+  local: 'Local',
+};
+
 const PROVIDER_SETUP_LINKS = [
   { label: 'Cerebras Key', href: 'https://cloud.cerebras.ai/' },
   { label: 'Google AI Studio Key', href: 'https://aistudio.google.com/apikey' },
@@ -31,12 +43,30 @@ const PROVIDER_SETUP_LINKS = [
 const CHAT_LANES = ['strong', 'weak'];
 
 const defaultSessionIdForLane = (lane) => `${lane}:default`;
+const draftSessionIdForLane = (lane) => `${lane}:draft-${Date.now()}`;
+const isDraftSessionId = (sessionId) => typeof sessionId === 'string' && /^(strong|weak):draft-\d+$/.test(sessionId);
+const draftHasContent = (draft) => {
+  if (!draft) return false;
+  const title = String(draft.title || '').trim();
+  const body = String(draft.draftMessage || '').trim();
+  return Boolean(body) || (Boolean(title) && title !== 'New Session');
+};
 
 const laneForSessionId = (sessionId) => {
   if (typeof sessionId !== 'string') return 'strong';
   if (sessionId.startsWith('weak:')) return 'weak';
   if (sessionId.startsWith('strong:')) return 'strong';
   return 'strong';
+};
+
+const sessionMatchesLane = (sessionId, lane) => laneForSessionId(sessionId) === lane;
+
+const fallbackSessionTitle = (sessionId) => {
+  const visibleSessionId = displaySessionId(sessionId);
+  if (!visibleSessionId || visibleSessionId === 'default') return 'New Session';
+  const ts = parseInt(visibleSessionId.replace('session-', ''), 10);
+  if (isNaN(ts)) return visibleSessionId;
+  return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
 const displaySessionId = (sessionId) => {
@@ -95,6 +125,22 @@ const formatMessageForDisplay = (content) => {
   };
 };
 
+const stripInlineMarkdown = (content) => {
+  const raw = String(content || '').trim();
+  if (!raw) return '';
+  return raw
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 const summarizeBootstrapReasons = (items = []) => {
   const counts = new Map();
   items.forEach((item) => {
@@ -115,9 +161,557 @@ const REACTION_OPTIONS = [
   { key: 'confused', label: 'Confusing', icon: AlertCircle },
 ];
 
+const LANE_ACCENTS = {
+  strong: {
+    bubbleBg: 'linear-gradient(135deg, rgba(130,87,229,0.94), rgba(79,70,229,0.92))',
+    bubbleBorder: 'rgba(167,137,255,0.42)',
+    bubbleShadow: '0 12px 28px rgba(101,76,198,0.28)',
+    chip: '#d8c8ff',
+  },
+  weak: {
+    bubbleBg: 'linear-gradient(135deg, rgba(0,187,145,0.9), rgba(20,141,128,0.92))',
+    bubbleBorder: 'rgba(84,244,201,0.28)',
+    bubbleShadow: '0 12px 28px rgba(10,118,102,0.24)',
+    chip: '#baffea',
+  },
+  user: {
+    bubbleBg: '#15161b',
+    bubbleBorder: 'rgba(255,255,255,0.08)',
+    bubbleShadow: 'none',
+    chip: '#c9ccd8',
+  },
+};
 
-// ─── Settings Modal ────────────────────────────────────────────────────────────
-const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
+const titleCaseWords = (value) => String(value || '')
+  .split(/[_\s]+/)
+  .filter(Boolean)
+  .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+  .join(' ');
+
+const friendlyProviderLabel = (provider) => {
+  const normalized = String(provider || '').trim().toLowerCase();
+  return PROVIDER_FRIENDLY_NAMES[normalized] || titleCaseWords(normalized || provider || '');
+};
+
+const friendlyTransportLabel = (transport) => {
+  const normalized = String(transport || '').trim().toLowerCase();
+  return TRANSPORT_FRIENDLY_NAMES[normalized] || titleCaseWords(normalized || transport || '');
+};
+
+const friendlyModelLabel = (model) => {
+  const raw = String(model || '').trim();
+  if (!raw) return '';
+  if (raw.length <= 32) return raw;
+  const compact = raw
+    .replace(/^mlx-+/i, '')
+    .replace(/^openai\//i, '')
+    .replace(/^anthropic\//i, '')
+    .replace(/^google\//i, '')
+    .replace(/-reasoning(?:-[a-z0-9]+)*$/i, '')
+    .replace(/-thinking(?:-[a-z0-9]+)*$/i, '')
+    .replace(/-(instruction|instruct|distilled)$/i, '');
+  return compact.length <= 32 ? compact : `${compact.slice(0, 29)}...`;
+};
+
+const normalizeCommunicativeAct = (message) => String(message?.message_metadata?.communicative_act || '').trim().toLowerCase();
+
+const isDirectCommunication = (message) => {
+  if (message?.role === 'user') return true;
+  if (message?.role === 'assistant') {
+    const sourceKind = String(message?.message_metadata?.source_kind || '').trim().toLowerCase();
+    if (!sourceKind || sourceKind === 'chat_reply' || sourceKind === 'chat_error' || sourceKind === 'tool_progress') {
+      return true;
+    }
+  }
+  const act = normalizeCommunicativeAct(message);
+  return act === 'response' || act === 'question';
+};
+
+const eventAlignmentForMessage = (message) => {
+  const metadata = message?.message_metadata || {};
+  const sourceKind = String(metadata.source_kind || '').trim().toLowerCase();
+  const sourceActor = String(metadata.source_actor || '').trim().toLowerCase();
+  if (sourceKind === 'feedback_event' || sourceActor === 'user_opened' || sourceActor === 'message_feedback') {
+    return 'right';
+  }
+  if (sourceKind.includes('tool') || sourceKind.includes('task_') || sourceActor === 'task_runner' || sourceActor === 'chat_runtime') {
+    return 'left';
+  }
+  return 'center';
+};
+
+const getMessageLane = (message, fallbackLane) => {
+  if (message?.role === 'user') return 'user';
+  return fallbackLane === 'weak' ? 'weak' : 'strong';
+};
+
+const participantLabel = (value, participantNames = {}) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return '';
+  if (normalized === 'user') return participantNames.user || 'you';
+  if (normalized === 'system') return participantNames.system || 'system';
+  if (normalized === 'strong') return participantNames.strong || 'Strong';
+  if (normalized === 'weak') return participantNames.weak || 'Weak';
+  if (normalized === 'chat_runtime') return participantNames.system || 'Strata';
+  return value;
+};
+
+const audienceRecipients = (audience) => {
+  if (Array.isArray(audience)) {
+    return audience.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  const raw = String(audience || '').trim();
+  if (!raw) return [];
+  if (raw.includes(',')) {
+    return raw.split(',').map((item) => item.trim()).filter(Boolean);
+  }
+  return [raw];
+};
+
+const allRecipientsSatisfied = (expectedRecipients, receipts, receiptField) => {
+  if (!expectedRecipients.length) return false;
+  const receiptSet = new Set(
+    receipts
+      .map((item) => String(item?.[receiptField] || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return expectedRecipients.every((recipient) => receiptSet.has(String(recipient || '').trim().toLowerCase()));
+};
+
+const formatMessageLifecycle = (message, participantNames = {}) => {
+  const metadata = message?.message_metadata || {};
+  const readReceipts = Array.isArray(metadata.read_receipts) ? metadata.read_receipts : [];
+  const seenReceipts = Array.isArray(metadata.seen_receipts) ? metadata.seen_receipts : [];
+  const deliveryRecords = Array.isArray(metadata.delivery_records) ? metadata.delivery_records : [];
+  const expectedRecipients = audienceRecipients(metadata.audience);
+  if (message?.role === 'user') {
+    const latestRead = readReceipts[readReceipts.length - 1];
+    if (latestRead?.reader) {
+      return allRecipientsSatisfied(expectedRecipients, readReceipts, 'reader')
+        ? 'Read'
+        : `Read by ${participantLabel(latestRead.reader, participantNames)}`;
+    }
+    const latestSeen = seenReceipts[seenReceipts.length - 1];
+    if (latestSeen?.actor) return `Seen by ${participantLabel(latestSeen.actor, participantNames)}`;
+    if (message?.pending) return 'Sending';
+    if (message?.failed) return 'Send failed';
+    return 'Queued';
+  }
+  const latestRead = readReceipts[readReceipts.length - 1];
+  if (latestRead?.reader) {
+    return allRecipientsSatisfied(expectedRecipients, readReceipts, 'reader')
+      ? 'Read'
+      : `Read by ${participantLabel(latestRead.reader, participantNames)}`;
+  }
+  const latestDelivery = deliveryRecords[deliveryRecords.length - 1];
+  if (latestDelivery?.recipient) {
+    return allRecipientsSatisfied(expectedRecipients, deliveryRecords, 'recipient')
+      ? 'Delivered'
+      : `Delivered to ${participantLabel(latestDelivery.recipient, participantNames)}`;
+  }
+  if (message?.pending) return 'Sending';
+  return 'Sent';
+};
+
+const describeEventMessage = (message) => {
+  const metadata = message?.message_metadata || {};
+  const sourceKind = String(metadata.source_kind || message?.role || 'event').trim();
+  const tags = Array.isArray(metadata.tags) ? metadata.tags.filter(Boolean) : [];
+  const label = titleCaseWords(sourceKind);
+  return {
+    label,
+    tags: tags.slice(0, 3),
+  };
+};
+
+const messageSenderKey = (message, lane) => {
+  if (message?.role === 'user') return 'user';
+  if (isDirectCommunication(message)) return `agent:${getMessageLane(message, lane)}`;
+  return `system:${eventAlignmentForMessage(message)}`;
+};
+
+const messageSenderTitle = (message, lane, participantNames = {}) => {
+  if (message?.role === 'user') return participantNames?.user || 'You';
+  if (isDirectCommunication(message)) {
+    return lane === 'weak' ? participantNames?.weak || 'Weak' : participantNames?.strong || 'Strong';
+  }
+  return participantNames?.system || 'System';
+};
+
+const shouldGroupMessages = (currentMessage, previousMessage, lane) => {
+  if (!currentMessage || !previousMessage) return false;
+  if (messageSenderKey(currentMessage, lane) !== messageSenderKey(previousMessage, lane)) return false;
+  const currentTime = parseTimestamp(currentMessage.created_at);
+  const previousTime = parseTimestamp(previousMessage.created_at);
+  if (!currentTime || !previousTime) return false;
+  return Math.abs(currentTime.getTime() - previousTime.getTime()) <= 6 * 60 * 60 * 1000;
+};
+
+const ReactionMenu = ({
+  message,
+  busyKey,
+  onReact,
+  onTypedResponse,
+  onClose,
+}) => {
+  const counts = message?.reactions?.counts || {};
+  const viewerReactions = message?.reactions?.viewer_reactions || [];
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 'calc(100% + 8px)',
+        right: 0,
+        width: '220px',
+        background: '#13141a',
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderRadius: '14px',
+        boxShadow: '0 18px 34px rgba(0,0,0,0.32)',
+        padding: '10px',
+        zIndex: 20,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+      }}
+    >
+      <div style={{ fontSize: '10px', color: '#7e8293', fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+        React
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px' }}>
+        {REACTION_OPTIONS.map(({ key, label, icon: Icon }) => {
+          const active = viewerReactions.includes(key);
+          const busy = busyKey === `${message.id}:${key}`;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onReact(message.id, key)}
+              disabled={busy}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                background: active ? 'rgba(130,87,229,0.16)' : 'rgba(255,255,255,0.03)',
+                border: active ? '1px solid rgba(130,87,229,0.34)' : '1px solid rgba(255,255,255,0.07)',
+                borderRadius: '10px',
+                padding: '8px 10px',
+                color: active ? '#e2d7ff' : '#c0c3d3',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: busy ? 'default' : 'pointer',
+                opacity: busy ? 0.7 : 1,
+              }}
+            >
+              <Icon size={12} />
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {counts[key] > 0 ? `${label} · ${counts[key]}` : label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        onClick={() => onTypedResponse(message)}
+        style={{
+          background: 'rgba(255,255,255,0.04)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: '10px',
+          padding: '9px 10px',
+          color: '#d4d7e4',
+          fontSize: '11px',
+          fontWeight: 700,
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        Add typed response…
+      </button>
+      <button
+        type="button"
+        onClick={onClose}
+        style={{
+          background: 'none',
+          border: 'none',
+          color: '#7f8394',
+          fontSize: '10px',
+          fontWeight: 800,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          cursor: 'pointer',
+          alignSelf: 'flex-end',
+        }}
+      >
+        Close
+      </button>
+    </div>
+  );
+};
+
+const MessageActionPill = ({
+  message,
+  onReact,
+  onReply,
+}) => (
+  <MotionDiv
+    initial={{ opacity: 0, y: 4, scale: 0.98 }}
+    animate={{ opacity: 1, y: 0, scale: 1 }}
+    exit={{ opacity: 0, y: 4, scale: 0.98 }}
+    transition={{ duration: 0.16, ease: 'easeOut' }}
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      background: 'rgba(10,10,12,0.96)',
+      border: '1px solid rgba(255,255,255,0.09)',
+      borderRadius: '999px',
+      boxShadow: '0 10px 22px rgba(0,0,0,0.28)',
+      overflow: 'hidden',
+    }}
+  >
+    <button
+      type="button"
+      onClick={() => onReact(message.id)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        background: 'transparent',
+        border: 'none',
+        color: '#afb4c6',
+        cursor: 'pointer',
+        padding: '8px 10px',
+      }}
+    >
+      <Sparkles size={12} />
+    </button>
+    <div style={{ width: '1px', alignSelf: 'stretch', background: 'rgba(255,255,255,0.09)' }} />
+    <button
+      type="button"
+      onClick={() => onReply(message)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        background: 'transparent',
+        border: 'none',
+        color: '#afb4c6',
+        cursor: 'pointer',
+        padding: '8px 10px',
+      }}
+    >
+      <Reply size={12} />
+    </button>
+  </MotionDiv>
+);
+
+const MessageMetaRow = ({ message, lane, participantNames }) => {
+  const metadata = message?.message_metadata || {};
+  const direct = isDirectCommunication(message);
+  const laneAccent = LANE_ACCENTS[getMessageLane(message, lane)] || LANE_ACCENTS.strong;
+  const timestamp = formatAbsoluteTime(message.created_at);
+  const lifecycle = formatMessageLifecycle(message, participantNames);
+  const isUser = message?.role === 'user';
+  const eventAlignedRight = !direct && eventAlignmentForMessage(message) === 'right';
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '10px',
+        flexWrap: 'wrap',
+        marginTop: '8px',
+        fontSize: '10px',
+        color: '#707487',
+        paddingLeft: direct && message.role !== 'user' ? '4px' : 0,
+      }}
+    >
+      {isUser || !direct ? (
+        <>
+          <span style={{ color: direct ? laneAccent.chip : '#98a0b4', fontWeight: 700 }}>{lifecycle}</span>
+          <span>{timestamp}</span>
+        </>
+      ) : (
+        <>
+          <span>{timestamp}</span>
+          <span style={{ color: direct ? laneAccent.chip : '#98a0b4', fontWeight: 700 }}>{lifecycle}</span>
+        </>
+      )}
+    </div>
+  );
+};
+
+const MessageCard = ({
+  message,
+  lane,
+  reactionBusyKey,
+  openReactionMenuId,
+  onOpenReactionMenu,
+  onCloseReactionMenu,
+  onReact,
+  onReply,
+  onTypedResponse,
+  showSenderTitle,
+  participantNames,
+}) => {
+  const [hovered, setHovered] = useState(false);
+  const display = formatMessageForDisplay(message.content);
+  const direct = isDirectCommunication(message);
+  const laneKey = getMessageLane(message, lane);
+  const laneAccent = LANE_ACCENTS[laneKey] || LANE_ACCENTS.strong;
+  const eventDescriptor = describeEventMessage(message);
+  const showReactionButton = message.role !== 'user' && !message.pending && !message.failed;
+  const reactionMenuOpen = openReactionMenuId === message.id;
+  const eventAlignment = eventAlignmentForMessage(message);
+  const alignSelf = direct
+    ? (message.role === 'user' ? 'flex-end' : 'flex-start')
+    : (eventAlignment === 'right' ? 'flex-end' : eventAlignment === 'center' ? 'center' : 'flex-start');
+  const eventWidth = eventAlignment === 'center' ? '72%' : '68%';
+
+  return (
+    <MotionDiv
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        alignSelf,
+        maxWidth: direct ? '78%' : eventWidth,
+        width: direct ? 'auto' : eventWidth,
+        position: 'relative',
+      }}
+    >
+      {showSenderTitle && (
+        <div
+          style={{
+            fontSize: '10px',
+            fontWeight: 800,
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            color: direct ? laneAccent.chip : '#8fa2c4',
+            marginBottom: '8px',
+            paddingLeft: message.role === 'user' ? 0 : '4px',
+            textAlign: direct
+              ? (message.role === 'user' ? 'right' : 'left')
+              : (eventAlignment === 'right' ? 'right' : eventAlignment === 'center' ? 'center' : 'left'),
+          }}
+        >
+          {messageSenderTitle(message, lane, participantNames)}
+        </div>
+      )}
+      <div
+        style={{
+          background: direct
+            ? laneAccent.bubbleBg
+            : 'transparent',
+          padding: direct ? '14px 18px' : '2px 0 0',
+          borderRadius: direct
+            ? message.role === 'user'
+              ? '16px 16px 4px 16px'
+              : '16px 16px 16px 4px'
+            : '0',
+          border: message.is_intervention
+            ? '1px solid rgba(255,77,77,0.3)'
+            : direct
+            ? `1px solid ${laneAccent.bubbleBorder}`
+            : 'none',
+          color: direct ? '#f7f8fc' : '#e7e8ef',
+          boxShadow: direct ? laneAccent.bubbleShadow : 'none',
+          position: 'relative',
+        }}
+      >
+        {!direct && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', flexWrap: 'wrap' }}>
+            {eventDescriptor.tags.map((tag) => (
+              <span key={tag} style={{ fontSize: '9px', color: '#9aa0b5', borderRadius: '999px', padding: '2px 6px', background: 'rgba(255,255,255,0.03)' }}>
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
+        {message.is_intervention && (
+          <div style={{ color: '#ff4d4d', fontSize: '10px', fontWeight: 800, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px', letterSpacing: '0.08em' }}>
+            <AlertCircle size={12} /> ACTION REQUIRED
+          </div>
+        )}
+        <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.65' }}>
+          {display.lead && (
+            <div style={{ fontSize: '13px', color: direct ? 'rgba(255,255,255,0.92)' : '#e8e9f2', fontWeight: 600, marginBottom: '10px' }}>
+              {display.lead}
+            </div>
+          )}
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{display.body}</ReactMarkdown>
+        </div>
+        {(message.pending || message.failed) && (
+          <div style={{ marginTop: '8px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.06em', color: message.failed ? 'rgba(255,230,230,0.92)' : 'rgba(255,255,255,0.78)' }}>
+            {message.failed ? 'SEND FAILED' : 'SENDING'}
+          </div>
+        )}
+        <AnimatePresence>
+        {showReactionButton && hovered && direct && (
+          <div
+            style={{
+              position: 'absolute',
+              right: '18px',
+              bottom: '-18px',
+              zIndex: 10,
+            }}
+          >
+            <MessageActionPill
+              message={message}
+              onReact={(messageId) => onOpenReactionMenu(reactionMenuOpen ? null : messageId)}
+              onReply={onReply}
+            />
+            {reactionMenuOpen && (
+              <ReactionMenu
+                message={message}
+                busyKey={reactionBusyKey}
+                onReact={onReact}
+                onTypedResponse={onTypedResponse}
+                onClose={() => onCloseReactionMenu()}
+              />
+            )}
+          </div>
+        )}
+        </AnimatePresence>
+      </div>
+      <MessageMetaRow message={message} lane={lane} participantNames={participantNames} />
+      <AnimatePresence>
+      {showReactionButton && hovered && !direct && (
+        <div
+          style={{
+            position: 'absolute',
+            display: 'flex',
+            justifyContent: 'flex-end',
+            right: 0,
+            top: '100%',
+            marginTop: '-20px',
+            zIndex: 10,
+          }}
+        >
+          <MessageActionPill
+            message={message}
+            onReact={(messageId) => onOpenReactionMenu(reactionMenuOpen ? null : messageId)}
+            onReply={onReply}
+          />
+          {reactionMenuOpen && (
+            <ReactionMenu
+              message={message}
+              busyKey={reactionBusyKey}
+              onReact={onReact}
+              onTypedResponse={onTypedResponse}
+              onClose={() => onCloseReactionMenu()}
+            />
+          )}
+        </div>
+      )}
+      </AnimatePresence>
+    </MotionDiv>
+  );
+};
+
+
+// ─── Settings View ─────────────────────────────────────────────────────────────
+const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetDone, setResetDone] = useState(false);
@@ -275,48 +869,20 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
     display: 'flex', flexDirection: 'column', gap: '8px'
   };
 
+  const visiblePools = currentScope === 'home' ? ['strong', 'weak'] : [currentScope];
+
   return (
-    <MotionDiv
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        zIndex: 1000, backdropFilter: 'blur(4px)'
-      }}
-    >
-      <MotionDiv
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        onClick={e => e.stopPropagation()}
-        style={{
-          background: '#141418', border: '1px solid rgba(255,255,255,0.1)',
-          borderRadius: '20px', padding: '32px', width: '560px',
-          display: 'flex', flexDirection: 'column', gap: '24px',
-          maxHeight: '90vh', overflowY: 'auto'
-        }}
-      >
-        {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'rgba(130,87,229,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Settings size={18} color="#8257e5" />
-            </div>
-            <div>
-              <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#edeeef' }}>Settings</h2>
-              <p style={{ fontSize: '12px', color: '#888' }}>Advanced configuration</p>
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: '4px' }}>
-            <X size={20} />
-          </button>
+    <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      <DashboardPanel title="SETTINGS SCOPE">
+        <div style={{ fontSize: '13px', color: '#c7c8d6', lineHeight: 1.6 }}>
+          {currentScope === 'home'
+            ? 'Global settings view. Shared controls are shown here, along with both strong and weak model-pool configuration.'
+            : `${currentScope === 'strong' ? 'Strong' : 'Weak'} scope. This page is focused on settings relevant to the currently selected agent lane.`}
         </div>
+      </DashboardPanel>
 
         {/* ── Connection ───────────────────────────────────────────────────── */}
-        <div>
+        <DashboardPanel title="CONNECTION">
           <div style={sectionLabel}>CONNECTION</div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <div style={{ ...infoValue, flex: 1, color: '#888' }}>{apiUrl}</div>
@@ -339,10 +905,10 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               {testResult.ok ? `Connected in ${testResult.latency}ms` : testResult.error}
             </div>
           )}
-        </div>
+        </DashboardPanel>
 
         {/* ── Model Registry ───────────────────────────────────────────────── */}
-        <div>
+        <DashboardPanel title="MODEL REGISTRY">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <div style={sectionLabel}>MODEL REGISTRY</div>
             {savingRegistry && <span style={{ fontSize: '10px', color: '#8257e5', fontWeight: 700 }}>SAVING…</span>}
@@ -369,6 +935,7 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
             ))}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}>
+            {visiblePools.includes('strong') && (
             <div>
               <div style={{ ...sectionLabel, marginBottom: '6px' }}>STRONG PRESETS</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
@@ -391,6 +958,8 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
                 ))}
               </div>
             </div>
+            )}
+            {visiblePools.includes('weak') && (
             <div>
               <div style={{ ...sectionLabel, marginBottom: '6px' }}>WEAK PRESETS</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
@@ -413,10 +982,12 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
                 ))}
               </div>
             </div>
+            )}
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             {/* Strong Pool */}
+            {visiblePools.includes('strong') && (
             <div style={inputGroupStyle}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL (CLOUD)</div>
               {registryConfig.strong?.[0]?.provider && API_KEY_LINKS[registryConfig.strong[0].provider] && (
@@ -463,8 +1034,10 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
                 onChange={e => handleUpdateRegistry('strong', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
             </div>
+            )}
 
             {/* Weak Pool */}
+            {visiblePools.includes('weak') && (
             <div style={inputGroupStyle}>
               <div style={{ fontSize: '11px', fontWeight: 700, color: '#00d9ff', marginBottom: '4px', letterSpacing: '0.05em' }}>WEAK POOL (LOCAL)</div>
               <input 
@@ -496,11 +1069,12 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
                 onChange={e => handleUpdateRegistry('weak', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)}
               />
             </div>
+            )}
           </div>
-        </div>
+        </DashboardPanel>
 
         {/* ── Orchestrator Settings ────────────────────────────────────────── */}
-        <div>
+        <DashboardPanel title="ORCHESTRATOR">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <div style={sectionLabel}>ORCHESTRATOR</div>
             {savingSettings && <span style={{ fontSize: '10px', color: '#8257e5', fontWeight: 700 }}>SAVING…</span>}
@@ -572,10 +1146,10 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               </span>
             </label>
           </div>
-        </div>
+        </DashboardPanel>
 
         {/* ── Danger Zone ──────────────────────────────────────────────────── */}
-        <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <DashboardPanel title="DANGER ZONE">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Database size={14} color="#ff4d4d" />
             <span style={{ fontSize: '11px', fontWeight: 700, color: '#ff4d4d', letterSpacing: '0.08em' }}>DANGER ZONE</span>
@@ -603,15 +1177,36 @@ const SettingsModal = ({ onClose, onResetDatabase, apiUrl }) => {
               {resetting ? 'Resetting…' : resetDone ? '✓ Done' : resetConfirm ? 'Confirm Reset' : 'Reset DB'}
             </button>
           </div>
-        </div>
-      </MotionDiv>
-    </MotionDiv>
+        </DashboardPanel>
+    </div>
   );
 };
 
 // ─── Session History Pane ──────────────────────────────────────────────────────
-const HistoryPane = ({ sessionList, sessionId, setSessionId, deleteSession }) => (
+const HistoryPane = ({ sessionList, sessionId, setSessionId, deleteSession, renameSession, onNewSession, showLaneBadge = false }) => (
   <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '8px 0' }}>
+    <button
+      type="button"
+      onClick={onNewSession}
+      style={{
+        margin: '0 8px 6px',
+        padding: '12px 14px',
+        borderRadius: '12px',
+        border: '1px solid rgba(130,87,229,0.22)',
+        background: 'rgba(130,87,229,0.08)',
+        color: '#b693ff',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        fontSize: '14px',
+        fontWeight: 700,
+        cursor: 'pointer',
+        textAlign: 'left',
+      }}
+    >
+      <Plus size={16} />
+      <span>New Session</span>
+    </button>
     {sessionList.length === 0 && (
       <div style={{ textAlign: 'center', color: '#555', fontSize: '13px', padding: '32px 16px' }}>
         No sessions yet
@@ -622,21 +1217,31 @@ const HistoryPane = ({ sessionList, sessionId, setSessionId, deleteSession }) =>
         key={session.session_id}
         session={session}
         active={sessionId === session.session_id}
+        showLaneBadge={showLaneBadge}
         onClick={() => setSessionId(session.session_id)}
         onDelete={() => deleteSession(session.session_id)}
+        onRename={() => renameSession(session)}
       />
     ))}
   </div>
 );
 
-const SessionRow = ({ session, active, onClick, onDelete }) => {
+const SessionRow = ({ session, active, onClick, onDelete, onRename, showLaneBadge = false }) => {
   const [hovered, setHovered] = useState(false);
-  const s = displaySessionId(session.session_id);
-  const label = s === 'default' ? 'Genesis Session' : (() => {
-    const ts = parseInt(s.replace('session-', ''), 10);
-    if (isNaN(ts)) return s;
-    return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  })();
+  const baseLabel = session.title || fallbackSessionTitle(session.session_id);
+  const unreadCount = Number(session.unread_count || 0);
+  const sourceKind = String(session.session_metadata?.opened_by || session.session_metadata?.source_kind || '').trim();
+  const autonomous = sourceKind && sourceKind !== 'user_opened' && sourceKind !== 'user';
+  const isDraft = Boolean(session?.draft) || isDraftSessionId(session?.session_id);
+  const sessionTime = isDraft ? session.created_at : session.last_message_at;
+  const lane = laneForSessionId(session?.session_id);
+  const laneBadge = lane === 'weak'
+    ? { label: 'Weak', color: '#92f7ce', bg: 'rgba(0,242,148,0.08)', border: 'rgba(0,242,148,0.18)' }
+    : { label: 'Strong', color: '#d7c8ff', bg: 'rgba(130,87,229,0.12)', border: 'rgba(130,87,229,0.24)' };
+  const iconBg = active ? laneBadge.bg : lane === 'weak' ? 'rgba(0,242,148,0.1)' : 'rgba(130,87,229,0.14)';
+  const iconBorder = `1px solid ${laneBadge.border}`;
+  const titleColor = active ? '#f1eaff' : lane === 'weak' ? '#a8f7d8' : '#dccfff';
+  const previewColor = active ? 'rgba(233,240,255,0.82)' : lane === 'weak' ? 'rgba(168,247,216,0.76)' : 'rgba(220,207,255,0.74)';
 
   return (
     <div
@@ -653,19 +1258,66 @@ const SessionRow = ({ session, active, onClick, onDelete }) => {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', overflow: 'hidden' }}>
-        <MessageSquare size={14} style={{ opacity: active ? 1 : 0.5, flexShrink: 0 }} />
+        <span
+          style={{
+            width: '22px',
+            height: '22px',
+            borderRadius: '999px',
+            background: iconBg,
+            border: iconBorder,
+            color: laneBadge.color,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: unreadCount > 0 ? '9px' : '0',
+            fontWeight: 800,
+            flexShrink: 0,
+            position: 'relative',
+            boxShadow: active ? `0 0 14px ${lane === 'weak' ? 'rgba(0,242,148,0.12)' : 'rgba(130,87,229,0.16)'}` : 'none',
+          }}
+        >
+          {unreadCount > 0 ? (
+            unreadCount > 99 ? '99+' : unreadCount
+          ) : (
+            <MessageSquare size={12} style={{ color: laneBadge.color, opacity: 0.95 }} />
+          )}
+        </span>
         <div style={{ overflow: 'hidden' }}>
-          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
-          <div style={{ fontSize: '10px', color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {showLaneBadge ? (
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ color: laneBadge.color, fontWeight: 700 }}>{laneBadge.label}</span>
+                <span style={{ color: titleColor }}>:</span>
+                <span style={{ color: titleColor }}> {baseLabel}</span>
+              </span>
+            ) : (
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: titleColor }}>{baseLabel}</span>
+            )}
+            {autonomous && (
+              <span style={{ fontSize: '9px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#92f7ce', background: 'rgba(0,242,148,0.08)', border: '1px solid rgba(0,242,148,0.18)', borderRadius: '999px', padding: '2px 5px', flexShrink: 0 }}>
+                Auto
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: '10px', color: previewColor, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {session.last_message_preview || 'No messages yet'}
           </div>
         </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-        <span title={formatAbsoluteTime(session.last_message_at)} style={{ fontSize: '10px', color: '#666' }}>
-          {formatRelativeTime(session.last_message_at)}
+        <span title={formatAbsoluteTime(sessionTime)} style={{ fontSize: '10px', color: '#666' }}>
+          {formatRelativeTime(sessionTime)}
         </span>
-        {(hovered || active) && (
+        {hovered && (
+          <button
+            onClick={e => { e.stopPropagation(); onRename(); }}
+            title="Rename session"
+            style={{ background: 'none', border: 'none', color: '#8d90a3', cursor: 'pointer', padding: '2px', display: 'flex', opacity: 0.8, flexShrink: 0 }}
+          >
+            <Pencil size={12} />
+          </button>
+        )}
+        {hovered && (
           <button
             onClick={e => { e.stopPropagation(); onDelete(); }}
             style={{ background: 'none', border: 'none', color: '#ff4d4d', cursor: 'pointer', padding: '2px', display: 'flex', opacity: 0.7, flexShrink: 0 }}
@@ -683,22 +1335,31 @@ function App() {
   const [messages, setMessages]       = useState([]);
   const [tasks, setTasks]             = useState([]);
   const [inputText, setInputText]     = useState('');
+  const [laneDrafts, setLaneDrafts]   = useState({ strong: [], weak: [] });
   const [isSending, setIsSending]     = useState(false);
   const [sendError, setSendError]     = useState('');
   const [reactionBusyKey, setReactionBusyKey] = useState('');
+  const [openReactionMenuId, setOpenReactionMenuId] = useState('');
+  const [replyTarget, setReplyTarget] = useState(null);
   const [chatLane, setChatLane]       = useState('strong');
-  const [laneSessionIds, setLaneSessionIds] = useState({
+  const [currentScope, setCurrentScope] = useState('strong');
+  const [scopeSessionIds, setScopeSessionIds] = useState({
+    home: null,
     strong: defaultSessionIdForLane('strong'),
     weak: defaultSessionIdForLane('weak'),
   });
   const [sessionList, setSessionList] = useState([]);
-  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'history' | 'dashboard'
-  const [showSettings, setShowSettings] = useState(false);
+  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'knowledge' | 'dashboard'
   const [apiStatus, setApiStatus]     = useState('connecting'); // 'ok' | 'error' | 'connecting'
   const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
+  const sessionListRef = useRef([]);
   const isSendingRef = useRef(false);
   const fetchGenRef = useRef(0);       // generation counter for stale-poll rejection
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
+  const [laneStatuses, setLaneStatuses] = useState({ strong: 'IDLE', weak: 'IDLE' });
+  const [globalPaused, setGlobalPaused] = useState(false);
+  const [pausedLanes, setPausedLanes] = useState([]);
   const [rebooting, setRebooting] = useState(false);
   const [telemetry, setTelemetry] = useState(null);
   const [providerTelemetry, setProviderTelemetry] = useState({});
@@ -719,6 +1380,9 @@ function App() {
   const [evalJobsSnapshot, setEvalJobsSnapshot] = useState([]);
   const [operatorNotice, setOperatorNotice] = useState('');
   const [showFinishedTasks, setShowFinishedTasks] = useState(false);
+  const [editingSessionTitle, setEditingSessionTitle] = useState(false);
+  const [sessionTitleDraft, setSessionTitleDraft] = useState('');
+  const [titleHovered, setTitleHovered] = useState(false);
   const API = 'http://localhost:8000';
 
   const [archivedTasks, setArchivedTasks] = useState(() => {
@@ -735,12 +1399,64 @@ function App() {
 
   const [tiers, setTiers] = useState({ Strong: 'unknown', Weak: 'unknown' });
   const [showCloudModal, setShowCloudModal] = useState(false);
-  const sessionId = laneSessionIds[chatLane] || defaultSessionIdForLane(chatLane);
+  const sessionId = scopeSessionIds[currentScope] || (currentScope === 'home' ? null : defaultSessionIdForLane(currentScope));
+  const effectiveLane = currentScope === 'home'
+    ? (sessionId ? laneForSessionId(sessionId) : chatLane)
+    : currentScope;
+  const isDraftSession = isDraftSessionId(sessionId);
+  const currentDraft = Object.values(laneDrafts).flat().find((draft) => draft?.session_id === sessionId) || null;
+  const activeChatRoute = routingSummary?.[effectiveLane] || routingSummary?.chat || null;
+  const currentSession = currentDraft || sessionList.find((session) => session.session_id === sessionId) || null;
+  const currentSessionMetadata = currentSession?.session_metadata || {};
+  const visibleSessionId = displaySessionId(sessionId);
+  const sessionLabel = currentSession?.title || currentDraft?.title || fallbackSessionTitle(sessionId);
+  const sessionMetaLabel = isDraftSession
+    ? `${effectiveLane.toUpperCase()} draft session`
+    : visibleSessionId === 'default'
+    ? `${effectiveLane.toUpperCase()} default session`
+    : currentScope === 'home'
+    ? `GLOBAL · ${effectiveLane.toUpperCase()} · ${visibleSessionId}`
+    : `${effectiveLane.toUpperCase()} · ${visibleSessionId}`;
+  const suggestedSessionTitle = currentSessionMetadata?.recommended_title && currentSessionMetadata?.recommended_title !== sessionLabel
+    ? currentSessionMetadata.recommended_title
+    : '';
+  const participantNames = currentSessionMetadata?.participant_names || { user: 'You', strong: 'Strong', weak: 'Weak', system: 'System' };
+  const replyTargetSender = replyTarget ? messageSenderTitle(replyTarget, effectiveLane, participantNames) : '';
+  const showSessionPane = activeNav === 'chat';
+  const showTaskPane = activeNav === 'chat' || activeNav === 'dashboard';
+  const showSpecBanner = activeNav === 'chat';
+
+  useEffect(() => {
+    sessionListRef.current = sessionList;
+  }, [sessionList]);
+
+  useEffect(() => {
+    setOpenReactionMenuId('');
+  }, [messages, sessionId]);
+
+  useEffect(() => {
+    if (isDraftSession) {
+      setInputText(currentDraft?.draftMessage || '');
+      setMessages([]);
+      setSendError('');
+      return;
+    }
+      setInputText('');
+  }, [currentDraft?.draftMessage, isDraftSession, sessionId]);
+
+  useEffect(() => {
+    if (replyTarget) {
+      inputRef.current?.focus();
+    }
+  }, [replyTarget]);
 
   const fetchWorkerStatus = useCallback(async () => {
     try {
       const res = await axios.get(`${API}/admin/worker/status`);
       setWorkerStatus(res.data.status.worker);
+      setGlobalPaused(Boolean(res.data.status.global_paused));
+      setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes : []);
+      setLaneStatuses(res.data.status.lanes || { strong: 'IDLE', weak: 'IDLE' });
       setTiers(res.data.status.tiers);
       if (res.data.status.tiers.Strong === 'error' && !localStorage.getItem('skipCloudWarning')) {
         setShowCloudModal(true);
@@ -752,10 +1468,8 @@ function App() {
     const timer = setTimeout(() => {
       void fetchWorkerStatus();
     }, 0);
-    const interval = setInterval(fetchWorkerStatus, 5000);
     return () => {
       clearTimeout(timer);
-      clearInterval(interval);
     };
   }, [fetchWorkerStatus]);
 
@@ -773,27 +1487,41 @@ function App() {
     }
   };
 
-  const handlePause = async () => {
+  const handlePause = async (lane = null) => {
     try {
-      await axios.post(`${API}/admin/worker/pause`);
-      setWorkerStatus('PAUSED');
+      await axios.post(`${API}/admin/worker/pause`, null, lane ? { params: { lane } } : undefined);
+      await fetchWorkerStatus();
     } catch (e) { console.error(e); }
   };
 
-  const handleResume = async () => {
+  const handleResume = async (lane = null) => {
     try {
-      await axios.post(`${API}/admin/worker/resume`);
-      setWorkerStatus('RUNNING');
+      await axios.post(`${API}/admin/worker/resume`, null, lane ? { params: { lane } } : undefined);
+      await fetchWorkerStatus();
     } catch (e) { console.error(e); }
   };
 
-  const handleStop = async () => {
+  const handlePauseTask = async (taskId) => {
+    if (!taskId) return;
     try {
-      const res = await axios.post(`${API}/admin/worker/stop`);
-      if (res.data.aborted) {
-        // Option to display notification "Task Aborted"
-      }
-      fetchWorkerStatus();
+      await axios.post(`${API}/admin/tasks/${taskId}/pause`);
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+    } catch (e) { console.error(e); }
+  };
+
+  const handleResumeTask = async (taskId) => {
+    if (!taskId) return;
+    try {
+      await axios.post(`${API}/admin/tasks/${taskId}/resume`);
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+    } catch (e) { console.error(e); }
+  };
+
+  const handleStopTask = async (taskId) => {
+    if (!taskId) return;
+    try {
+      await axios.post(`${API}/admin/tasks/${taskId}/stop`);
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
     } catch (e) { console.error(e); }
   };
 
@@ -808,12 +1536,12 @@ function App() {
 
     // Increment generation — any older in-flight fetch will see a mismatch and bail
     const gen = ++fetchGenRef.current;
-
     try {
+      const sessionParams = activeNav === 'chat' && currentScope !== 'home' ? { lane: effectiveLane } : undefined;
       const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes, proposalConfigRes, evalJobsRes] = await Promise.all([
         axios.get(`${API}/tasks`),
-        axios.get(`${API}/messages?session_id=${sessionId}`),
-        axios.get(`${API}/sessions`),
+        !sessionId || isDraftSession ? Promise.resolve({ data: [] }) : axios.get(`${API}/messages?session_id=${sessionId}`),
+        axios.get(`${API}/sessions`, { params: sessionParams }),
         axios.get(`${API}/admin/telemetry?limit=8`),
         axios.get(`${API}/admin/providers/telemetry`),
         axios.get(`${API}/admin/dashboard?limit=6`),
@@ -835,10 +1563,12 @@ function App() {
       setTasks(tasksRes.data);
       setMessages(msgsRes.data);
       const sessions = (Array.isArray(sessionsRes.data) ? sessionsRes.data.slice() : [])
-        .filter((session) => laneForSessionId(session.session_id) === chatLane);
-      if (!sessions.some((s) => s.session_id === sessionId)) {
+        .filter((session) => activeNav !== 'chat' || currentScope === 'home' || sessionMatchesLane(session.session_id, effectiveLane));
+      if (sessionId && !sessions.some((s) => s.session_id === sessionId)) {
+        const existingSession = sessionListRef.current.find((session) => session.session_id === sessionId);
         sessions.push({
           session_id: sessionId,
+          title: existingSession?.title || fallbackSessionTitle(sessionId),
           message_count: msgsRes.data.length,
           first_message_at: msgsRes.data[0]?.created_at || null,
           last_message_at: msgsRes.data[msgsRes.data.length - 1]?.created_at || null,
@@ -862,24 +1592,32 @@ function App() {
       setProposalConfigSnapshot(proposalConfigRes?.data?.config || null);
       setEvalJobsSnapshot(evalJobsRes?.data?.jobs || []);
       setApiStatus('ok');
+      if (activeNav === 'chat' && currentScope === 'home' && !sessionId && sessions.length) {
+        setScopeSessionIds((prev) => ({ ...prev, home: sessions[0].session_id }));
+      }
     } catch (err) {
       if (gen !== fetchGenRef.current) return;
       console.error('Fetch failed', err);
       setApiStatus('error');
     }
-  }, [chatLane, sessionId]);
+  }, [activeNav, currentScope, effectiveLane, isDraftSession, sessionId]);
 
   useEffect(() => {
     fetchData(true);
-    
-    // Replace polling with Server-Sent Events (SSE)
+
+    let fallbackInterval = null;
     const es = new EventSource(`${API}/events`);
-    
+
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
         console.log('SSE Event:', data);
-        if (data.type === 'task_update' || data.type === 'message') {
+        if (fallbackInterval) {
+          clearInterval(fallbackInterval);
+          fallbackInterval = null;
+        }
+        if (data.type === 'task_update' || data.type === 'message' || data.type === 'worker_status') {
+          fetchWorkerStatus();
           fetchData(true);
         }
       } catch (err) {
@@ -889,11 +1627,21 @@ function App() {
 
     es.onerror = (err) => {
       console.error('SSE Error:', err);
-      // Fallback: stay on polling if SSE fails
+      if (!fallbackInterval) {
+        fallbackInterval = setInterval(() => {
+          fetchWorkerStatus();
+          fetchData(true);
+        }, 30000);
+      }
     };
 
-    return () => es.close();
-  }, [fetchData]);
+    return () => {
+      es.close();
+      if (fallbackInterval) {
+        clearInterval(fallbackInterval);
+      }
+    };
+  }, [API, fetchData, fetchWorkerStatus]);
 
   useEffect(() => {
     if (activeNav !== 'knowledge') return;
@@ -943,26 +1691,69 @@ function App() {
   const handleSendMessage = async () => {
     if (!inputText.trim() || isSending) return;
     const text = inputText;
+    const replyPrefix = replyTarget
+      ? `Replying to "${String(replyTarget.content || '').replace(/\s+/g, ' ').trim().slice(0, 120)}": `
+      : '';
+    const outboundText = `${replyPrefix}${text}`;
     const tempId = `temp-${Date.now()}`;
     setInputText('');
+    if (isDraftSession) {
+      setLaneDrafts((prev) => ({
+        ...prev,
+        [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
+          draft?.session_id === sessionId
+            ? { ...draft, draftMessage: '', last_message_preview: 'Draft' }
+            : draft
+        )),
+      }));
+    }
     setSendError('');
     setIsSending(true);
     isSendingRef.current = true;
+    const targetSessionId = isDraftSession ? `${effectiveLane}:session-${Date.now()}` : sessionId;
     // Optimistic update: show the user's message immediately
-    setMessages(prev => [...prev, { id: tempId, role: 'user', content: text, pending: true }]);
+    setMessages(prev => [...prev, { id: tempId, role: 'user', content: outboundText, pending: true }]);
     try {
       await axios.post(`${API}/chat`, {
         role: 'user',
-        content: text,
-        session_id: sessionId,
-        preferred_tier: chatLane,
+        content: outboundText,
+        session_id: targetSessionId,
+        preferred_tier: effectiveLane,
       });
-      await fetchData(true);
+      if (isDraftSession) {
+        const draftTitle = String(currentDraft?.title || '').trim();
+        if (draftTitle && draftTitle !== fallbackSessionTitle(currentDraft?.session_id)) {
+          try {
+            await axios.patch(`${API}/sessions/${targetSessionId}`, { title: draftTitle });
+          } catch (renameErr) {
+            console.error('Failed to apply draft session title.', renameErr);
+          }
+        }
+        setLaneDrafts((prev) => ({
+          ...prev,
+          [effectiveLane]: (prev[effectiveLane] || []).filter((draft) => draft?.session_id !== sessionId),
+        }));
+        setScopeSessionIds((prev) => ({ ...prev, [currentScope]: targetSessionId }));
+      } else {
+        await fetchData(true);
+      }
+      setReplyTarget(null);
     } catch (err) {
       console.error('Failed to send message.', err);
       const detail = err?.response?.data?.detail;
       const message = typeof detail === 'string' ? detail : 'Message failed to send. Please retry.';
       setSendError(message);
+      if (isDraftSession) {
+        setLaneDrafts((prev) => ({
+          ...prev,
+          [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
+            draft?.session_id === sessionId
+              ? { ...draft, draftMessage: outboundText, last_message_preview: outboundText }
+              : draft
+          )),
+        }));
+        setInputText(outboundText);
+      }
       setMessages(prev => prev.map(msg => (
         msg.id === tempId ? { ...msg, pending: false, failed: true } : msg
       )));
@@ -991,22 +1782,62 @@ function App() {
     } finally {
       setReactionBusyKey('');
     }
-  }, [API, fetchData, sessionId]);
+  }, [API, effectiveLane, fetchData, sessionId]);
 
   const startNewChat = () => {
-    const newId = `${chatLane}:session-${Date.now()}`;
-    setLaneSessionIds(prev => ({ ...prev, [chatLane]: newId }));
+    const draftLane = currentScope === 'home' ? chatLane : currentScope;
+    const draftsForLane = laneDrafts[draftLane] || [];
+    const activeDraft = draftsForLane.find((draft) => draft?.session_id === sessionId) || null;
+    if (activeDraft && !draftHasContent(activeDraft)) {
+      setScopeSessionIds(prev => ({ ...prev, [currentScope]: activeDraft.session_id }));
+      setMessages([]);
+      setInputText(activeDraft.draftMessage || '');
+      setSendError('');
+      return;
+    }
+    const draftId = draftSessionIdForLane(draftLane);
+    setLaneDrafts((prev) => ({
+      ...prev,
+      [draftLane]: [{
+        session_id: draftId,
+        title: 'New Session',
+        draft: true,
+        draftMessage: '',
+        unread_count: 0,
+        created_at: new Date().toISOString(),
+        last_message_at: null,
+        last_message_preview: 'Draft',
+        session_metadata: {
+          participant_names: { user: 'You', strong: 'Strong', weak: 'Weak', system: 'System' },
+        },
+      }, ...(prev[draftLane] || [])],
+    }));
+    setScopeSessionIds(prev => ({ ...prev, [currentScope]: draftId }));
     setMessages([]);
     setInputText('');
     setSendError('');
   };
 
   const deleteSession = async (idToDelete) => {
+    if (isDraftSessionId(idToDelete)) {
+      const draftLane = laneForSessionId(idToDelete);
+      setLaneDrafts((prev) => ({
+        ...prev,
+        [draftLane]: (prev[draftLane] || []).filter((draft) => draft?.session_id !== idToDelete),
+      }));
+      setSessionList(prev => prev.filter((session) => session.session_id !== idToDelete));
+      if (sessionId === idToDelete) {
+        setScopeSessionIds(prev => ({ ...prev, [currentScope]: currentScope === 'home' ? null : defaultSessionIdForLane(draftLane) }));
+        setMessages([]);
+        setInputText('');
+      }
+      return;
+    }
     try {
       await axios.delete(`${API}/sessions/${idToDelete}`);
       setSessionList(prev => prev.filter((session) => session.session_id !== idToDelete));
       if (sessionId === idToDelete) {
-        setLaneSessionIds(prev => ({ ...prev, [chatLane]: defaultSessionIdForLane(chatLane) }));
+        setScopeSessionIds(prev => ({ ...prev, [currentScope]: currentScope === 'home' ? null : defaultSessionIdForLane(effectiveLane) }));
         setMessages([]);
       }
     } catch (err) {
@@ -1014,10 +1845,101 @@ function App() {
     }
   };
 
+  const renameSession = useCallback(async (session) => {
+    const currentTitle = session?.title || fallbackSessionTitle(session?.session_id);
+    const nextTitle = window.prompt('Rename session:', currentTitle);
+    if (nextTitle == null) return;
+    const normalizedTitle = nextTitle.trim();
+    if (!normalizedTitle || normalizedTitle === currentTitle) return;
+    if (isDraftSessionId(session?.session_id)) {
+      const draftLane = laneForSessionId(session.session_id);
+      setLaneDrafts((prev) => ({
+        ...prev,
+        [draftLane]: (prev[draftLane] || []).map((draft) => (
+          draft?.session_id === session.session_id
+            ? { ...draft, title: normalizedTitle }
+            : draft
+        )),
+      }));
+      return;
+    }
+    try {
+      await axios.patch(`${API}/sessions/${session.session_id}`, { title: normalizedTitle });
+      await fetchData(true);
+    } catch (err) {
+      console.error('Failed to rename session.', err);
+    }
+  }, [API, fetchData]);
+
+  const commitInlineSessionTitle = useCallback(async () => {
+    const normalizedTitle = String(sessionTitleDraft || '').trim();
+    setEditingSessionTitle(false);
+    if (!normalizedTitle || normalizedTitle === sessionLabel) {
+      setSessionTitleDraft(sessionLabel);
+      return;
+    }
+    if (isDraftSession) {
+      setLaneDrafts((prev) => ({
+        ...prev,
+        [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
+          draft?.session_id === sessionId
+            ? { ...draft, title: normalizedTitle }
+            : draft
+        )),
+      }));
+      return;
+    }
+    try {
+      await axios.patch(`${API}/sessions/${sessionId}`, { title: normalizedTitle });
+      await fetchData(true);
+    } catch (err) {
+      console.error('Failed to rename session.', err);
+      setSessionTitleDraft(sessionLabel);
+    }
+  }, [API, effectiveLane, fetchData, isDraftSession, sessionId, sessionLabel, sessionTitleDraft]);
+
+  const acceptSuggestedSessionTitle = useCallback(async (sessionIdToRename, suggestedTitle) => {
+    const normalizedTitle = String(suggestedTitle || '').trim();
+    if (!normalizedTitle) return;
+    try {
+      await axios.patch(`${API}/sessions/${sessionIdToRename}`, { title: normalizedTitle });
+      await fetchData(true);
+    } catch (err) {
+      console.error('Failed to apply suggested session title.', err);
+    }
+  }, [API, fetchData]);
+
+  const handleTypedReactionResponse = useCallback(async (message) => {
+    const preview = String(message?.content || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const typedResponse = window.prompt('Add a typed response for this message:', '');
+    setOpenReactionMenuId('');
+    if (typedResponse == null) return;
+    const normalized = typedResponse.trim();
+    if (!normalized) return;
+    try {
+      await axios.post(`${API}/chat`, {
+        role: 'user',
+        content: `Feedback on message "${preview}": ${normalized}`,
+        session_id: sessionId,
+        preferred_tier: effectiveLane,
+      });
+      await fetchData(true);
+    } catch (err) {
+      console.error('Failed to send typed response.', err);
+    }
+  }, [API, effectiveLane, fetchData, sessionId]);
+
+  const handleReplyToMessage = useCallback((message) => {
+    setOpenReactionMenuId('');
+    setReplyTarget(message);
+  }, []);
+
   const handleResetDatabase = async () => {
     await axios.post(`${API}/admin/reset`);
     setSessionList([]);
-    setLaneSessionIds({
+    setLaneDrafts({ strong: [], weak: [] });
+    setScopeSessionIds({
+      home: null,
       strong: defaultSessionIdForLane('strong'),
       weak: defaultSessionIdForLane('weak'),
     });
@@ -1087,13 +2009,74 @@ function App() {
   }, [API, runOperatorAction]);
 
   // Derived telemetry from live data
-  const completedCount  = tasks.filter(t => t.status === 'complete').length;
-  const runningCount    = tasks.filter(t => t.status === 'working').length;
-  const totalCount      = tasks.length;
-  const blockedCount    = tasks.filter(t => t.status === 'blocked').length;
-  const passRate        = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : '—';
   const specPendingCount = dashboard?.spec_governance?.pending_count ?? 0;
   const specClarificationCount = dashboard?.spec_governance?.clarification_count ?? 0;
+
+  const tasksForScope = React.useMemo(() => {
+    if (currentScope === 'home') return tasks;
+    return tasks.filter((task) => {
+      const lane = String(task.lane || '').toLowerCase();
+      return !lane || lane === currentScope;
+    });
+  }, [currentScope, tasks]);
+
+  const scopeAttemptMetrics = React.useMemo(() => {
+    const attempts = tasksForScope
+      .flatMap((task) => (Array.isArray(task.attempts) ? task.attempts : []).map((attempt) => ({ ...attempt, taskId: task.id })))
+      .filter((attempt) => Boolean(attempt.started_at))
+      .sort((a, b) => String(b.ended_at || b.started_at || '').localeCompare(String(a.ended_at || a.started_at || '')));
+
+    const summarizeSuccessRate = (rows) => {
+      if (!rows.length) return '—';
+      const succeeded = rows.filter((attempt) => attempt.outcome === 'succeeded').length;
+      return `${succeeded}/${rows.length}`;
+    };
+
+    const completedDurationsMs = attempts
+      .map((attempt) => {
+        if (!attempt.started_at || !attempt.ended_at) return null;
+        const started = Date.parse(attempt.started_at);
+        const ended = Date.parse(attempt.ended_at);
+        if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) return null;
+        return ended - started;
+      })
+      .filter((value) => Number.isFinite(value));
+
+    const averageDurationMs = completedDurationsMs.length
+      ? completedDurationsMs.reduce((sum, value) => sum + value, 0) / completedDurationsMs.length
+      : null;
+
+    return {
+      attempts,
+      success10: summarizeSuccessRate(attempts.slice(0, 10)),
+      success50: summarizeSuccessRate(attempts.slice(0, 50)),
+      averageDurationLabel: averageDurationMs == null
+        ? '—'
+        : averageDurationMs < 1000
+        ? `${Math.round(averageDurationMs)}ms`
+        : averageDurationMs < 60000
+        ? `${(averageDurationMs / 1000).toFixed(1)}s`
+        : `${(averageDurationMs / 60000).toFixed(1)}m`,
+    };
+  }, [tasksForScope]);
+
+  const scopeOperationalMetrics = React.useMemo(() => {
+    const queued = tasksForScope.filter((task) => task.status === 'pending' && !task.paused && !task.human_intervention_required).length;
+    const working = tasksForScope.filter((task) => task.status === 'working').length;
+    const blocked = tasksForScope.filter((task) => task.status === 'blocked').length;
+    const needsYou = tasksForScope.filter((task) => task.human_intervention_required).length;
+    const pausedTasks = tasksForScope.filter((task) => task.paused).length;
+    return {
+      queued,
+      working,
+      blocked,
+      needsYou,
+      pausedTasks,
+      loadedContextCount: loadedContext?.files?.length || 0,
+      loadedContextBudget: loadedContext?.budget_tokens || 0,
+    };
+  }, [loadedContext?.budget_tokens, loadedContext?.files, tasksForScope]);
+  const scopeHasAnyTasks = tasksForScope.length > 0;
 
   // Build and sort Task Tree
   const taskTree = React.useMemo(() => {
@@ -1120,28 +2103,222 @@ function App() {
     return roots;
   }, [tasks, archivedTasks]);
 
-  const visibleSessionId = displaySessionId(sessionId);
-  const sessionLabel = visibleSessionId === 'default'
-    ? 'Genesis Session'
-    : (() => {
-        const ts = parseInt(visibleSessionId.replace('session-', ''), 10);
-        return isNaN(ts) ? visibleSessionId : new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-      })();
+  useEffect(() => {
+    if (!editingSessionTitle) {
+      setSessionTitleDraft(sessionLabel);
+    }
+  }, [editingSessionTitle, sessionLabel]);
+
+  useEffect(() => {
+    if (isDraftSession) return;
+    if (activeNav !== 'chat') return;
+    if (!currentSession || Number(currentSession.unread_count || 0) <= 0) return;
+    let cancelled = false;
+    const markRead = async () => {
+      try {
+        await axios.post(`${API}/sessions/${sessionId}/read`, {});
+        if (!cancelled) {
+          await fetchData(true);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Failed to mark session as read.', err);
+        }
+      }
+    };
+    void markRead();
+    return () => {
+      cancelled = true;
+    };
+  }, [API, activeNav, currentSession, fetchData, isDraftSession, sessionId]);
 
   // ── Icon Nav items ───────────────────────────────────────────────────────────
   const navItems = [
-    { id: 'chat',      Icon: MessageSquare,  label: 'Chat'      },
-    { id: 'history',   Icon: History,        label: 'History'   },
-    { id: 'knowledge', Icon: BookOpen,       label: 'Knowledge' },
-    { id: 'dashboard', Icon: LayoutDashboard,label: 'Dashboard' },
+    { id: 'chat',      Icon: MessageSquare,   label: 'Chat'      },
+    { id: 'knowledge', Icon: BookOpen,        label: 'Knowledge' },
+    { id: 'dashboard', Icon: LayoutDashboard, label: 'Dashboard' },
+    { id: 'settings',  Icon: Settings,        label: 'Settings'  },
+  ];
+  const topTabs = [
+    { id: 'home', label: 'Global', subtitle: 'System-wide view and controls', accent: 'neutral' },
+    { id: 'strong', label: 'Strong', subtitle: 'Bootstrap / supervision instance', accent: 'strong' },
+    { id: 'weak', label: 'Weak', subtitle: 'Weak-model execution instance', accent: 'weak' },
   ];
 
   const finishedTaskTree = taskTree.filter(task => ['complete', 'abandoned', 'cancelled'].includes(task.status));
   const activeTaskTree = taskTree.filter(task => !['complete', 'abandoned', 'cancelled'].includes(task.status));
-  const visibleTaskTree = activeNav === 'dashboard' ? taskTree : activeTaskTree;
+  const laneVisibleTasks = activeNav === 'chat' && currentScope !== 'home'
+    ? activeTaskTree.filter(task => {
+        const lane = String(task.lane || '').toLowerCase();
+        return !lane || lane === effectiveLane;
+      })
+    : activeTaskTree;
+  const laneFinishedTasks = activeNav === 'chat' && currentScope !== 'home'
+    ? finishedTaskTree.filter(task => {
+        const lane = String(task.lane || '').toLowerCase();
+        return !lane || lane === effectiveLane;
+      })
+    : finishedTaskTree;
+  const visibleTaskTree = activeNav === 'dashboard' ? taskTree : laneVisibleTasks;
+  const visibleSessionList = React.useMemo(() => {
+    const list = Array.isArray(sessionList) ? sessionList.slice() : [];
+    const drafts = (currentScope === 'home'
+      ? [...(laneDrafts.strong || []), ...(laneDrafts.weak || [])]
+      : (laneDrafts[effectiveLane] || []))
+      .slice()
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    const persisted = list.filter((session) => !drafts.some((draft) => draft.session_id === session.session_id));
+    return [...drafts, ...persisted];
+  }, [currentScope, effectiveLane, laneDrafts, sessionList]);
+  const buildLaneMeta = (lane) => {
+    const route = routingSummary?.[lane] || null;
+    if (route?.error) return route.error;
+    const parts = [
+      friendlyTransportLabel(route?.transport),
+      friendlyProviderLabel(route?.provider),
+      friendlyModelLabel(route?.selected_model || route?.model),
+    ].filter(Boolean);
+    return parts.join(' · ') || 'route pending';
+  };
+  const pickFocusedTask = (nodes = []) => {
+    if (!nodes.length) return null;
+    const statusRank = { working: 0, blocked: 1, pending: 2, pushed: 3 };
+    const ordered = nodes
+      .slice()
+      .sort((a, b) => {
+        const rankDelta = (statusRank[a.status] ?? 9) - (statusRank[b.status] ?? 9);
+        if (rankDelta !== 0) return rankDelta;
+        return String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || ''));
+      });
+    return ordered[0] || null;
+  };
+  const getFocusedTaskPath = (scopeId) => {
+    if (scopeId === 'home') return [];
+    const scopedTree = activeTaskTree.filter((task) => {
+      const lane = String(task.lane || '').toLowerCase();
+      return !lane || lane === scopeId;
+    });
+    const root = pickFocusedTask(scopedTree);
+    if (!root) return [];
+    const path = [root];
+    let cursor = root;
+    while (cursor?.children?.length) {
+      const activeChildren = cursor.children.filter((child) => !['complete', 'abandoned', 'cancelled'].includes(child.status));
+      const next = pickFocusedTask(activeChildren);
+      if (!next) break;
+      path.push(next);
+      cursor = next;
+    }
+    return path;
+  };
+  const buildScopeTaskProgress = (scopeId) => {
+    if (scopeId === 'home') {
+      const scopedTasks = tasks;
+      const strongActive = tasks.some((task) => String(task.lane || '').toLowerCase() === 'strong' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
+      const weakActive = tasks.some((task) => String(task.lane || '').toLowerCase() === 'weak' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
+      const blocked = scopedTasks.filter((task) => task.status === 'blocked').length;
+      const working = scopedTasks.filter((task) => task.status === 'working').length;
+      const activeLanes = [strongActive, weakActive].filter(Boolean).length;
+      return {
+        percent: activeLanes === 0 ? 0 : Math.round(((strongActive ? 1 : 0) + (weakActive ? 1 : 0)) / 2 * 100),
+        summary: `${activeLanes || 0} active lane${activeLanes === 1 ? '' : 's'}`,
+        currentTitle: blocked > 0 ? `${blocked} blocked` : working > 0 ? `${working} working` : 'Idle',
+        label: blocked > 0 ? `${blocked} blocked` : working > 0 ? `${working} working` : 'Idle',
+        countLabel: activeLanes > 0 ? `${activeLanes} active` : 'System idle',
+        pathSegments: [],
+        taskActionable: false,
+      };
+    }
+
+    const path = getFocusedTaskPath(scopeId);
+    const root = path[0];
+    if (!root) {
+      const blocked = tasks.filter((task) => String(task.lane || '').toLowerCase() === scopeId && task.status === 'blocked').length;
+      return {
+        percent: 0,
+        summary: buildLaneMeta(scopeId),
+        currentTitle: blocked > 0 ? `${blocked} blocked` : 'Idle',
+        label: blocked > 0 ? `${blocked} blocked` : 'Idle',
+        countLabel: blocked > 0 ? 'Needs attention' : 'No active task',
+        pathSegments: [],
+        taskActionable: blocked > 0,
+      };
+    }
+
+    const leaf = path[path.length - 1];
+    const parent = path.length > 1 ? path[path.length - 2] : null;
+    const siblings = parent?.children || [];
+    const siblingComplete = siblings.filter((child) => ['complete', 'abandoned', 'cancelled'].includes(child.status)).length;
+    const siblingTotal = siblings.length || 1;
+    const localPercent = siblings.length ? Math.round((siblingComplete / siblingTotal) * 100) : (leaf.status === 'complete' ? 100 : leaf.status === 'working' ? 65 : leaf.status === 'blocked' ? 25 : 10);
+    const blockedDescendants = path.filter((task) => task.status === 'blocked').length;
+    const depth = Number.isFinite(leaf.depth) ? leaf.depth : Math.max(0, path.length - 1);
+    const rootTitle = String(root.title || 'Untitled goal').trim();
+    const leafTitle = String(leaf.title || rootTitle).trim();
+    const leafPaused = Boolean(leaf.paused);
+    const pathSegments = path.map((task) => {
+      const childSet = Array.isArray(task.children) ? task.children : [];
+      const completedChildren = childSet.filter((child) => ['complete', 'abandoned', 'cancelled'].includes(child.status)).length;
+      const totalChildren = childSet.length || 1;
+      const percent = childSet.length
+        ? Math.round((completedChildren / totalChildren) * 100)
+        : task.status === 'complete'
+        ? 100
+        : task.status === 'working'
+        ? 65
+        : task.status === 'blocked'
+        ? 25
+        : 10;
+      return {
+        percent,
+        status: task.status,
+      };
+    });
+
+    return {
+      percent: localPercent,
+      summary: rootTitle,
+      currentTitle: leafTitle,
+      currentStateLabel: leafPaused
+        ? 'paused'
+        : blockedDescendants > 0
+        ? 'blocked'
+        : leaf.status === 'pending'
+        ? 'queued'
+        : leaf.status === 'working'
+        ? 'working'
+        : '',
+      label: leafPaused
+        ? `${leafTitle} · paused`
+        : blockedDescendants > 0
+        ? `${leafTitle} · blocked`
+        : leaf.status === 'working'
+        ? leafTitle
+        : leaf.status === 'pending'
+        ? `${leafTitle} · queued`
+        : leafTitle,
+      countLabel: siblings.length
+        ? `${siblingComplete}/${siblingTotal} here`
+        : '',
+      pathSegments,
+      taskId: leaf.id,
+      taskPaused: leafPaused,
+      taskActionable: true,
+    };
+  };
+  const focusedTaskPaneTree = React.useMemo(() => {
+    if (activeNav === 'dashboard' || currentScope === 'home') return visibleTaskTree;
+    const path = getFocusedTaskPath(currentScope);
+    if (!path.length) return visibleTaskTree;
+    const contextNode = path.length > 1 ? path[path.length - 2] : path[0];
+    return contextNode ? [contextNode] : visibleTaskTree;
+  }, [activeNav, currentScope, visibleTaskTree, activeTaskTree]);
+  const loopMeta = routingSummary?.supervision?.active_jobs?.length
+    ? `${routingSummary.supervision.active_jobs.length} active bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
+    : 'loop idle';
 
   return (
-    <div className="app-container" style={{ display: 'flex', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
+    <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
       {showCloudModal && (
         <div className="modal-overlay">
           <div className="modal-content glass">
@@ -1161,6 +2338,7 @@ function App() {
                 className="primary" 
                 onClick={() => {
                   setShowCloudModal(false);
+                  setCurrentScope('strong');
                   setActiveNav('settings');
                 }}
               >
@@ -1171,163 +2349,240 @@ function App() {
         </div>
       )}
 
+      <div style={{ padding: '12px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: '#09090b', flexShrink: 0, boxShadow: 'inset 0 -1px 0 rgba(255,255,255,0.02)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', width: '100%' }}>
+          <button
+            type="button"
+            onClick={() => {
+              setCurrentScope('home');
+              setActiveNav('dashboard');
+              setScopeSessionIds((prev) => ({ ...prev, home: prev.home || sessionId }));
+            }}
+            style={{
+              minWidth: '180px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              padding: '0 4px',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            <div style={{ width: '28px', height: '28px', borderRadius: '8px', background: 'linear-gradient(135deg, rgba(130,87,229,0.9), rgba(94,51,186,0.92))', boxShadow: '0 0 18px rgba(130,87,229,0.24)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <div style={{ width: '10px', height: '10px', background: '#fff', borderRadius: '2px', transform: 'rotate(45deg)' }} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+              <div style={{ fontSize: '16px', fontWeight: 800, letterSpacing: '0.04em', color: '#f0f1f7' }}>
+                Strata
+              </div>
+              <div style={{ fontSize: '11px', color: '#7a7e90' }}>
+                Global home and system overview
+              </div>
+            </div>
+          </button>
+          <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+          {topTabs.map((tab) => {
+            const active = currentScope === tab.id;
+            const showGlobalControls = tab.id === 'home';
+            const isLane = tab.id === 'strong' || tab.id === 'weak';
+            const progress = buildScopeTaskProgress(tab.id);
+            const agentEnabled = tab.id === 'home'
+              ? (workerStatus !== 'PAUSED' && workerStatus !== 'STOPPED')
+              : !pausedLanes.includes(tab.id);
+            const agentSuppressedByGlobal = isLane && globalPaused;
+            return (
+              <TopModeTab
+                key={tab.id}
+                label={tab.label}
+                accent={tab.accent}
+                active={active}
+                detail={tab.id === 'home' ? loopMeta : buildLaneMeta(tab.id)}
+                status={tab.id === 'home' ? workerStatus : (laneStatuses?.[tab.id] || 'IDLE')}
+                agentEnabled={agentEnabled}
+                agentSuppressedByGlobal={agentSuppressedByGlobal}
+                apiStatus={apiStatus}
+                showControls={apiStatus === 'ok' && (isLane || showGlobalControls)}
+                progress={progress}
+                onPause={showGlobalControls ? (() => handlePause()) : (isLane ? (() => handlePause(tab.id)) : undefined)}
+                onResume={showGlobalControls ? (() => handleResume()) : (isLane ? (() => handleResume(tab.id)) : undefined)}
+                onPauseTask={isLane ? (() => handlePauseTask(progress?.taskId)) : undefined}
+                onResumeTask={isLane ? (() => handleResumeTask(progress?.taskId)) : undefined}
+                onStopTask={isLane ? (() => handleStopTask(progress?.taskId)) : undefined}
+                onClick={() => {
+                  if (tab.id === 'home') {
+                    setCurrentScope('home');
+                    setScopeSessionIds((prev) => ({ ...prev, home: prev.home || sessionId }));
+                    return;
+                  }
+                  setChatLane(tab.id);
+                  setCurrentScope(tab.id);
+                  setMessages([]);
+                  setSendError('');
+                }}
+              />
+            );
+          })}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
       {/* ── COLUMN 1: ICON NAV ─────────────────────────────────────────────── */}
       <div style={{ width: '72px', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px 0', gap: '8px' }}>
-        {/* Logo */}
-        <MotionDiv
-          animate={{ rotate: 360 }}
-          transition={{ duration: 20, repeat: Infinity, ease: 'linear' }}
-          style={{ width: '38px', height: '38px', borderRadius: '11px', background: 'linear-gradient(135deg, #8257e5, #5e33ba)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '16px', boxShadow: '0 0 18px rgba(130,87,229,0.3)' }}
-        >
-          <div style={{ width: '12px', height: '12px', background: 'white', borderRadius: '2px', transform: 'rotate(45deg)' }} />
-        </MotionDiv>
-
         {navItems.map(({ id, Icon, label }) => (
           <NavIcon
             key={id}
             icon={Icon}
             label={label}
             active={activeNav === id}
-            onClick={() => setActiveNav(id)}
+            onClick={() => {
+              setActiveNav(id);
+              if (id === 'dashboard') {
+                setScopeSessionIds((prev) => ({ ...prev, [currentScope]: prev[currentScope] || sessionId }));
+              }
+              if (id === 'settings' && currentScope === 'home') {
+                setCurrentScope('home');
+              }
+            }}
           />
         ))}
 
         {/* Spacer */}
         <div style={{ flex: 1 }} />
-
-        {/* Force refresh */}
-        <NavIcon
-          icon={RefreshCw}
-          label="Refresh"
-          active={false}
-          onClick={fetchData}
-        />
-
-        {/* Settings */}
-        <NavIcon
-          icon={Cpu}
-          label="Settings"
-          active={showSettings}
-          onClick={() => setShowSettings(true)}
-        />
-
-        {/* API status dot */}
-        <div
-          title={apiStatus === 'ok' ? 'API connected' : apiStatus === 'error' ? 'API unreachable' : 'Connecting…'}
-          style={{ width: '8px', height: '8px', borderRadius: '50%', marginTop: '8px', marginBottom: '4px', background: apiStatus === 'ok' ? '#00f294' : apiStatus === 'error' ? '#ff4d4d' : '#ffb84d', boxShadow: apiStatus === 'ok' ? '0 0 6px #00f29488' : 'none' }}
-        />
       </div>
 
       {/* ── COLUMN 2: SESSION / HISTORY PANEL ──────────────────────────────── */}
+      {showSessionPane && (
       <div style={{ width: '240px', borderRight: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', background: '#0c0c0e' }}>
-        <header style={{ padding: '20px 16px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={{ fontSize: '11px', fontWeight: 700, color: '#555', letterSpacing: '0.12em' }}>
-                {activeNav === 'history' ? 'ALL SESSIONS' : 'SESSIONS'}
-              </h2>
-              <button
-                onClick={startNewChat}
-                title="New Chat"
-                style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', borderRadius: '6px', color: '#8257e5', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 10px', fontSize: '12px', fontWeight: 600 }}
-              >
-                <Plus size={13} /> New
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              {CHAT_LANES.map((lane) => (
-                <LaneToggle
-                  key={lane}
-                  lane={lane}
-                  active={chatLane === lane}
-                  onClick={() => {
-                    setChatLane(lane);
-                    setMessages([]);
-                    setSendError('');
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        </header>
-
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
           <HistoryPane
-            sessionList={sessionList}
+            sessionList={visibleSessionList}
             sessionId={sessionId}
-            setSessionId={(nextSessionId) => setLaneSessionIds(prev => ({ ...prev, [chatLane]: nextSessionId }))}
+            setSessionId={(nextSessionId) => {
+              setScopeSessionIds(prev => ({ ...prev, [currentScope]: nextSessionId }));
+              if (currentScope === 'home' && nextSessionId) {
+                setChatLane(laneForSessionId(nextSessionId));
+              }
+            }}
             deleteSession={deleteSession}
+            renameSession={renameSession}
+            onNewSession={startNewChat}
+            showLaneBadge={currentScope === 'home'}
           />
         </div>
       </div>
+      )}
 
       {/* ── COLUMN 3: CHAT / DASHBOARD ────────────────────────────────────── */}
       <section style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0a0a0c', borderRight: '1px solid rgba(255,255,255,0.05)', minWidth: 0 }}>
-        <header style={{ padding: '20px 28px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
-          <div>
-            <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
-              {activeNav === 'dashboard'
-                ? 'Operator Dashboard'
-                : activeNav === 'knowledge'
-                ? 'Knowledge Base'
-                : `Orchestrator Chat · ${chatLane.toUpperCase()}`}
-            </h1>
-            <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>
-              {activeNav === 'knowledge' ? 'Navigable system wiki' : sessionLabel}
-            </p>
-            {routingSummary && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
-                <RoutePill
-                  label="CHAT"
-                  value={routingSummary?.chat?.error ? routingSummary.chat.error : `${routingSummary?.chat?.mode || '—'} · ${routingSummary?.chat?.provider || '—'} · ${routingSummary?.chat?.selected_model || routingSummary?.chat?.model || '—'}`}
-                  tone={routingSummary?.chat?.status === 'error' ? 'danger' : 'neutral'}
-                />
-                <RoutePill
-                  label="WEAK"
-                  value={routingSummary?.weak?.error ? routingSummary.weak.error : `${routingSummary?.weak?.transport || '—'} · ${routingSummary?.weak?.provider || '—'} · ${routingSummary?.weak?.selected_model || routingSummary?.weak?.model || '—'}`}
-                  tone={routingSummary?.weak?.status === 'ok' ? 'success' : 'warning'}
-                />
-                <RoutePill
-                  label="LOOP"
-                  value={routingSummary?.supervision?.active_jobs?.length ? `${routingSummary.supervision.active_jobs.length} supervision job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}` : 'idle'}
-                  tone={routingSummary?.supervision?.active_jobs?.length ? 'success' : 'neutral'}
-                />
-              </div>
-            )}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {/* Control Buttons */}
-            {apiStatus === 'ok' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginRight: '4px', paddingRight: '12px', borderRight: '1px solid rgba(255,255,255,0.05)' }}>
-                {workerStatus === 'PAUSED' ? (
-                  <button 
-                    onClick={handleResume} title="Resume Processing"
-                    style={{ background: 'rgba(0,242,148,0.1)', border: '1px solid rgba(0,242,148,0.2)', color: '#00f294', borderRadius: '4px', padding: '4px', cursor: 'pointer', display: 'flex' }}
-                  >
-                    <Play size={14} fill="#00f294" />
-                  </button>
+        <header style={{ padding: activeNav === 'chat' ? '12px 28px 10px' : '20px 28px', minHeight: '60px', boxSizing: 'border-box', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+          <div
+            style={{ minWidth: 0, flex: 1, textAlign: activeNav === 'chat' ? 'center' : 'left' }}
+            onMouseEnter={() => setTitleHovered(true)}
+            onMouseLeave={() => setTitleHovered(false)}
+          >
+            {activeNav === 'chat' ? (
+              <div style={{ display: 'flex', justifyContent: 'center', minWidth: 0 }}>
+                {editingSessionTitle ? (
+                  <input
+                    autoFocus
+                    value={sessionTitleDraft}
+                    onChange={(event) => setSessionTitleDraft(event.target.value)}
+                    onBlur={() => void commitInlineSessionTitle()}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void commitInlineSessionTitle();
+                      }
+                      if (event.key === 'Escape') {
+                        setEditingSessionTitle(false);
+                        setSessionTitleDraft(sessionLabel);
+                      }
+                    }}
+                    style={{
+                      background: 'rgba(255,255,255,0.04)',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: '10px',
+                      color: '#f7f8fc',
+                      fontSize: '16px',
+                      fontWeight: 700,
+                      padding: '6px 10px',
+                      minWidth: 0,
+                      outline: 'none',
+                      width: 'min(420px, 100%)',
+                      textAlign: 'center',
+                    }}
+                  />
                 ) : (
-                  <button 
-                    onClick={handlePause} title="Pause Gracefully"
-                    style={{ background: 'rgba(255,184,77,0.1)', border: '1px solid rgba(255,184,77,0.2)', color: '#ffb84d', borderRadius: '4px', padding: '4px', cursor: 'pointer', display: 'flex' }}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSessionTitleDraft(sessionLabel);
+                      setEditingSessionTitle(true);
+                    }}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'white',
+                      padding: 0,
+                      margin: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      minWidth: 0,
+                      cursor: 'text',
+                      width: '100%',
+                    }}
                   >
-                    <Pause size={14} fill="#ffb84d" />
+                    <span style={{ fontSize: '16px', fontWeight: 700, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 'min(520px, 100%)' }}>
+                      {sessionLabel}
+                    </span>
+                    {titleHovered && (
+                      <span style={{ color: '#8e93a8', display: 'inline-flex' }}>
+                        <Pencil size={13} />
+                      </span>
+                    )}
                   </button>
                 )}
-                <button 
-                  onClick={handleStop} title="Emergency Stop Current Task"
-                  style={{ background: 'rgba(255,77,77,0.1)', border: '1px solid rgba(255,77,77,0.2)', color: '#ff4d4d', borderRadius: '4px', padding: '4px', cursor: 'pointer', display: 'flex' }}
+              </div>
+            ) : (
+              <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
+                {activeNav === 'dashboard'
+                  ? (currentScope === 'home' ? 'Strata Home' : `${currentScope === 'strong' ? 'Strong' : 'Weak'} Dashboard`)
+                  : activeNav === 'knowledge'
+                  ? (currentScope === 'home' ? 'Knowledge Base' : `${currentScope === 'strong' ? 'Strong' : 'Weak'} Knowledge`)
+                  : 'Settings'}
+              </h1>
+            )}
+            {activeNav !== 'chat' && (
+              <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>
+                {activeNav === 'dashboard'
+                ? (currentScope === 'home' ? 'Shared telemetry, routing, and operator surfaces' : 'Scoped operational telemetry and runtime detail')
+                : activeNav === 'knowledge'
+                ? (currentScope === 'home' ? 'Navigable system wiki' : 'Knowledge visible within this scope')
+                : activeNav === 'settings'
+                ? 'Scoped system configuration'
+                : sessionMetaLabel}
+              </p>
+            )}
+            {activeNav === 'chat' && suggestedSessionTitle && (
+              <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '11px', color: '#8ea0b7' }}>
+                  Suggested rename: <span style={{ color: '#d7e7ff', fontWeight: 700 }}>{suggestedSessionTitle}</span>
+                </span>
+                <button
+                  onClick={() => acceptSuggestedSessionTitle(sessionId, suggestedSessionTitle)}
+                  style={{ background: 'rgba(130,87,229,0.16)', border: '1px solid rgba(130,87,229,0.28)', color: '#d8cfff', borderRadius: '999px', padding: '4px 10px', fontSize: '10px', fontWeight: 800, cursor: 'pointer', letterSpacing: '0.06em', textTransform: 'uppercase' }}
                 >
-                  <Square size={14} fill="#ff4d4d" />
+                  Use Suggestion
                 </button>
               </div>
             )}
-            
-            {apiStatus === 'ok' && (
-              <span style={{ fontSize: '11px', color: workerStatus === 'PAUSED' ? '#ffb84d' : '#00f294', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <Activity size={12} /> {workerStatus}
-              </span>
-            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '18px', flexShrink: 0 }}>
             {apiStatus === 'error' && (
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <span style={{ fontSize: '11px', color: '#ff4d4d', fontWeight: 600 }}>API DOWN</span>
@@ -1349,7 +2604,7 @@ function App() {
           </div>
         </header>
 
-        {activeNav !== 'dashboard' && (specPendingCount > 0 || specClarificationCount > 0) && (
+        {showSpecBanner && (specPendingCount > 0 || specClarificationCount > 0) && (
           <div style={{ padding: '14px 28px 0', flexShrink: 0 }}>
             <div style={{ background: 'rgba(255,184,77,0.07)', border: '1px solid rgba(255,184,77,0.16)', borderRadius: '12px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
               <div style={{ fontSize: '11px', color: '#ffb84d', fontWeight: 800, letterSpacing: '0.08em' }}>SPEC REVIEW NEEDS ATTENTION</div>
@@ -1370,6 +2625,12 @@ function App() {
             loadedContext={loadedContext}
             tiers={tiers}
             routingSummary={routingSummary}
+            currentScope={currentScope}
+            chatLane={effectiveLane}
+            activeChatRoute={activeChatRoute}
+            scopeTasks={tasksForScope}
+            scopeOperationalMetrics={scopeOperationalMetrics}
+            scopeAttemptMetrics={scopeAttemptMetrics}
             specsSnapshot={specsSnapshot}
             specProposalSnapshot={specProposalSnapshot}
             knowledgePagesSnapshot={knowledgePagesSnapshot}
@@ -1395,92 +2656,35 @@ function App() {
             onQueryChange={setKnowledgeQuery}
             onSelectSlug={setSelectedKnowledgeSlug}
           />
+        ) : activeNav === 'settings' ? (
+          <SettingsView
+            onResetDatabase={handleResetDatabase}
+            apiUrl={API}
+            currentScope={currentScope}
+          />
         ) : (
-        <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', gap: '20px' }}>
           <AnimatePresence initial={false}>
             {messages.map((msg, i) => {
-              const display = formatMessageForDisplay(msg.content);
+              const previousMessage = i > 0 ? messages[i - 1] : null;
+              const groupedWithPrevious = shouldGroupMessages(msg, previousMessage, effectiveLane);
               return (
-              <MotionDiv
-                key={msg.id || i}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.2 }}
-                style={{
-                  alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                  background: msg.is_intervention
-                    ? 'rgba(255, 77, 77, 0.05)'
-                    : msg.role === 'user'
-                    ? 'linear-gradient(135deg, #8257e5, #6440c4)'
-                    : '#141418',
-                  padding: '14px 18px',
-                  borderRadius: msg.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-                  border: msg.is_intervention ? '1px solid rgba(255,77,77,0.3)' : '1px solid rgba(255,255,255,0.05)',
-                  maxWidth: '78%',
-                  color: msg.role === 'user' ? 'white' : '#edeeef',
-                  boxShadow: msg.role === 'user' ? '0 4px 16px rgba(130,87,229,0.2)' : 'none'
-                }}
-              >
-                {msg.is_intervention && (
-                  <div style={{ color: '#ff4d4d', fontSize: '10px', fontWeight: 800, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px', letterSpacing: '0.08em' }}>
-                    <AlertCircle size={12} /> ACTION REQUIRED
-                  </div>
-                )}
-                <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.65' }}>
-                  {display.lead && (
-                    <div style={{ fontSize: '13px', color: msg.role === 'user' ? 'rgba(255,255,255,0.92)' : '#e8e9f2', fontWeight: 600, marginBottom: '10px' }}>
-                      {display.lead}
-                    </div>
-                  )}
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{display.body}</ReactMarkdown>
-                </div>
-                {(msg.pending || msg.failed) && (
-                  <div style={{ marginTop: '8px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.06em', color: msg.failed ? 'rgba(255,230,230,0.92)' : 'rgba(255,255,255,0.78)' }}>
-                    {msg.failed ? 'SEND FAILED' : 'SENDING'}
-                  </div>
-                )}
-                <div title={formatRelativeTime(msg.created_at)} style={{ marginTop: '8px', fontSize: '10px', color: msg.role === 'user' ? 'rgba(255,255,255,0.7)' : '#666' }}>
-                  {formatAbsoluteTime(msg.created_at)}
-                </div>
-                {msg.role === 'assistant' && !msg.pending && !msg.failed && (
-                  <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                    {REACTION_OPTIONS.map(({ key, label, icon: Icon }) => {
-                      const counts = msg.reactions?.counts || {};
-                      const viewerReactions = msg.reactions?.viewer_reactions || [];
-                      const active = viewerReactions.includes(key);
-                      const count = counts[key] || 0;
-                      const busy = reactionBusyKey === `${msg.id}:${key}`;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => handleReactToMessage(msg.id, key)}
-                          disabled={busy}
-                          title={label}
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '6px',
-                            padding: '6px 10px',
-                            borderRadius: '999px',
-                            border: active ? '1px solid rgba(130,87,229,0.45)' : '1px solid rgba(255,255,255,0.08)',
-                            background: active ? 'rgba(130,87,229,0.14)' : 'rgba(255,255,255,0.03)',
-                            color: active ? '#d9c7ff' : '#8f93a8',
-                            cursor: busy ? 'default' : 'pointer',
-                            fontSize: '11px',
-                            fontWeight: 700,
-                            opacity: busy ? 0.7 : 1,
-                          }}
-                        >
-                          <Icon size={12} />
-                          <span>{count > 0 ? count : label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </MotionDiv>
-            )})}
+              <MessageCard
+                  key={msg.id || i}
+                  message={msg}
+                  lane={effectiveLane}
+                  reactionBusyKey={reactionBusyKey}
+                  openReactionMenuId={openReactionMenuId}
+                  onOpenReactionMenu={setOpenReactionMenuId}
+                onCloseReactionMenu={() => setOpenReactionMenuId('')}
+                onReact={handleReactToMessage}
+                onReply={handleReplyToMessage}
+                onTypedResponse={handleTypedReactionResponse}
+                showSenderTitle={!groupedWithPrevious}
+                participantNames={participantNames}
+              />
+            );
+          })}
 
             {messages.length === 0 && !isSending && (
               <MotionDiv
@@ -1496,8 +2700,8 @@ function App() {
 
             {isSending && (
               <MotionDiv
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 0.7 }}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 0.7, y: 0 }}
                 style={{ alignSelf: 'flex-start', background: '#1c1c22', padding: '12px 18px', borderRadius: '16px 16px 16px 4px', color: '#888', fontSize: '13px', fontStyle: 'italic', border: '1px solid rgba(255,255,255,0.05)' }}
               >
                 <span style={{ display: 'inline-flex', gap: '4px', alignItems: 'center' }}>
@@ -1526,11 +2730,108 @@ function App() {
               {sendError}
             </div>
           )}
-          <div style={{ background: '#141418', borderRadius: '12px', padding: '8px 8px 8px 16px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s' }}>
+          <div style={{ position: 'relative', background: '#141418', borderRadius: '12px', padding: '8px 8px 8px 16px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s', minHeight: '52px' }}>
+            <AnimatePresence>
+            {replyTarget && (
+              <MotionDiv
+                initial={{ opacity: 0, y: 4, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                transition={{ duration: 0.16, ease: 'easeOut' }}
+                style={{
+                  position: 'absolute',
+                  left: '12px',
+                  top: '-16px',
+                  maxWidth: 'min(360px, calc(100% - 92px))',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  background: 'rgba(10,10,12,0.96)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: '999px',
+                  padding: '6px 10px',
+                  boxShadow: '0 12px 24px rgba(0,0,0,0.24)',
+                  zIndex: 5,
+                }}
+              >
+                <Reply size={12} color="#afb4c6" />
+                <span style={{ fontSize: '11px', color: '#d6d8e4', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <span style={{ color: '#afb4c6', fontWeight: 700, marginRight: '4px' }}>
+                    {replyTargetSender}
+                  </span>
+                  <span>
+                    {String(replyTarget.content || '').replace(/\s+/g, ' ').trim().slice(0, 120)}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setReplyTarget(null)}
+                  style={{ background: 'none', border: 'none', color: '#8b90a5', cursor: 'pointer', display: 'flex', padding: '0', marginLeft: '2px' }}
+                >
+                  <X size={12} />
+                </button>
+              </MotionDiv>
+            )}
+            </AnimatePresence>
+            {currentScope === 'home' && (!sessionId || isDraftSession) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, paddingRight: '2px' }}>
+                <span style={{ fontSize: '11px', color: '#8f94a7', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                  To
+                </span>
+                <div style={{ display: 'inline-flex', borderRadius: '999px', padding: '3px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                  {CHAT_LANES.map((lane) => {
+                    const active = chatLane === lane;
+                    return (
+                      <button
+                        key={lane}
+                        type="button"
+                        onClick={() => setChatLane(lane)}
+                        style={{
+                          background: active
+                            ? (lane === 'weak' ? 'rgba(0,187,145,0.2)' : 'rgba(130,87,229,0.22)')
+                            : 'transparent',
+                          color: active
+                            ? (lane === 'weak' ? '#baffea' : '#dccfff')
+                            : '#8f94a7',
+                          border: 'none',
+                          borderRadius: '999px',
+                          padding: '6px 10px',
+                          fontSize: '11px',
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {lane}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <input
+              ref={inputRef}
               type="text"
               value={inputText}
-              onChange={e => setInputText(e.target.value)}
+              onChange={e => {
+                const nextValue = e.target.value;
+                setInputText(nextValue);
+                if (isDraftSession) {
+                  setLaneDrafts((prev) => ({
+                    ...prev,
+                    [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
+                      draft?.session_id === sessionId
+                        ? {
+                            ...draft,
+                            draftMessage: nextValue,
+                            last_message_preview: nextValue.trim() || 'Draft',
+                          }
+                        : draft
+                    )),
+                  }));
+                }
+              }}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
               placeholder="Describe a goal or intervene…"
               style={{ flex: 1, background: 'transparent', border: 'none', color: '#edeeef', outline: 'none', fontSize: '14px', lineHeight: 1.5 }}
@@ -1555,25 +2856,14 @@ function App() {
       </section>
 
       {/* ── COLUMN 4: TASK FORMATION ───────────────────────────────────────── */}
+      {showTaskPane && (
       <section style={{ width: '420px', display: 'flex', flexDirection: 'column', background: '#0a0a0c', flexShrink: 0 }}>
-        <header style={{ padding: '20px 24px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#edeeef' }}>Active Formation</h2>
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-            {runningCount > 0 && (
-              <MotionSpan
-                animate={{ opacity: [1, 0.5, 1] }}
-                transition={{ duration: 2, repeat: Infinity }}
-                style={{ fontSize: '11px', color: '#00d9ff', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}
-              >
-                <Activity size={11} /> {runningCount} RUNNING
-              </MotionSpan>
-            )}
-            <span style={{ fontSize: '11px', color: '#00f294', fontWeight: 700 }}>{completedCount} DONE</span>
-          </div>
+        <header style={{ padding: '12px 28px 10px', minHeight: '60px', boxSizing: 'border-box', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#ffffff', margin: 0 }}>Active Tasks</h2>
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-          {activeNav !== 'dashboard' && finishedTaskTree.length > 0 && (
+          {activeNav !== 'dashboard' && laneFinishedTasks.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <button
                 onClick={() => setShowFinishedTasks(!showFinishedTasks)}
@@ -1593,7 +2883,7 @@ function App() {
                   textTransform: 'uppercase'
                 }}
               >
-                <span>Recent Finished · {finishedTaskTree.length}</span>
+                <span>Recent Finished · {laneFinishedTasks.length}</span>
                 {showFinishedTasks ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               </button>
               <AnimatePresence>
@@ -1604,7 +2894,7 @@ function App() {
                     exit={{ height: 0, opacity: 0 }}
                     style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}
                   >
-                    {finishedTaskTree.map(task => (
+                    {laneFinishedTasks.map(task => (
                       <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />
                     ))}
                   </MotionDiv>
@@ -1612,58 +2902,49 @@ function App() {
               </AnimatePresence>
             </div>
           )}
-          <div style={{ background: '#101015', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>LOADED CONTEXT</div>
-            <div style={{ fontSize: '11px', color: '#888' }}>
-              {loadedContext.files?.length || 0} pinned files · budget {loadedContext.budget_tokens || 0} tokens
-            </div>
-            {(loadedContext.files || []).slice(0, 3).map((entry) => (
-              <div key={entry.path} style={{ fontSize: '11px', color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {entry.path} · {entry.estimated_tokens} tok
-              </div>
-            ))}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '8px' }}>
-            <TelemetryCell value={runningCount || '—'} label="WORKING" />
-            <TelemetryCell value={blockedCount || '—'} label="BLOCKED" />
-            <TelemetryCell value={specClarificationCount || '—'} label="SPEC ASK" />
-            <TelemetryCell value={activeTaskTree.length || '—'} label="ACTIVE" />
-          </div>
           <AnimatePresence>
-            {visibleTaskTree.map(task => (
+            {focusedTaskPaneTree.map(task => (
               <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} />
             ))}
           </AnimatePresence>
 
-          {visibleTaskTree.length === 0 && (
+          {focusedTaskPaneTree.length === 0 && (
             <div style={{ textAlign: 'center', color: '#2d2d38', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
               <Terminal size={28} color="#222228" />
-              <div style={{ fontSize: '13px', color: '#333' }}>No tasks yet</div>
+              <div style={{ fontSize: '13px', color: '#333' }}>
+                {laneFinishedTasks.length > 0 || scopeHasAnyTasks ? 'No current tasks' : 'No tasks yet'}
+              </div>
             </div>
           )}
         </div>
 
-        {/* Telemetry — computed from live data */}
+        {/* Telemetry — computed from scoped live data */}
         <div style={{ padding: '16px 20px', borderTop: '1px solid rgba(255,255,255,0.05)', background: '#0c0c0e', flexShrink: 0 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-            <span style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>FORMATION TELEMETRY</span>
+            <span style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>OPERATIONAL TELEMETRY</span>
             <Terminal size={12} style={{ color: '#333' }} />
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-            <TelemetryCell value={totalCount === 0 ? '—' : `${passRate}%`} label="PASS RATE" />
-            <TelemetryCell value={runningCount || '—'} label="ACTIVE" />
-            <TelemetryCell value={totalCount || '—'} label="TOTAL" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '12px' }}>
+            <TelemetryCell value={scopeOperationalMetrics.working || '—'} label="TASKS RUNNING NOW" />
+            <TelemetryCell value={scopeOperationalMetrics.queued || '—'} label="TASKS QUEUED NEXT" />
+            <TelemetryCell value={scopeOperationalMetrics.blocked || '—'} label="TASKS BLOCKED" />
+            <TelemetryCell value={scopeOperationalMetrics.needsYou || '—'} label="TASKS WAITING ON YOU" />
           </div>
-          <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginBottom: '12px' }}>
+            <TelemetryCell value={scopeAttemptMetrics.success10 || '—'} label="SUCCEEDED OF LAST 10 ATTEMPTS" />
+            <TelemetryCell value={scopeAttemptMetrics.success50 || '—'} label="SUCCEEDED OF LAST 50 ATTEMPTS" />
+            <TelemetryCell value={scopeAttemptMetrics.averageDurationLabel || '—'} label="AVERAGE TIME PER ATTEMPT" />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-              <span style={{ color: '#7f8091' }}>weak eval / experiments</span>
-              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-                {telemetry?.overview?.weak_eval_runs || '—'} / {telemetry?.overview?.unique_experiments || '—'}
-              </span>
+              <span style={{ color: '#7f8091' }}>context</span>
+              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{scopeOperationalMetrics.loadedContextCount} files · {scopeOperationalMetrics.loadedContextBudget} tok</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-              <span style={{ color: '#7f8091' }}>tiers</span>
-              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{`${tiers.Weak}/${tiers.Strong}`}</span>
+              <span style={{ color: '#7f8091' }}>scope health</span>
+              <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
+                {currentScope === 'home' ? workerStatus : (laneStatuses?.[currentScope] || 'IDLE')}
+              </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
               <span style={{ color: '#7f8091' }}>transport wait</span>
@@ -1674,17 +2955,9 @@ function App() {
           </div>
         </div>
       </section>
+      )}
+      </div>
 
-      {/* ── SETTINGS MODAL ──────────────────────────────────────────────────── */}
-      <AnimatePresence>
-        {showSettings && (
-          <SettingsModal
-            onClose={() => setShowSettings(false)}
-            onResetDatabase={handleResetDatabase}
-            apiUrl={API}
-          />
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -1740,23 +3013,325 @@ const RoutePill = ({ label, value, tone = 'neutral' }) => {
   );
 };
 
-const LaneToggle = ({ lane, active, onClick }) => (
+const TopModeTab = ({
+  label,
+  active,
+  onClick,
+  accent = 'neutral',
+  detail = '',
+  status = '',
+  agentEnabled = true,
+  agentSuppressedByGlobal = false,
+  apiStatus = 'ok',
+  showControls = false,
+  progress = null,
+  onPause,
+  onResume,
+  onPauseTask,
+  onResumeTask,
+  onStopTask,
+}) => {
+  const palette = {
+    neutral: {
+      activeBg: 'linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06))',
+      activeBorder: 'rgba(255,255,255,0.18)',
+      activeText: '#f5f6fb',
+      inactiveBg: 'rgba(255,255,255,0.04)',
+      inactiveBorder: 'rgba(255,255,255,0.12)',
+    },
+    strong: {
+      activeBg: 'linear-gradient(135deg, rgba(130,87,229,0.3), rgba(81,117,255,0.18))',
+      activeBorder: 'rgba(130,87,229,0.5)',
+      activeText: '#f3edff',
+      inactiveBg: 'rgba(130,87,229,0.05)',
+      inactiveBorder: 'rgba(130,87,229,0.14)',
+    },
+    weak: {
+      activeBg: 'linear-gradient(135deg, rgba(0,242,148,0.2), rgba(42,179,125,0.16))',
+      activeBorder: 'rgba(0,242,148,0.3)',
+      activeText: '#e9fff7',
+      inactiveBg: 'rgba(0,242,148,0.04)',
+      inactiveBorder: 'rgba(0,242,148,0.12)',
+    },
+  };
+  const theme = palette[accent] || palette.neutral;
+  const displayStatus = apiStatus === 'error'
+    ? 'API DOWN'
+    : agentSuppressedByGlobal && status !== 'STOPPED'
+    ? 'PAUSED (GLOBAL)'
+    : status === 'IDLE' && progress?.taskActionable
+    ? (progress?.taskPaused ? 'TASK PAUSED' : 'READY')
+    : (status || 'UNKNOWN');
+  const statusColor = displayStatus === 'PAUSED'
+    ? '#ffb84d'
+    : displayStatus === 'RUNNING'
+    ? '#00f294'
+    : displayStatus === 'STOPPED'
+    ? '#ff4d4d'
+    : displayStatus === 'READY'
+    ? '#8fd6ff'
+    : displayStatus === 'PAUSED (GLOBAL)'
+    ? '#ffb84d'
+    : displayStatus === 'TASK PAUSED'
+    ? '#ffb84d'
+    : '#9ca1b4';
+  const progressValue = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
+  const taskPaused = Boolean(progress?.taskPaused);
+  const pathSegments = Array.isArray(progress?.pathSegments) ? progress.pathSegments : [];
+  const topObjective = stripInlineMarkdown(progress?.summary || detail || '');
+  const currentObjective = stripInlineMarkdown(progress?.currentTitle || '');
+  const currentStateLabel = String(progress?.currentStateLabel || '').trim();
+  const currentObjectiveDisplay = currentObjective
+    ? `${currentObjective}${currentStateLabel ? ` · ${currentStateLabel}` : ''}`
+    : '';
+  const showSplitObjectives = Boolean(topObjective && currentObjective && topObjective !== currentObjective);
+  const singleLineObjective = currentObjectiveDisplay || topObjective || 'No active task';
+  const agentActivelyRunnable = agentEnabled && !agentSuppressedByGlobal && apiStatus === 'ok';
+  const taskControlsEnabled = Boolean(showControls && apiStatus === 'ok' && progress?.taskActionable);
+  const agentToggleTrackBorder = agentSuppressedByGlobal
+    ? 'rgba(255,255,255,0.14)'
+    : agentEnabled
+    ? 'rgba(0,242,148,0.28)'
+    : 'rgba(255,255,255,0.14)';
+  const agentToggleTrackBg = agentSuppressedByGlobal
+    ? 'rgba(255,255,255,0.08)'
+    : agentEnabled
+    ? 'rgba(0,242,148,0.16)'
+    : 'rgba(255,255,255,0.08)';
+  const agentToggleKnobBg = agentSuppressedByGlobal
+    ? '#8f94a6'
+    : agentEnabled
+    ? '#00f294'
+    : '#b7bbca';
+  const agentToggleKnobShadow = agentSuppressedByGlobal || !agentEnabled
+    ? 'none'
+    : '0 0 12px rgba(0,242,148,0.3)';
+  return (
+    <div
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onClick?.();
+        }
+      }}
+      style={{
+        flex: 1,
+        minWidth: 0,
+        textAlign: 'left',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        padding: '11px 14px',
+        borderRadius: '16px',
+        border: active ? `1px solid ${theme.activeBorder}` : `1px solid ${theme.inactiveBorder}`,
+        background: active ? theme.activeBg : theme.inactiveBg,
+        color: active ? theme.activeText : '#c2c5d3',
+        cursor: 'pointer',
+        transition: 'all 0.18s ease',
+        boxShadow: active ? '0 12px 28px rgba(0,0,0,0.22)' : 'none',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
+        <span style={{ fontSize: '12px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+          {label}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flexShrink: 0 }}>
+          <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '0.08em', color: apiStatus === 'error' ? '#ff4d4d' : statusColor, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+            {displayStatus}
+          </span>
+          {showControls && apiStatus === 'ok' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={agentEnabled}
+                aria-label={`${agentEnabled ? 'Pause' : 'Resume'} ${label} agent`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (agentEnabled) {
+                    onPause?.();
+                  } else {
+                    onResume?.();
+                  }
+                }}
+                title={`${agentEnabled ? 'Pause' : 'Resume'} ${label} agent`}
+                style={{
+                  position: 'relative',
+                  width: '34px',
+                  height: '20px',
+                  borderRadius: '999px',
+                  border: `1px solid ${agentToggleTrackBorder}`,
+                  background: agentToggleTrackBg,
+                  cursor: 'pointer',
+                  padding: 0,
+                  transition: 'background 0.18s ease, border-color 0.18s ease',
+                }}
+              >
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: '2px',
+                    left: agentEnabled ? '16px' : '2px',
+                    width: '14px',
+                    height: '14px',
+                    borderRadius: '999px',
+                    background: agentToggleKnobBg,
+                    boxShadow: agentToggleKnobShadow,
+                    transition: 'left 0.18s ease, background 0.18s ease, box-shadow 0.18s ease',
+                  }}
+                />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', fontSize: '10px' }}>
+          <span style={{ color: active ? 'rgba(245,246,251,0.72)' : '#7d8296', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: showSplitObjectives ? '0 1 42%' : '1 1 auto' }}>
+            {showSplitObjectives ? topObjective : singleLineObjective}
+          </span>
+          <span style={{ color: active ? 'rgba(245,246,251,0.82)' : '#a6abc0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textAlign: 'right', flex: showSplitObjectives ? '1 1 58%' : '0 0 auto' }}>
+            {showSplitObjectives ? currentObjectiveDisplay : ''}
+          </span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {pathSegments.slice(0, -1).length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '3px', flexShrink: 0 }}>
+              {pathSegments.slice(0, -1).map((segment, index) => {
+                const segmentPercent = Math.max(0, Math.min(100, Number(segment?.percent || 0)));
+                const segmentTone = segment?.status === 'blocked'
+                  ? 'linear-gradient(90deg, rgba(255,184,77,0.96), rgba(255,92,92,0.8))'
+                  : accent === 'weak'
+                  ? 'linear-gradient(90deg, rgba(0,242,148,0.95), rgba(84,244,201,0.82))'
+                  : accent === 'strong'
+                  ? 'linear-gradient(90deg, rgba(167,137,255,0.96), rgba(130,87,229,0.9))'
+                  : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))';
+                return (
+                  <div
+                    key={`${label}-crumb-${index}`}
+                    style={{
+                      width: '18px',
+                      height: '5px',
+                      borderRadius: '999px',
+                      background: 'rgba(255,255,255,0.08)',
+                      overflow: 'hidden',
+                      opacity: 0.74,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${segmentPercent}%`,
+                        height: '100%',
+                        borderRadius: '999px',
+                        background: segmentTone,
+                        transition: 'width 0.22s ease',
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ flex: 1, height: '5px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+            <div
+              style={{
+                width: `${progressValue}%`,
+                height: '100%',
+                borderRadius: '999px',
+                background: accent === 'weak'
+                  ? 'linear-gradient(90deg, rgba(0,242,148,0.95), rgba(84,244,201,0.82))'
+                  : accent === 'strong'
+                  ? 'linear-gradient(90deg, rgba(167,137,255,0.96), rgba(130,87,229,0.9))'
+                  : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))',
+              transition: 'width 0.22s ease',
+            }}
+          />
+          </div>
+          {showControls && apiStatus === 'ok' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+              {taskPaused ? (
+                <button
+                  onClick={(event) => { event.stopPropagation(); onResumeTask?.(); }}
+                  title={`Resume current ${label} task`}
+                  disabled={!taskControlsEnabled}
+                  style={{
+                    background: agentActivelyRunnable ? 'rgba(0,242,148,0.1)' : 'rgba(255,255,255,0.08)',
+                    border: `1px solid ${agentActivelyRunnable ? 'rgba(0,242,148,0.22)' : 'rgba(255,255,255,0.14)'}`,
+                    color: agentActivelyRunnable ? '#00f294' : '#9ea4b8',
+                    borderRadius: '8px',
+                    padding: '4px',
+                    cursor: taskControlsEnabled ? 'pointer' : 'default',
+                    display: 'flex',
+                    opacity: taskControlsEnabled ? 1 : 0.24,
+                    visibility: 'visible',
+                  }}
+                >
+                  <Play size={13} fill={agentActivelyRunnable ? '#00f294' : '#9ea4b8'} />
+                </button>
+              ) : (
+                <button
+                  onClick={(event) => { event.stopPropagation(); onPauseTask?.(); }}
+                  title={`Pause current ${label} task`}
+                  disabled={!taskControlsEnabled}
+                  style={{ background: 'rgba(255,184,77,0.1)', border: '1px solid rgba(255,184,77,0.22)', color: '#ffb84d', borderRadius: '8px', padding: '4px', cursor: taskControlsEnabled ? 'pointer' : 'default', display: 'flex', opacity: taskControlsEnabled ? 1 : 0.24, visibility: 'visible' }}
+                >
+                  <Pause size={13} fill="#ffb84d" />
+                </button>
+              )}
+              <button
+                onClick={(event) => { event.stopPropagation(); onStopTask?.(); }}
+                title={`Cancel current ${label} task`}
+                disabled={!taskControlsEnabled}
+                style={{ background: 'rgba(255,77,77,0.1)', border: '1px solid rgba(255,77,77,0.22)', color: '#ff4d4d', borderRadius: '8px', padding: '4px', cursor: taskControlsEnabled ? 'pointer' : 'default', display: 'flex', opacity: taskControlsEnabled ? 1 : 0.24, visibility: 'visible' }}
+              >
+                <Square size={13} fill="#ff4d4d" />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const LaneToggle = ({ lane, active, onClick, compact = false }) => (
   <button
     onClick={onClick}
     style={{
-      background: active ? 'rgba(130,87,229,0.18)' : 'rgba(255,255,255,0.03)',
-      border: active ? '1px solid rgba(130,87,229,0.4)' : '1px solid rgba(255,255,255,0.08)',
-      color: active ? '#f2ecff' : '#9a9cad',
-      borderRadius: '999px',
-      padding: '6px 12px',
-      fontSize: '11px',
-      fontWeight: 700,
+      background: active
+        ? lane === 'strong'
+          ? 'linear-gradient(135deg, rgba(130,87,229,0.26), rgba(81,117,255,0.18))'
+          : 'linear-gradient(135deg, rgba(0,242,148,0.18), rgba(42,179,125,0.14))'
+        : 'rgba(255,255,255,0.03)',
+      border: active
+        ? lane === 'strong'
+          ? '1px solid rgba(130,87,229,0.45)'
+          : '1px solid rgba(0,242,148,0.28)'
+        : '1px solid rgba(255,255,255,0.08)',
+      color: active ? '#f2f6ff' : '#9a9cad',
+      borderRadius: compact ? '12px' : '16px',
+      padding: compact ? '10px 12px' : '12px 14px',
+      fontSize: '12px',
+      fontWeight: 800,
       letterSpacing: '0.08em',
       cursor: 'pointer',
       textTransform: 'uppercase',
+      flex: 1,
+      textAlign: 'left',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: compact ? '2px' : '4px',
+      boxShadow: active ? '0 10px 28px rgba(0,0,0,0.22)' : 'none',
+      transition: 'all 0.18s ease',
     }}
   >
-    {lane}
+    <span>{lane}</span>
+    <span style={{ fontSize: compact ? '9px' : '10px', letterSpacing: '0.04em', textTransform: 'none', color: active ? 'rgba(242,246,255,0.8)' : '#6f7183', fontWeight: 600 }}>
+      {lane === 'strong' ? 'Bootstrap / high-capacity lane' : 'Weak-model execution lane'}
+    </span>
   </button>
 );
 
@@ -1956,6 +3531,12 @@ const DashboardView = ({
   loadedContext,
   tiers,
   routingSummary,
+  currentScope,
+  chatLane,
+  activeChatRoute,
+  scopeTasks,
+  scopeOperationalMetrics,
+  scopeAttemptMetrics,
   specsSnapshot,
   specProposalSnapshot,
   knowledgePagesSnapshot,
@@ -1972,6 +3553,10 @@ const DashboardView = ({
   onQueueSampleTick,
   onResolveSpecProposal,
 }) => {
+  const scopeLabel = currentScope === 'home' ? 'Global' : currentScope === 'strong' ? 'Strong' : 'Weak';
+  const scopeHealthLabel = currentScope === 'home'
+    ? (routingSummary?.supervision?.active_jobs?.length ? 'Supervising' : 'Idle')
+    : activeChatRoute?.status || 'unknown';
   const primaryDomainRatings = Object.entries(variantRatingsSnapshot?.by_domain?.['eval_harness_full_eval:bootstrap_mcq_v1'] || {})
     .sort((a, b) => (b[1]?.rating || 0) - (a[1]?.rating || 0))
     .slice(0, 5);
@@ -1985,27 +3570,26 @@ const DashboardView = ({
 
   return (
   <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-    <DashboardPanel title="SYSTEM STATUS">
+    <DashboardPanel title={`${scopeLabel.toUpperCase()} HEALTH`}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
-        <TelemetryCell value={telemetry?.overview?.weak_eval_runs || '—'} label="WEAK EVAL" />
-        <TelemetryCell value={telemetry?.overview?.unique_experiments || '—'} label="EXPERIMENTS" />
-        <TelemetryCell value={dashboard?.ignition?.detected ? 'LIVE' : 'NO'} label="IGNITION" />
-        <TelemetryCell value={`${tiers.Weak}/${tiers.Strong}`} label="WEAK/STRONG" />
+        <TelemetryCell value={scopeHealthLabel} label="SCOPE HEALTH" />
+        <TelemetryCell value={scopeOperationalMetrics?.working || '—'} label="TASKS RUNNING NOW" />
+        <TelemetryCell value={scopeOperationalMetrics?.queued || '—'} label="TASKS QUEUED NEXT" />
+        <TelemetryCell value={scopeOperationalMetrics?.blocked || '—'} label="TASKS BLOCKED" />
       </div>
     </DashboardPanel>
 
-    <DashboardPanel title="FAILURE & GOVERNANCE">
+    <DashboardPanel title={`${scopeLabel.toUpperCase()} THROUGHPUT`}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
-        <TelemetryCell value={dashboard?.failure_pressure?.recent_failures ?? '—'} label="FAIL PRESSURE" />
-        <TelemetryCell value={dashboard?.failure_pressure?.recent_research_failures ?? '—'} label="RESEARCH FAIL" />
-        <TelemetryCell value={dashboard?.context_pressure?.warning_count ?? '—'} label="CTX WARN" />
-        <TelemetryCell value={dashboard?.spec_governance?.pending_count ?? '—'} label="SPEC PENDING" />
+        <TelemetryCell value={scopeAttemptMetrics?.success10 || '—'} label="SUCCEEDED OF LAST 10 ATTEMPTS" />
+        <TelemetryCell value={scopeAttemptMetrics?.success50 || '—'} label="SUCCEEDED OF LAST 50 ATTEMPTS" />
+        <TelemetryCell value={scopeAttemptMetrics?.averageDurationLabel || '—'} label="AVERAGE TIME PER ATTEMPT" />
+        <TelemetryCell value={scopeTasks?.length || '—'} label="TASKS IN THIS SCOPE" />
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
-        <div style={{ fontSize: '12px', color: '#a9aaba' }}>Current promoted</div>
-        <div style={{ fontSize: '12px', color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {dashboard?.current_promoted_candidate || '—'}
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+        <TelemetryCell value={scopeOperationalMetrics?.needsYou || '—'} label="TASKS WAITING ON YOU" />
+        <TelemetryCell value={scopeOperationalMetrics?.pausedTasks || '—'} label="TASKS PAUSED" />
+        <TelemetryCell value={`${scopeOperationalMetrics?.loadedContextCount || 0}/${scopeOperationalMetrics?.loadedContextBudget || 0}`} label="CONTEXT FILES / TOKENS" />
       </div>
     </DashboardPanel>
 
@@ -2068,7 +3652,7 @@ const DashboardView = ({
       <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '10px', fontSize: '12px', alignItems: 'start' }}>
         <span style={{ color: '#8d8ea1' }}>Chat default</span>
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>
-          {routingSummary?.chat?.error ? routingSummary.chat.error : `${routingSummary?.chat?.mode || '—'} · ${routingSummary?.chat?.provider || '—'} · ${routingSummary?.chat?.selected_model || routingSummary?.chat?.model || '—'}`}
+          {activeChatRoute?.error ? activeChatRoute.error : `${chatLane} · ${activeChatRoute?.transport || activeChatRoute?.mode || '—'} · ${activeChatRoute?.provider || '—'} · ${activeChatRoute?.selected_model || activeChatRoute?.model || '—'}`}
         </span>
         <span style={{ color: '#8d8ea1' }}>Strong tier</span>
         <span style={{ color: '#e7e8ef', fontFamily: "'JetBrains Mono', monospace" }}>

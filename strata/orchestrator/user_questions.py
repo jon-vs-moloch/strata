@@ -13,6 +13,9 @@ import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from strata.communication.primitives import build_communication_decision, deliver_communication_decision
+from strata.core.lanes import canonical_session_id_for_lane, infer_lane_from_session_id, normalize_lane
+
 
 USER_QUESTIONS_KEY = "user_questions:index"
 MAX_TERMINAL_QUESTIONS = 50
@@ -71,13 +74,21 @@ def enqueue_user_question(
     question: str,
     source_type: str,
     source_id: str,
+    lane: Optional[str] = None,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     rows = _load_questions(storage)
+    resolved_lane = (
+        normalize_lane(lane)
+        or normalize_lane((context or {}).get("lane"))
+        or infer_lane_from_session_id(session_id)
+        or "strong"
+    )
+    resolved_session_id = canonical_session_id_for_lane(resolved_lane, session_id or "default")
     question_id = f"uq_{uuid4().hex[:12]}"
     item = {
         "question_id": question_id,
-        "session_id": session_id or "default",
+        "session_id": resolved_session_id,
         "question": str(question).strip(),
         "brief_question": _derive_brief_question(question),
         "source_type": source_type,
@@ -89,6 +100,28 @@ def enqueue_user_question(
     }
     rows.append(item)
     _save_questions(storage, rows)
+    try:
+        decision = build_communication_decision(
+            role="assistant",
+            content=str(question).strip(),
+            lane=resolved_lane,
+            channel="existing_session_message",
+            session_id=resolved_session_id,
+            audience="user",
+            source_kind="task_blocked_question" if source_type == "task_blocked" else "system_question",
+            source_actor="orchestrator_question_queue",
+            opened_reason=source_type,
+            tags=["question", source_type],
+            topic_summary=_derive_brief_question(question),
+            communicative_act="question",
+            urgency="high" if source_type == "task_blocked" else "normal",
+        )
+        deliver_communication_decision(storage, decision)
+        item["status"] = "asked"
+        item["updated_at"] = _now()
+        _save_questions(storage, rows)
+    except Exception:
+        pass
     return item
 
 

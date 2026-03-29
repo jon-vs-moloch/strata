@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.api import main as api_main
+from strata.sessions.metadata import set_session_metadata
 from strata.eval.job_runner import run_eval_job_task
 from strata.storage.models import Base, TaskState, TaskType
 from strata.storage.services.main import StorageManager
@@ -40,6 +41,44 @@ def test_queue_benchmark_job_endpoint_creates_system_task(monkeypatch):
     assert task.type == TaskType.JUDGE
     assert task.state == TaskState.PENDING
     assert task.constraints["system_job"]["kind"] == "benchmark"
+    assert enqueued == [task.task_id]
+
+
+def test_queue_eval_system_job_uses_reviewer_tier_as_lane(monkeypatch):
+    storage = make_storage()
+    enqueued = []
+
+    async def fake_enqueue(task_id: str):
+        enqueued.append(task_id)
+
+    monkeypatch.setattr(api_main._worker, "enqueue", fake_enqueue)
+
+    result = asyncio.run(
+        api_main._queue_eval_system_job(
+            storage,
+            kind="trace_review",
+            title="Weak Session Review",
+            description="Review weak telemetry from strong lane.",
+            payload={
+                "trace_kind": "session_trace",
+                "session_id": "weak:default",
+                "reviewer_tier": "strong",
+            },
+            session_id="weak:default",
+            dedupe_signature={
+                "trace_kind": "session_trace",
+                "session_id": "weak:default",
+                "reviewer_tier": "strong",
+            },
+        )
+    )
+
+    task = storage.tasks.get_by_id(result["task_id"])
+
+    assert result["status"] == "queued"
+    assert task is not None
+    assert task.constraints["lane"] == "strong"
+    assert task.session_id == "weak:default"
     assert enqueued == [task.task_id]
 
 
@@ -208,3 +247,49 @@ def test_tasks_endpoint_includes_system_job_fields():
     assert matching["system_job"]["kind"] == "structured_eval"
     assert matching["system_job_result"]["status"] == "completed"
     assert matching["generated_reports"][0]["kind"] == "structured_eval"
+
+
+def test_create_task_endpoint_scopes_lane_to_session():
+    storage = make_storage()
+
+    result = asyncio.run(
+        api_main.create_task(
+            {
+                "title": "Weak scoped task",
+                "description": "lane owned",
+                "lane": "weak",
+            },
+            storage=storage,
+        )
+    )
+
+    task = storage.tasks.get_by_id(result["id"])
+
+    assert task is not None
+    assert task.session_id == "weak:default"
+    assert task.constraints["lane"] == "weak"
+
+
+def test_sessions_endpoint_includes_custom_title():
+    storage = make_storage()
+    storage.messages.create(role="user", content="hello", session_id="strong:default")
+    set_session_metadata(storage, "strong:default", {"custom_title": "Bootstrap Chat"})
+    storage.commit()
+
+    result = asyncio.run(api_main.get_sessions(lane="strong", storage=storage))
+
+    assert result[0]["title"] == "Bootstrap Chat"
+
+
+def test_mark_session_read_clears_unread_count():
+    storage = make_storage()
+    storage.messages.create(role="assistant", content="autonomous note", session_id="strong:default")
+    storage.commit()
+
+    before = asyncio.run(api_main.get_sessions(lane="strong", storage=storage))
+    assert before[0]["unread_count"] == 1
+
+    asyncio.run(api_main.mark_session_as_read("strong:default", {}, storage=storage))
+    after = asyncio.run(api_main.get_sessions(lane="strong", storage=storage))
+
+    assert after[0]["unread_count"] == 0

@@ -5,7 +5,7 @@
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from strata.schemas.models import ModelPool, ModelEndpoint
 from strata.schemas.execution import ExecutionContext
 from strata.models.providers import LocalProvider, CloudProvider, BaseModelProvider
@@ -79,12 +79,48 @@ class ModelRegistry:
         if config:
             self._load_config(config)
 
-    def _load_config(self, config: Dict[str, List[Dict]]):
-        if not config: return
-        self._config = config
-        for pool_name, endpoints_data in config.items():
-            endpoints = [ModelEndpoint(**e) for e in endpoints_data]
-            self.pools[pool_name] = ModelPool(name=pool_name, endpoints=endpoints)
+    def _normalize_pool_config(self, pool_name: str, pool_value: Any) -> Dict[str, Any]:
+        if isinstance(pool_value, list):
+            return {
+                "name": pool_name,
+                "allow_cloud": True,
+                "allow_local": True,
+                "preferred_transport": None,
+                "endpoints": pool_value,
+            }
+        if isinstance(pool_value, dict):
+            normalized = dict(pool_value)
+            normalized.setdefault("name", pool_name)
+            normalized.setdefault("allow_cloud", True)
+            normalized.setdefault("allow_local", True)
+            normalized.setdefault("preferred_transport", None)
+            normalized["endpoints"] = list(normalized.get("endpoints") or [])
+            return normalized
+        raise ValueError(f"Invalid pool config for '{pool_name}': expected list or dict.")
+
+    def _load_config(self, config: Dict[str, Any]):
+        if not config:
+            return
+        normalized_config: Dict[str, Dict[str, Any]] = {}
+        pools: Dict[str, ModelPool] = {}
+        for pool_name, pool_value in config.items():
+            normalized_pool = self._normalize_pool_config(pool_name, pool_value)
+            endpoints = [ModelEndpoint(**endpoint) for endpoint in normalized_pool.get("endpoints") or []]
+            pools[pool_name] = ModelPool(
+                name=pool_name,
+                allow_cloud=bool(normalized_pool.get("allow_cloud", True)),
+                allow_local=bool(normalized_pool.get("allow_local", True)),
+                preferred_transport=normalized_pool.get("preferred_transport"),
+                endpoints=endpoints,
+            )
+            normalized_config[pool_name] = {
+                "allow_cloud": pools[pool_name].allow_cloud,
+                "allow_local": pools[pool_name].allow_local,
+                "preferred_transport": pools[pool_name].preferred_transport,
+                "endpoints": [endpoint.model_dump() for endpoint in endpoints],
+            }
+        self._config = normalized_config
+        self.pools = pools
 
     def to_dict(self) -> Dict[str, List[Dict]]:
         """
@@ -108,18 +144,32 @@ class ModelRegistry:
             raise ValueError(f"No model pool found for context mode '{pool_name}'")
 
         pool = self.pools[pool_name]
+        allow_cloud = pool.allow_cloud if context.allow_cloud is None else bool(context.allow_cloud)
+        allow_local = pool.allow_local if context.allow_local is None else bool(context.allow_local)
         fallback_endpoint: Optional[ModelEndpoint] = None
+        preferred_transport = pool.preferred_transport
 
+        candidate_endpoints: List[ModelEndpoint] = []
         for endpoint in pool.endpoints:
-            if endpoint.transport == "cloud" and not context.allow_cloud:
+            if endpoint.transport == "cloud" and not allow_cloud:
                 continue
-            if endpoint.transport == "local" and not context.allow_local:
+            if endpoint.transport == "local" and not allow_local:
                 continue
+            candidate_endpoints.append(endpoint)
 
-            if fallback_endpoint is None:
-                fallback_endpoint = endpoint
+        if not candidate_endpoints:
+            raise ValueError(f"No suitable model found in pool '{pool_name}' for the current context.")
+
+        for endpoint in candidate_endpoints:
             if preferred_model and endpoint.model == preferred_model:
                 return endpoint
+
+        if preferred_transport:
+            for endpoint in candidate_endpoints:
+                if endpoint.transport == preferred_transport:
+                    return endpoint
+
+        fallback_endpoint = candidate_endpoints[0]
 
         if fallback_endpoint is not None:
             return fallback_endpoint
@@ -169,29 +219,39 @@ class ModelRegistry:
 
 # Example default registry (can be overridden)
 DEFAULT_CONFIG = {
-    "strong": [
-        {
-            "provider": "google",
-            "model": "gemma-3-27b-it",
-            "transport": "cloud",
-            "api_key_env": "GEMINI_API_KEY",
-            "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            "requests_per_minute": 10,
-            "max_concurrency": 1,
-            "min_interval_ms": 6000
-        }
-    ],
-    "weak": [
-        {
-            "provider": "lmstudio",
-            "model": "mlx-qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2",
-            "transport": "local",
-            "endpoint_url": "http://127.0.0.1:1234/v1/chat/completions",
-            "requests_per_minute": 6,
-            "max_concurrency": 1,
-            "min_interval_ms": 4000
-        }
-    ]
+    "strong": {
+        "allow_cloud": True,
+        "allow_local": True,
+        "preferred_transport": "cloud",
+        "endpoints": [
+            {
+                "provider": "google",
+                "model": "gemma-3-27b-it",
+                "transport": "cloud",
+                "api_key_env": "GEMINI_API_KEY",
+                "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "requests_per_minute": 10,
+                "max_concurrency": 1,
+                "min_interval_ms": 6000
+            }
+        ],
+    },
+    "weak": {
+        "allow_cloud": True,
+        "allow_local": True,
+        "preferred_transport": "local",
+        "endpoints": [
+            {
+                "provider": "lmstudio",
+                "model": "mlx-qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2",
+                "transport": "local",
+                "endpoint_url": "http://127.0.0.1:1234/v1/chat/completions",
+                "requests_per_minute": 6,
+                "max_concurrency": 1,
+                "min_interval_ms": 4000
+            }
+        ],
+    },
 }
 
 registry = ModelRegistry(DEFAULT_CONFIG)

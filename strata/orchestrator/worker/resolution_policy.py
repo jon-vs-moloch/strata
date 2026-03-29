@@ -7,7 +7,8 @@
 import logging
 import asyncio
 from typing import Optional, List
-from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, TaskState, TaskType
+from strata.core.lanes import infer_lane_from_task
+from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, AttemptOutcome, TaskState, TaskType
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
 from strata.orchestrator.user_questions import enqueue_user_question
@@ -120,6 +121,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
     """
     from strata.storage.models import TaskState, TaskType
     res = resolution_data.resolution
+    task_lane = infer_lane_from_task(task)
     logger.info(f"Applying Resolution: {res.upper()} for task {task.task_id} ({resolution_data.reasoning})")
     
     if res == "reattempt":
@@ -140,7 +142,8 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 ),
                 source_type="task_blocked",
                 source_id=task.task_id,
-                context={"reasoning": str(error), "title": task.title},
+                lane=task_lane,
+                context={"reasoning": str(error), "title": task.title, "lane": task_lane},
             )
             storage.commit()
             return
@@ -156,7 +159,8 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                     description=sub_proto.description,
                     session_id=task.session_id,
                     state=TaskState.PENDING,
-                    depth=task.depth + 1
+                    depth=task.depth + 1,
+                    constraints={"lane": task_lane} if task_lane else None,
                 )
                 sub.type = TaskType.IMPL
                 # Mandatory policy check
@@ -174,7 +178,8 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 parent_task_id=task.task_id,
                 type=TaskType.DECOMP,
                 state=TaskState.PENDING,
-                depth=task.depth + 1
+                depth=task.depth + 1,
+                constraints={"lane": task_lane} if task_lane else None,
             )
             storage.commit()
             await enqueue_fn(failover.task_id)
@@ -202,6 +207,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
             depth=task.depth + 1,
             priority=float(task.priority or 0.0),
             constraints={
+                "lane": task_lane,
                 "target_scope": "tooling",
                 "source_task_id": task.task_id,
                 "source_task_priority": float(task.priority or 0.0),
@@ -231,6 +237,8 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 "reasoning": resolution_data.reasoning,
                 "title": task.title,
                 "task_id": task.task_id,
+                "lane": task_lane,
             },
+            lane=task_lane,
         )
         storage.commit()
