@@ -94,6 +94,87 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "inspect_branch_state",
+            "description": "Inspect the current state of a task branch, including recent attempts, children, open questions, verification posture, and trainer interventions. Prefer this before rewriting plans or invalidating premises.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task branch root or leaf to inspect."},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_self_audit",
+            "description": "Request a bounded self-audit of a task branch using the agent tier. Use this to force the agent to inspect its own branch without assuming trainer rescue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task branch to audit."},
+                    "focus": {"type": "string", "description": "Optional specific concern to audit, such as repeated failures, grounding, or open questions."},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rewrite_plan",
+            "description": "Replace a failing branch's current plan with a bounded corrective plan. Use this when the existing branch is drifting, looping, or carrying an unhealthy plan forward.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task branch to update."},
+                    "plan": {"type": "string", "description": "The new bounded plan the branch should follow."},
+                    "rationale": {"type": "string", "description": "Why this replacement plan is better than the current one."},
+                },
+                "required": ["task_id", "plan", "rationale"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "invalidate_premise",
+            "description": "Record that a branch is relying on a false or unsafe premise, along with the correction it should inherit going forward.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task branch carrying the premise."},
+                    "premise": {"type": "string", "description": "The assumption or premise that should no longer be trusted."},
+                    "correction": {"type": "string", "description": "The corrected understanding or instruction that should replace it."},
+                },
+                "required": ["task_id", "premise", "correction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_verification_posture",
+            "description": "Adjust verification intensity for a task branch. Use aggressive posture when trust is low or recent failures are high, and lighter posture only when the branch is stable.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task branch to update."},
+                    "posture": {
+                        "type": "string",
+                        "description": "Desired verification intensity for this branch.",
+                        "enum": ["aggressive", "standard", "light"],
+                    },
+                    "rationale": {"type": "string", "description": "Why this verification posture should apply."},
+                },
+                "required": ["task_id", "posture", "rationale"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "resolve_user_question",
             "description": "Mark an open system-originated question as actually answered after interpreting the user's latest message. Use this only when the user has truly answered or clarified the open question. If the reply is ambiguous or non-responsive, do not call this tool yet.",
             "parameters": {
@@ -351,6 +432,27 @@ NON_GENERATIVE_TOOLS = [
         },
     },
 ]
+
+TRAINER_CONTROL_TOOL_NAMES = {
+    "inspect_branch_state",
+    "request_self_audit",
+    "rewrite_plan",
+    "invalidate_premise",
+    "set_verification_posture",
+}
+
+
+def filter_chat_tools_for_lane(tools: List[Dict[str, Any]], lane: str | None) -> List[Dict[str, Any]]:
+    normalized_lane = str(lane or "").strip().lower()
+    if normalized_lane == "trainer":
+        return list(tools)
+    filtered: List[Dict[str, Any]] = []
+    for tool in tools:
+        name = str(((tool.get("function") or {}).get("name")) or "").strip()
+        if name in TRAINER_CONTROL_TOOL_NAMES:
+            continue
+        filtered.append(tool)
+    return filtered
 
 
 def load_dynamic_tools(*, base_dir: str, global_settings: Dict[str, Any]) -> List[Dict[str, Any]]:

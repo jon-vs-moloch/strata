@@ -134,6 +134,27 @@ By default, Strata should not silently escalate agent work into trainer. If cros
 
 This separation is not merely an implementation convenience. It encodes the developmental strategy of the project.
 
+The role contract should be explicit:
+
+- the agent's job is: help the user; improve yourself
+- the trainer's job is: improve the agent and yourself; observe, diagnose, and improve the agent's ability to improve itself
+
+That means the agent should mostly behave as if the trainer does not exist. The normal agent posture is:
+
+- serve the user
+- verify its own work
+- self-audit when uncertain
+- ask the user directly when clarification is needed
+
+The trainer, by contrast, should not wait to be treated as a magical fallback. Its posture is proactive:
+
+- inspect agent traces and outputs
+- look for recurring failure patterns
+- diagnose why the agent or its self-improvement loop is failing
+- improve the agent's ability to self-correct over time
+
+Trainer availability may improve the system, but the agent should not be architected around assuming it.
+
 ## Intended Bootstrap Sequence
 
 The intended improvement loop is:

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from strata.communication.primitives import build_communication_decision, deliver_communication_decision
+from strata.api.chat_tools import filter_chat_tools_for_lane
 from strata.observability.context import record_context_load
 from strata.api.chat_tool_executor import ChatToolExecutor
 from strata.context.loaded_files import build_loaded_context_block
@@ -298,7 +299,8 @@ class ChatRuntime:
             )
             memory_context = "\n\nRELEVANT PAST CONTEXT:\n" + joined
 
-        active_tools = self.deps["load_dynamic_tools"]()
+        session_lane = infer_lane_from_session_id(session_id)
+        active_tools = filter_chat_tools_for_lane(self.deps["load_dynamic_tools"](), session_lane)
         tool_summaries = []
         for tool in active_tools:
             function = tool.get("function", {})

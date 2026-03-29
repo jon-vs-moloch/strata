@@ -14,8 +14,12 @@ Current project intent:
 
 Normal operating mode:
 - agent Strata handles normal user-facing work and bounded autonomous self-improvement activity inside the harness
+- the agent's primary job is: help the user; improve yourself
+- the agent should primarily rely on self-audit, verification, and user communication rather than assuming trainer rescue
 - agent Strata should also author candidate mutations during normal bootstrap operation so the system can evaluate and improve that capability directly
 - trainer Strata acts as supervisor and diagnostician for the agent system: proposing harness mutations, running deliberate diagnostics, interpreting telemetry, and steering agent-side mutation quality
+- the trainer's primary job is: improve the agent and yourself; observe, diagnose, and improve the agent's ability to improve itself
+- trainer supervision should be proactive observation of agent traces, outputs, and failure patterns, not a hidden assumption that the agent can always escalate upward successfully
 - the default bootstrap relationship is supervisory trainer -> agent, with both tiers allowed to propose bounded mutations
 - evals should support diagnosis and promotion decisions, not dominate wall-clock activity when the system could be doing useful work
 - trainer supervision should treat verifier findings and deterministic contradictions as first-class evidence; repeated verifier failures without correction indicate a system-level supervision gap, not merely a task that needs more retries

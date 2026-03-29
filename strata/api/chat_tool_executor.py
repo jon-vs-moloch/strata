@@ -9,6 +9,13 @@ import json
 from typing import Any, Dict, List
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.feedback.signals import register_feedback_signal
+from strata.orchestrator.trainer_controls import (
+    build_branch_state_summary,
+    invalidate_task_premise,
+    record_self_audit_request,
+    rewrite_task_plan,
+    set_task_verification_posture,
+)
 
 
 class ChatToolExecutor:
@@ -24,6 +31,7 @@ class ChatToolExecutor:
         queue_eval_system_job = self.deps.get("queue_eval_system_job")
         get_active_question = self.deps.get("get_active_question")
         resolve_question = self.deps.get("resolve_question")
+        get_question_for_source = self.deps.get("get_question_for_source")
 
         func_name = call.get("function", {}).get("name")
         tool_call_id = call.get("id", "call_xyz")
@@ -36,7 +44,107 @@ class ChatToolExecutor:
         tool_outputs_generated = False
         async_task_id = None
 
-        if func_name == "resolve_user_question":
+        if func_name == "inspect_branch_state":
+            task_id = str(args.get("task_id") or "").strip()
+            tool_content = json.dumps(
+                build_branch_state_summary(
+                    storage,
+                    task_id=task_id,
+                    question_lookup=get_question_for_source,
+                ),
+                indent=2,
+            )
+            tool_outputs_generated = True
+        elif func_name == "request_self_audit":
+            task_id = str(args.get("task_id") or "").strip()
+            focus = str(args.get("focus") or "").strip()
+            task = storage.tasks.get_by_id(task_id) if task_id else None
+            if not task:
+                tool_content = f"Task '{task_id}' was not found."
+            else:
+                record = record_self_audit_request(task, focus=focus, actor="trainer")
+                queued = None
+                if queue_eval_system_job:
+                    queued = await queue_eval_system_job(
+                        storage,
+                        kind="trace_review",
+                        title=f"Agent Self-Audit: {str(task.title or task.task_id)[:72]}",
+                        description="Queued agent-tier self-audit for a task branch.",
+                        payload={
+                            "trace_kind": "task_trace",
+                            "task_id": task.task_id,
+                            "reviewer_tier": "agent",
+                            "emit_followups": False,
+                            "persist_to_task": True,
+                            "spec_scope": "project",
+                            "self_audit_focus": focus,
+                        },
+                        session_id=task.session_id or session_id,
+                    )
+                storage.commit()
+                tool_content = json.dumps(
+                    {
+                        "status": "ok",
+                        "task_id": task.task_id,
+                        "self_audit_request": record["self_audit_request"],
+                        "queued_review": queued,
+                    },
+                    indent=2,
+                )
+                tool_outputs_generated = True
+        elif func_name == "rewrite_plan":
+            task_id = str(args.get("task_id") or "").strip()
+            task = storage.tasks.get_by_id(task_id) if task_id else None
+            if not task:
+                tool_content = f"Task '{task_id}' was not found."
+            else:
+                update = rewrite_task_plan(
+                    storage,
+                    task=task,
+                    plan=str(args.get("plan") or ""),
+                    rationale=str(args.get("rationale") or ""),
+                    actor="trainer",
+                )
+                storage.commit()
+                await self.deps["worker"].enqueue(task.task_id)
+                async_task_id = task.task_id
+                tool_content = json.dumps({"status": "ok", "task_id": task.task_id, **update}, indent=2)
+                tool_outputs_generated = True
+        elif func_name == "invalidate_premise":
+            task_id = str(args.get("task_id") or "").strip()
+            task = storage.tasks.get_by_id(task_id) if task_id else None
+            if not task:
+                tool_content = f"Task '{task_id}' was not found."
+            else:
+                update = invalidate_task_premise(
+                    storage,
+                    task=task,
+                    premise=str(args.get("premise") or ""),
+                    correction=str(args.get("correction") or ""),
+                    actor="trainer",
+                )
+                storage.commit()
+                await self.deps["worker"].enqueue(task.task_id)
+                async_task_id = task.task_id
+                tool_content = json.dumps({"status": "ok", "task_id": task.task_id, **update}, indent=2)
+                tool_outputs_generated = True
+        elif func_name == "set_verification_posture":
+            task_id = str(args.get("task_id") or "").strip()
+            task = storage.tasks.get_by_id(task_id) if task_id else None
+            if not task:
+                tool_content = f"Task '{task_id}' was not found."
+            else:
+                update = set_task_verification_posture(
+                    storage,
+                    task=task,
+                    posture=str(args.get("posture") or ""),
+                    rationale=str(args.get("rationale") or ""),
+                    actor="trainer",
+                )
+                storage.commit()
+                tool_content = json.dumps({"status": "ok", "task_id": task.task_id, **update}, indent=2)
+                tool_outputs_generated = True
+        elif func_name == "resolve_user_question":
             pending_question = get_active_question(storage, session_id) if get_active_question else {}
             question_id = str(args.get("question_id") or "").strip()
             answer = str(args.get("answer") or "").strip()

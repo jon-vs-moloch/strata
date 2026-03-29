@@ -85,6 +85,13 @@ The `agent` and `trainer` tiers are intentional. They support the project’s im
 
 That separation is a core part of the design, not just a configuration detail.
 
+The intended role contract is explicit:
+
+- `agent`: help the user; improve yourself
+- `trainer`: improve the agent and yourself; observe, diagnose, and improve the agent's ability to improve itself
+
+In practice, that means the `agent` should default to self-audit, verification, and direct user communication instead of assuming trainer rescue. The `trainer` should primarily operate by proactively reviewing agent traces, outputs, and recurring failure patterns.
+
 The `trainer` tier is not supposed to merely restate what the `agent` already said. Its job is to investigate, falsify weak premises, and turn repeated verifier concerns into corrective action. In practice that now means:
 
 - both tiers use the same verifier machinery
