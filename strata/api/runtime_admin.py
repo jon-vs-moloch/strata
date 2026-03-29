@@ -291,19 +291,48 @@ def register_runtime_admin_routes(
         result = hotreloader.rollback(module)
         return {"success": result.success, "module": result.module, "message": result.message}
 
-    @app.post("/admin/reset")
-    async def reset_database(storage=Depends(get_storage)):
+    async def perform_fresh_start(storage):
         from strata.storage.models import Base
 
-        storage.session.close()
-        Base.metadata.drop_all(storage.engine)
-        Base.metadata.create_all(storage.engine)
-        storage.session = storage.SessionLocal()
-        storage.tasks.session = storage.session
-        storage.messages.session = storage.session
-        storage.attempts.session = storage.session
-        storage.parameters.session = storage.session
-        return {"status": "ok", "message": "Database reset complete."}
+        preserved_settings = dict(global_settings)
+        engine = storage.engine
+        worker.pause()
+        aborted = worker.stop_current()
+        await worker.wait_until_idle(timeout=10.0)
+        cleared_queue = worker.clear_queue()
+
+        storage.close()
+        Base.metadata.drop_all(engine)
+        Base.metadata.create_all(engine)
+
+        restored = storage.__class__()
+        try:
+            restored.parameters.set_parameter(
+                key=settings_parameter_key,
+                value=preserved_settings,
+                description=settings_parameter_description,
+            )
+            restored.commit()
+        finally:
+            restored.close()
+
+        return {
+            "status": "ok",
+            "message": "Fresh start complete. Runtime state was cleared and the worker remains paused.",
+            "fresh_start": True,
+            "worker_paused": True,
+            "aborted_active_task": bool(aborted),
+            "cleared_queue": cleared_queue,
+            "preserved_settings": True,
+        }
+
+    @app.post("/admin/fresh-start")
+    async def fresh_start(storage=Depends(get_storage)):
+        return await perform_fresh_start(storage)
+
+    @app.post("/admin/reset")
+    async def reset_database(storage=Depends(get_storage)):
+        return await perform_fresh_start(storage)
 
     @app.get("/admin/worker/status")
     async def get_worker_status():

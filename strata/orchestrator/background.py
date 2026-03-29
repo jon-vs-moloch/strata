@@ -376,6 +376,28 @@ class BackgroundWorker:
         await self._queue.put(task_id)
         logger.info(f"Enqueued task {task_id}")
 
+    async def wait_until_idle(self, timeout: float = 5.0) -> bool:
+        deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout))
+        while asyncio.get_running_loop().time() < deadline:
+            if self._current_process is None:
+                return True
+            await asyncio.sleep(0.05)
+        return self._current_process is None
+
+    def clear_queue(self) -> int:
+        cleared = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()
+                cleared += 1
+        if cleared:
+            logger.info("Cleared %s queued task(s) from the worker backlog.", cleared)
+        return cleared
+
     def _lane_for_task_id(self, task_id: str) -> Optional[str]:
         storage = self._storage_factory()
         try:

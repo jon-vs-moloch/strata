@@ -1168,8 +1168,8 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
             borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
           }}>
             <div>
-              <div style={{ fontSize: '14px', fontWeight: 600, color: '#edeeef', marginBottom: '4px' }}>Reset Database</div>
-              <div style={{ fontSize: '12px', color: '#888' }}>Wipes strata.db — all tasks and sessions are lost.</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: '#edeeef', marginBottom: '4px' }}>Fresh Start</div>
+              <div style={{ fontSize: '12px', color: '#888' }}>Stops active work, clears runtime state, wipes task history, and leaves the worker paused.</div>
             </div>
             <button
               onClick={handleReset}
@@ -1183,7 +1183,7 @@ const SettingsView = ({ onResetDatabase, apiUrl, currentScope = 'home' }) => {
                 whiteSpace: 'nowrap', transition: 'all 0.2s'
               }}
             >
-              {resetting ? 'Resetting…' : resetDone ? '✓ Done' : resetConfirm ? 'Confirm Reset' : 'Reset DB'}
+              {resetting ? 'Refreshing…' : resetDone ? '✓ Done' : resetConfirm ? 'Confirm Fresh Start' : 'Fresh Start'}
             </button>
           </div>
         </DashboardPanel>
@@ -2023,7 +2023,8 @@ function App() {
   }, []);
 
   const handleResetDatabase = async () => {
-    await axios.post(`${API}/admin/reset`);
+    await axios.post(`${API}/admin/fresh-start`);
+    localStorage.removeItem('archivedTasks');
     setSessionList([]);
     setLaneDrafts({ strong: [], weak: [] });
     setScopeSessionIds({
@@ -2033,6 +2034,7 @@ function App() {
     });
     setMessages([]);
     setTasks([]);
+    setArchivedTasks([]);
   };
 
   const runOperatorAction = useCallback(async (label, fn) => {
