@@ -184,21 +184,37 @@ const OlderAttemptsGroup = ({ attempts, taskUpdatedAt, nowMs, totalAttempts }) =
   );
 };
 
-const InterventionWidget = ({ taskId, question, onResolve }) => {
+const InterventionWidget = ({ taskId, taskSessionId, taskLane, pendingQuestion, onResolve }) => {
   const [input, setInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const questionText =
+    typeof pendingQuestion === 'string'
+      ? pendingQuestion
+      : String(pendingQuestion?.question || pendingQuestion?.brief_question || '').trim();
+  const answerSessionId = String(pendingQuestion?.session_id || taskSessionId || '').trim();
+  const answerQuestionId = String(pendingQuestion?.question_id || '').trim();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
     setIsSubmitting(true);
     try {
-      await axios.post(`http://localhost:8000/tasks/${taskId}/intervene`, {
-        override: input
-      });
+      if (answerQuestionId) {
+        await axios.post(`http://localhost:8000/chat`, {
+          role: 'user',
+          content: input,
+          session_id: answerSessionId,
+          preferred_tier: taskLane || 'agent',
+          answer_question_id: answerQuestionId,
+        });
+      } else {
+        await axios.post(`http://localhost:8000/tasks/${taskId}/intervene`, {
+          override: input
+        });
+      }
+      setInput('');
       if (onResolve) onResolve();
-      // Optionally reload the page or trigger a re-fetch
-      window.location.reload(); 
+      window.location.reload();
     } catch (err) {
       console.error('Intervention failed:', err);
       alert('Failed to submit intervention. Check console.');
@@ -222,7 +238,7 @@ const InterventionWidget = ({ taskId, question, onResolve }) => {
         Human Intervention Required
       </div>
       <div style={{ fontSize: '12px', color: '#ffe2b8', lineHeight: 1.45 }}>
-        {question || 'Provide the missing context or decision this blocked task needs.'}
+        {questionText || 'Provide the missing context or decision this blocked task needs.'}
       </div>
       <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px' }}>
         <input 
@@ -399,7 +415,12 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
 
         {task.status === 'blocked' && (
           <div onClick={(e) => e.stopPropagation()}>
-            <InterventionWidget taskId={task.id} question={task.pending_question} />
+            <InterventionWidget
+              taskId={task.id}
+              taskSessionId={task.session_id}
+              taskLane={task.lane}
+              pendingQuestion={task.pending_question}
+            />
           </div>
         )}
 

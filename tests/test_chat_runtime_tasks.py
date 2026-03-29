@@ -8,6 +8,7 @@ from strata.api.chat_runtime import ChatRuntime
 from strata.sessions.metadata import ensure_generated_session_title, set_session_metadata
 from strata.storage.models import Base, TaskModel, TaskState, TaskType
 from strata.storage.services.main import StorageManager
+from strata.orchestrator.user_questions import enqueue_user_question, get_active_question, get_question_for_source
 
 
 def make_storage():
@@ -39,6 +40,14 @@ def make_runtime():
         mark_question_asked=lambda storage, question_id: None,
         resolve_question=lambda storage, question_id, resolution, response=None: None,
     )
+
+
+class DummyWorker:
+    def __init__(self):
+        self.enqueued = []
+
+    async def enqueue(self, task_id):
+        self.enqueued.append(task_id)
 
 
 class DummyTitleModel:
@@ -96,6 +105,55 @@ def test_list_tasks_payload_infers_lane_from_session_when_missing():
     assert weak_tasks[0]["lane"] == "agent"
 
 
+def test_list_tasks_payload_includes_pending_question_metadata():
+    storage = make_storage()
+    runtime = ChatRuntime(
+        task_model_cls=TaskModel,
+        task_type_cls=TaskType,
+        task_state_cls=TaskState,
+        model_adapter=None,
+        semantic_memory=None,
+        worker=None,
+        broadcast_event=None,
+        global_settings={},
+        knowledge_page_store_cls=lambda storage: None,
+        slugify_page_title=lambda value: value,
+        load_dynamic_tools=lambda: [],
+        load_specs=lambda: {},
+        create_spec_proposal=None,
+        resubmit_spec_proposal_with_clarification=None,
+        find_pending_spec_clarification=lambda storage, session_id: None,
+        get_active_question=get_active_question,
+        get_question_for_source=get_question_for_source,
+        mark_question_asked=lambda storage, question_id: None,
+        resolve_question=lambda storage, question_id, resolution, response=None: None,
+    )
+    task = storage.tasks.create(
+        title="Blocked task",
+        description="Needs clarification.",
+        session_id="agent:default",
+        state=TaskState.BLOCKED,
+        constraints={"lane": "agent"},
+    )
+    task.human_intervention_required = True
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:session-question",
+        question="What should I change before retrying?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+    )
+    storage.commit()
+
+    tasks = runtime.list_tasks_payload(storage, lane="agent")
+
+    assert tasks[0]["pending_question"]["question_id"] == queued["question_id"]
+    assert tasks[0]["pending_question"]["session_id"] == queued["session_id"]
+    assert tasks[0]["pending_question"]["question"] == queued["question"]
+
+
 def test_task_repository_inherits_lane_from_parent_task():
     storage = make_storage()
 
@@ -116,6 +174,175 @@ def test_task_repository_inherits_lane_from_parent_task():
     storage.commit()
 
     assert child.constraints["lane"] == "trainer"
+
+
+def test_plain_user_chat_does_not_auto_resolve_task_question():
+    storage = make_storage()
+    worker = DummyWorker()
+    runtime = ChatRuntime(
+        task_model_cls=TaskModel,
+        task_type_cls=TaskType,
+        task_state_cls=TaskState,
+        model_adapter=None,
+        semantic_memory=None,
+        worker=worker,
+        broadcast_event=None,
+        global_settings={},
+        knowledge_page_store_cls=lambda storage: None,
+        slugify_page_title=lambda value: value,
+        load_dynamic_tools=lambda: [],
+        load_specs=lambda: {},
+        create_spec_proposal=None,
+        resubmit_spec_proposal_with_clarification=None,
+        find_pending_spec_clarification=lambda storage, session_id: None,
+        get_active_question=get_active_question,
+        get_question_for_source=lambda storage, source_type, source_id: {},
+        mark_question_asked=lambda storage, question_id: None,
+        resolve_question=lambda storage, question_id, resolution, response=None: None,
+    )
+    task = storage.tasks.create(
+        title="Blocked task",
+        description="Needs clarification.",
+        session_id="agent:default",
+        state=TaskState.BLOCKED,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="What should I change before retrying?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+    )
+    storage.commit()
+
+    result = asyncio.run(
+        runtime.handle_explicit_question_answer(
+            storage,
+            {"role": "user"},
+            queued["session_id"],
+            "Can you give me more detail?",
+        )
+    )
+
+    assert result is None
+    active = get_active_question(storage, queued["session_id"])
+    assert active["question_id"] == queued["question_id"]
+    assert worker.enqueued == []
+
+
+def test_explicit_question_answer_resolves_and_requeues_task():
+    storage = make_storage()
+    worker = DummyWorker()
+    resolved_rows = []
+    async def _broadcast_event(*_args, **_kwargs):
+        return None
+
+    def _resolve_question(storage, question_id, resolution, response=None):
+        resolved_rows.append((question_id, resolution, response))
+
+    runtime = ChatRuntime(
+        task_model_cls=TaskModel,
+        task_type_cls=TaskType,
+        task_state_cls=TaskState,
+        model_adapter=None,
+        semantic_memory=None,
+        worker=worker,
+        broadcast_event=_broadcast_event,
+        global_settings={},
+        knowledge_page_store_cls=lambda storage: None,
+        slugify_page_title=lambda value: value,
+        load_dynamic_tools=lambda: [],
+        load_specs=lambda: {},
+        create_spec_proposal=None,
+        resubmit_spec_proposal_with_clarification=None,
+        find_pending_spec_clarification=lambda storage, session_id: None,
+        get_active_question=get_active_question,
+        get_question_for_source=lambda storage, source_type, source_id: {},
+        mark_question_asked=lambda storage, question_id: None,
+        resolve_question=_resolve_question,
+    )
+    task = storage.tasks.create(
+        title="Blocked task",
+        description="Needs clarification.",
+        session_id="agent:default",
+        state=TaskState.BLOCKED,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="What should I change before retrying?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+    )
+    storage.commit()
+
+    result = asyncio.run(
+        runtime.handle_explicit_question_answer(
+            storage,
+            {"role": "user", "answer_question_id": queued["question_id"]},
+            queued["session_id"],
+            "Break the recovery flow into smaller steps.",
+        )
+    )
+
+    storage.session.expire_all()
+    updated_task = storage.tasks.get_by_id(task.task_id)
+    assert result["status"] == "ok"
+    assert updated_task.state == TaskState.PENDING
+    assert "User clarification" in updated_task.description
+    assert worker.enqueued == [task.task_id]
+    assert resolved_rows[0][0] == queued["question_id"]
+
+
+def test_build_chat_messages_mentions_open_asked_question_without_auto_resolving():
+    storage = make_storage()
+    runtime = ChatRuntime(
+        task_model_cls=TaskModel,
+        task_type_cls=TaskType,
+        task_state_cls=TaskState,
+        model_adapter=None,
+        semantic_memory=type("Memory", (), {"query_memory": lambda self, *_args, **_kwargs: {}})(),
+        worker=None,
+        broadcast_event=None,
+        global_settings={},
+        knowledge_page_store_cls=lambda storage: None,
+        slugify_page_title=lambda value: value,
+        load_dynamic_tools=lambda: [],
+        load_specs=lambda: {},
+        create_spec_proposal=None,
+        resubmit_spec_proposal_with_clarification=None,
+        find_pending_spec_clarification=lambda storage, session_id: None,
+        get_active_question=get_active_question,
+        get_question_for_source=lambda storage, source_type, source_id: {},
+        mark_question_asked=lambda storage, question_id: None,
+        resolve_question=lambda storage, question_id, resolution, response=None: None,
+    )
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="What should I change before retrying?",
+        source_type="task_blocked",
+        source_id="task-123",
+        lane="agent",
+    )
+    storage.commit()
+
+    messages, _tools, _pages, _pending = runtime.build_chat_messages(
+        storage,
+        session_id=queued["session_id"],
+        content="Can you give me more detail?",
+        pending_question=get_active_question(storage, queued["session_id"]),
+    )
+
+    system_messages = [row["content"] for row in messages if row["role"] == "system"]
+    assert any("resolve_user_question" in content for content in system_messages)
+    assert any("Do not assume every user message is automatically an answer" in content for content in system_messages)
 
 
 def test_session_summaries_filter_by_lane():

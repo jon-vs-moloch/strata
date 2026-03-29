@@ -380,13 +380,9 @@ def register_chat_task_routes(
         mark_message_seen_by_system(storage, message_id=message.message_id, actor="chat_runtime")
         storage.commit()
 
-        spec_reply = await runtime.handle_spec_clarification_reply(storage, payload, session_id, content)
-        if spec_reply:
-            return spec_reply
-
-        task_reply = await runtime.handle_task_clarification_reply(storage, payload, session_id, content)
-        if task_reply:
-            return task_reply
+        explicit_question_reply = await runtime.handle_explicit_question_answer(storage, payload, session_id, content)
+        if explicit_question_reply:
+            return explicit_question_reply
 
         result = await runtime.run_chat_tool_loop(
             storage,

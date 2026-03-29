@@ -22,6 +22,8 @@ class ChatToolExecutor:
         load_specs = self.deps["load_specs"]
         create_spec_proposal = self.deps["create_spec_proposal"]
         queue_eval_system_job = self.deps.get("queue_eval_system_job")
+        get_active_question = self.deps.get("get_active_question")
+        resolve_question = self.deps.get("resolve_question")
 
         func_name = call.get("function", {}).get("name")
         tool_call_id = call.get("id", "call_xyz")
@@ -34,7 +36,32 @@ class ChatToolExecutor:
         tool_outputs_generated = False
         async_task_id = None
 
-        if func_name == "kickoff_background_research":
+        if func_name == "resolve_user_question":
+            pending_question = get_active_question(storage, session_id) if get_active_question else {}
+            question_id = str(args.get("question_id") or "").strip()
+            answer = str(args.get("answer") or "").strip()
+            resolution = str(args.get("resolution") or "resolved").strip().lower() or "resolved"
+            if not pending_question or not question_id or str(pending_question.get("question_id") or "") != question_id:
+                tool_content = "No matching open question is attached to this session."
+            elif not answer:
+                tool_content = "A non-empty interpreted answer is required before resolving the question."
+            else:
+                source_type = str(pending_question.get("source_type") or "").strip().lower()
+                if source_type == "task_blocked":
+                    task_id = str(pending_question.get("source_id") or "").strip()
+                    task = storage.tasks.get_by_id(task_id) if task_id else None
+                    if task:
+                        task.description = (task.description or "") + f"\n\nUser clarification:\n{answer}"
+                        task.human_intervention_required = False
+                        task.state = task_state_cls.PENDING
+                        storage.commit()
+                        await self.deps["worker"].enqueue(task.task_id)
+                if resolve_question:
+                    resolve_question(storage, question_id, resolution=resolution, response=answer)
+                storage.commit()
+                tool_content = f"Resolved question {question_id} with the interpreted answer and updated the blocked work."
+                tool_outputs_generated = True
+        elif func_name == "kickoff_background_research":
             desc = args.get("description", content)
             scope = args.get("target_scope", "codebase")
             task = storage.tasks.create(

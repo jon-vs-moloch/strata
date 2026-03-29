@@ -94,6 +94,26 @@ NON_GENERATIVE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "resolve_user_question",
+            "description": "Mark an open system-originated question as actually answered after interpreting the user's latest message. Use this only when the user has truly answered or clarified the open question. If the reply is ambiguous or non-responsive, do not call this tool yet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question_id": {"type": "string", "description": "The open question id currently attached to this session."},
+                    "answer": {"type": "string", "description": "Your concise interpretation of the user's actual answer or clarification."},
+                    "resolution": {
+                        "type": "string",
+                        "description": "How to close the question.",
+                        "enum": ["resolved", "dismissed"],
+                    },
+                },
+                "required": ["question_id", "answer"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_feedback_signal",
             "description": "Register a lightweight feedback, surprise, correction, or attention signal so the system can prioritize it without waiting for a human reaction.",
             "parameters": {

@@ -76,6 +76,11 @@ class ChatRuntime:
         payload = []
         for task in tasks:
             task_lane = (task.constraints or {}).get("lane") or infer_lane_from_session_id(getattr(task, "session_id", None))
+            task_pending_question = (
+                get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id)
+                if task.human_intervention_required
+                else {}
+            )
             if normalized_lane and str(task_lane or "").strip().lower() != normalized_lane:
                 continue
             sorted_attempts = sorted(
@@ -103,8 +108,15 @@ class ChatRuntime:
                     "paused": bool((task.constraints or {}).get("paused")),
                     "lane": task_lane,
                     "pending_question": (
-                        get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id).get("question")
-                        if task.human_intervention_required
+                        {
+                            "question_id": task_pending_question.get("question_id"),
+                            "session_id": task_pending_question.get("session_id"),
+                            "status": task_pending_question.get("status"),
+                            "source_type": task_pending_question.get("source_type"),
+                            "question": task_pending_question.get("question"),
+                            "brief_question": task_pending_question.get("brief_question"),
+                        }
+                        if task_pending_question
                         else None
                     ),
                     "created_at": task.created_at.isoformat() if task.created_at else None,
@@ -204,9 +216,22 @@ class ChatRuntime:
             "task_id": task.task_id,
         }
 
-    async def handle_task_clarification_reply(self, storage, payload: Dict[str, Any], session_id: str, content: str):
+    async def handle_task_clarification_reply(
+        self,
+        storage,
+        payload: Dict[str, Any],
+        session_id: str,
+        content: str,
+        *,
+        question_id: str,
+    ):
         pending_question = self.deps["get_active_question"](storage, session_id)
-        if not (pending_question and payload.get("role") == "user" and pending_question.get("status") == "asked"):
+        if not (
+            pending_question
+            and payload.get("role") == "user"
+            and pending_question.get("status") == "asked"
+            and str(pending_question.get("question_id") or "") == str(question_id or "")
+        ):
             return None
         if pending_question.get("source_type") != "task_blocked":
             return None
@@ -235,6 +260,27 @@ class ChatRuntime:
             "reply": f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
             "task_id": task.task_id,
         }
+
+    async def handle_explicit_question_answer(self, storage, payload: Dict[str, Any], session_id: str, content: str):
+        question_id = str(payload.get("answer_question_id") or payload.get("question_id") or "").strip()
+        if not question_id:
+            return None
+
+        pending_spec_proposal = self.deps["find_pending_spec_clarification"](storage, session_id)
+        if (
+            pending_spec_proposal
+            and pending_spec_proposal.get("_pending_question", {}).get("status") == "asked"
+            and str(pending_spec_proposal["_pending_question"].get("question_id") or "") == question_id
+        ):
+            return await self.handle_spec_clarification_reply(storage, payload, session_id, content)
+
+        return await self.handle_task_clarification_reply(
+            storage,
+            payload,
+            session_id,
+            content,
+            question_id=question_id,
+        )
 
     def build_chat_messages(self, storage, *, session_id: str, content: str, pending_question: Optional[Dict[str, Any]]):
         knowledge_pages = self.deps["knowledge_page_store_cls"](storage)
@@ -294,6 +340,22 @@ Available Tools:
             )
             self.deps["mark_question_asked"](storage, pending_question["question_id"])
             storage.commit()
+        elif pending_question and pending_question.get("status") == "asked":
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "There is still an unresolved user question attached to this session.\n"
+                        f"- question_id: {pending_question.get('question_id')}\n"
+                        f"- source_type: {pending_question.get('source_type')}\n"
+                        f"- open_question: {pending_question.get('question')}\n\n"
+                        "Treat the user's next messages as normal conversation unless they actually answer this question. "
+                        "If the user has answered it, call `resolve_user_question` with your interpreted answer. "
+                        "If they have not, continue the conversation naturally and ask a narrower follow-up when helpful. "
+                        "Do not assume every user message is automatically an answer."
+                    ),
+                }
+            )
 
         history_records = storage.messages.get_all(session_id=session_id)
         loaded_context_block = build_loaded_context_block(
