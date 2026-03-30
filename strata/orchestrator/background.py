@@ -604,6 +604,7 @@ class BackgroundWorker:
     @staticmethod
     def _task_queue_rank(task: TaskModel) -> tuple:
         constraints = dict(getattr(task, "constraints", {}) or {})
+        procedure_id = str(constraints.get("procedure_id") or "").strip().lower()
         phase = str(constraints.get("recovery_phase") or "").strip().lower()
         phase_rank = {"inspect": 0, "decide": 1, "cash_out": 2}.get(phase, 9)
         has_hints = bool(constraints.get("source_hints")) or bool(constraints.get("preferred_start_paths"))
@@ -618,6 +619,7 @@ class BackgroundWorker:
             except Exception:
                 recency_key = 0.0
         return (
+            0 if procedure_id == "startup_sanity_check" else 1,
             has_parent,
             0 if has_hints else 1,
             phase_rank,
@@ -1128,6 +1130,19 @@ class BackgroundWorker:
                 )
                 _record_attempt_efficiency_metrics("succeeded")
                 storage.commit()
+
+            # Coordination nodes that expanded into active children should hand control off
+            # immediately instead of spending a full verifier/review cycle on the parent.
+            if success and task.state == TaskState.PUSHED and self._task_has_live_children(task, storage):
+                self._mark_lane_progress(
+                    lane or context.mode,
+                    step="complete",
+                    label="Handed off to children",
+                    detail=f"{len(list(getattr(task, 'active_child_ids', []) or []))} child task(s) in progress",
+                    attempt_id=getattr(attempt, "attempt_id", None),
+                    progress_label="children in progress",
+                )
+                return
 
             # --- LIGHTWEIGHT VERIFICATION ---
             try:

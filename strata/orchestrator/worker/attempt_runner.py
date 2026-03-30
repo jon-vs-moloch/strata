@@ -26,6 +26,13 @@ async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> Non
         await enqueue_fn(task_id)
 
 
+def _is_root_procedure_task(task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    checklist = list(constraints.get("procedure_checklist") or [])
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    return bool(checklist) and not checklist_item
+
+
 def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
     normalized = str(item_id or "").strip().lower()
     hints = {
@@ -302,6 +309,40 @@ def _procedure_item_recovery_subtasks(storage, task):
         },
     ]
 
+
+async def _expand_root_procedure_task(task, storage, enqueue_fn, *, progress_fn=None, attempt_id=None):
+    procedure_children = _procedure_checklist_subtasks(storage, task)
+    if not procedure_children:
+        raise RuntimeError("Root Procedure expansion produced no checklist children.")
+    spawned_ids = []
+    for item in procedure_children:
+        sub = storage.tasks.create(
+            title=item["title"],
+            description=item["description"],
+            session_id=task.session_id,
+            parent_task_id=task.task_id,
+            state=TaskState.PENDING,
+            constraints=item["constraints"],
+            flush=False,
+        )
+        sub.type = item["task_type"]
+        sub.depth = task.depth + 1
+        spawned_ids.append(sub.task_id)
+    task.active_child_ids = list(dict.fromkeys(spawned_ids))
+    task.state = TaskState.PUSHED
+    storage.commit()
+    if progress_fn:
+        progress_fn(
+            step="decompose",
+            label="Expanding procedure",
+            detail=f"Spawned {len(spawned_ids)} checklist children",
+            progress_label="children in progress",
+            attempt_id=attempt_id,
+        )
+    for task_id in spawned_ids:
+        await _enqueue_task(enqueue_fn, task_id, front=True)
+    return spawned_ids
+
 async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueue_fn, progress_fn=None):
     """
     @summary Execute a single task attempt.
@@ -352,6 +393,24 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
     )
 
     try:
+        if task.type == TaskType.RESEARCH and _is_root_procedure_task(task):
+            await _expand_root_procedure_task(
+                task,
+                storage,
+                enqueue_fn,
+                progress_fn=_record_progress,
+                attempt_id=attempt.attempt_id,
+            )
+            storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
+            attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+            attempt.artifacts["step_history"] = list(step_history)
+            attempt.artifacts["procedure_expansion"] = {
+                "mode": "deterministic_root_checklist_expansion",
+                "active_child_ids": list(getattr(task, "active_child_ids", []) or []),
+            }
+            storage.commit()
+            await notify_fn(task.task_id, task.state.value)
+            return True, None, attempt
         if task.type == TaskType.RESEARCH:
             await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.DECOMP:

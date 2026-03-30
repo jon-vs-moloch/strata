@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 def _task_replay_rank(task: TaskModel) -> tuple:
     constraints = dict(getattr(task, "constraints", {}) or {})
+    procedure_id = str(constraints.get("procedure_id") or "").strip().lower()
     phase = str(constraints.get("recovery_phase") or "").strip().lower()
     phase_rank = {"inspect": 0, "decide": 1, "cash_out": 2}.get(phase, 9)
     has_hints = bool(constraints.get("source_hints")) or bool(constraints.get("preferred_start_paths"))
@@ -24,6 +25,7 @@ def _task_replay_rank(task: TaskModel) -> tuple:
         except Exception:
             recency_key = 0.0
     return (
+        0 if procedure_id == "startup_sanity_check" else 1,
         has_parent,
         0 if has_hints else 1,
         phase_rank,

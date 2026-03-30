@@ -302,6 +302,9 @@ def ensure_startup_smoke_task(storage, worker, *, session_id: Optional[str] = No
 
 
 def ensure_onboarding_task(storage, worker, *, session_id: Optional[str] = None, lane: Optional[str] = None):
+    smoke_status = get_startup_smoke_status(storage)
+    if not smoke_status.get("has_completed"):
+        return None
     status = get_onboarding_status(storage)
     if not status.get("needs_queue"):
         return None

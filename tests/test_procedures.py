@@ -62,6 +62,11 @@ def test_onboarding_status_and_ensure_task_are_idempotent():
     assert initial["needs_queue"] is True
     assert initial["has_completed"] is False
 
+    smoke = ensure_startup_smoke_task(storage, None)
+    assert smoke is not None
+    smoke.state = TaskState.COMPLETE
+    storage.commit()
+
     task = ensure_onboarding_task(storage, None)
     assert task is not None
 
