@@ -121,7 +121,7 @@ def _maybe_enqueue_blocked_task_question_from_review(storage, *, task_id: str, r
     )
 
 
-async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
+async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> Dict[str, Any]:
     system_job = dict((task.constraints or {}).get("system_job") or {})
     kind = str(system_job.get("kind") or "").strip()
     payload = dict(system_job.get("payload") or {})
@@ -141,8 +141,21 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
     storage.commit()
     started_at = time.perf_counter()
 
+    def _progress(*, step: str, label: str, detail: str = "", progress_label: str = "") -> None:
+        if progress_fn:
+            progress_fn(
+                step=str(step or "").strip().lower() or "system_job",
+                label=str(label or "").strip() or "Working",
+                detail=str(detail or "").strip(),
+                progress_label=str(progress_label or "").strip(),
+                attempt_id=attempt.attempt_id,
+            )
+
+    _progress(step="attempt", label="Attempt running", detail=f"{kind} attempt started", progress_label="attempt active")
+
     try:
         if kind == "benchmark":
+            _progress(step="system_job", label="Running benchmark", detail=str(payload.get("run_label") or "benchmark harness"), progress_label="benchmark")
             candidate_change_id = payload.get("candidate_change_id", "baseline")
             report = await run_benchmark(
                 api_url=payload.get("api_url", "http://127.0.0.1:8000"),
@@ -158,6 +171,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             )
             result = report
         elif kind == "structured_eval":
+            _progress(step="system_job", label="Running structured eval", detail=str(payload.get("suite_name") or "bootstrap_mcq_v1"), progress_label="structured eval")
             candidate_change_id = payload.get("candidate_change_id", "baseline")
             report = await run_structured_eval(
                 api_url=payload.get("api_url", "http://127.0.0.1:8000"),
@@ -175,6 +189,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             )
             result = report
         elif kind == "full_eval":
+            _progress(step="system_job", label="Running full eval", detail=str(payload.get("candidate_change_id") or "candidate"), progress_label="full eval")
             runner = ExperimentRunner(storage, model_adapter)
             experiment_result = await runner.run_full_eval_gate(
                 payload["candidate_change_id"],
@@ -190,6 +205,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             )
             result = experiment_result.model_dump()
         elif kind == "benchmark_gate":
+            _progress(step="system_job", label="Running benchmark gate", detail=str(payload.get("candidate_change_id") or "candidate"), progress_label="benchmark gate")
             runner = ExperimentRunner(storage, model_adapter)
             experiment_result = await runner.run_benchmark_gate(
                 payload["candidate_change_id"],
@@ -244,6 +260,12 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             )
             current_config = get_active_eval_harness_config()
             current_signature = eval_override_signature(current_config)
+            _progress(
+                step="system_job",
+                label="Generating proposals",
+                detail=f"{len(proposer_tiers)} proposer tier(s), suite {suite_name}",
+                progress_label="proposal generation",
+            )
             proposals = await asyncio.gather(
                 *[
                     _generate_eval_candidate_from_tier(
@@ -266,6 +288,12 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             skipped = []
 
             for proposal in proposals:
+                _progress(
+                    step="system_job",
+                    label="Reviewing proposal",
+                    detail=str(proposal.get("candidate_change_id") or proposal.get("proposer_tier") or "candidate"),
+                    progress_label="proposal review",
+                )
                 proposal_signature = eval_override_signature(proposal["eval_harness_config_override"])
                 if proposal_signature in recent_signatures:
                     skipped.append({"proposal": proposal, "reason": "recent_duplicate_signature"})
@@ -295,6 +323,12 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                         "eval_harness_config_override": canonical_eval_override(proposal_to_evaluate.get("eval_harness_config_override")),
                     }
                 )
+                _progress(
+                    step="system_job",
+                    label="Running eval gate",
+                    detail=str(proposal_to_evaluate.get("candidate_change_id") or "candidate"),
+                    progress_label="eval gate",
+                )
                 experiment_result = await runner.run_full_eval_gate(
                     proposal_to_evaluate["candidate_change_id"],
                     api_url=str(payload.get("api_url") or "http://127.0.0.1:8000"),
@@ -314,6 +348,12 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 )
                 evaluated.append({"proposal": proposal_to_evaluate, "result": experiment_result.model_dump(), "resolution": resolution})
                 if auto_promote and experiment_result.recommendation == "promote":
+                    _progress(
+                        step="system_job",
+                        label="Applying promotion",
+                        detail=str(proposal_to_evaluate.get("candidate_change_id") or "candidate"),
+                        progress_label="promotion",
+                    )
                     promoted.append(_apply_experiment_promotion(storage, proposal_to_evaluate["candidate_change_id"], force=False))
 
             result = {
@@ -324,6 +364,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 "auto_promote": auto_promote,
             }
         elif kind == "eval_matrix":
+            _progress(step="system_job", label="Running eval matrix", detail=str(payload.get("suite_name") or "mmlu_mini_v1"), progress_label="eval matrix")
             report = await run_eval_matrix(
                 suite_name=payload.get("suite_name", "mmlu_mini_v1"),
                 include_context=bool(payload.get("include_context", True)),
@@ -366,6 +407,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                     )
             result = report
         elif kind == "tool_cycle":
+            _progress(step="system_job", label="Drafting tool candidate", detail=str(payload.get("tool_name") or "tool"), progress_label="tool proposal")
             tool_name = str(payload.get("tool_name") or "").strip()
             if not tool_name:
                 raise ValueError("tool_cycle requires tool_name")
@@ -397,6 +439,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             with open(smoke_path, "w", encoding="utf-8") as handle:
                 handle.write(proposal["smoke_test"])
             validation = await ToolsPromotionPipeline(storage).validate_and_promote(proposal["tool_name"])
+            _progress(step="system_job", label="Validating tool candidate", detail=str(proposal["tool_name"]), progress_label="tool validation")
             experiment_result = ExperimentRunner(storage, model_adapter).record_tool_promotion_result(
                 candidate_change_id=proposal["candidate_change_id"],
                 validation_result=validation.model_dump(),
@@ -416,6 +459,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 "result": experiment_result.model_dump(),
             }
         elif kind == "trace_review":
+            _progress(step="system_job", label="Building trace summary", detail=str(payload.get("trace_kind") or "generic_trace"), progress_label="trace summary")
             trace_kind = str(payload.get("trace_kind") or "generic_trace")
             reviewer_tier = str(payload.get("reviewer_tier") or "trainer")
             spec_scope = str(payload.get("spec_scope") or "project")
@@ -439,6 +483,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                 reviewer_tier=reviewer_tier,
                 candidate_change_id=payload.get("candidate_change_id"),
             )
+            _progress(step="system_job", label="Generating review", detail=str(trace_kind), progress_label="review generation")
             artifacts = persist_trace_review_artifacts(
                 storage,
                 trace_kind=trace_kind,
@@ -475,6 +520,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             )
             queued_followups = []
             if bool(payload.get("emit_followups", True)):
+                _progress(step="system_job", label="Queuing followups", detail=str(trace_kind), progress_label="followups")
                 queued_followups = enqueue_review_followups(
                     storage,
                     trace_kind=trace_kind,
@@ -502,6 +548,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
             raise ValueError(f"Unsupported system eval job kind: {kind}")
 
         duration_s = time.perf_counter() - started_at
+        _progress(step="verification", label="Persisting result", detail=str(kind), progress_label="persist result")
         attempt.outcome = AttemptOutcome.SUCCEEDED
         attempt.ended_at = datetime.utcnow()
         attempt.artifacts = {
@@ -521,6 +568,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
         storage.commit()
         return result
     except Exception as exc:
+        _progress(step="resolution", label="System job failed", detail=str(exc), progress_label="failure")
         attempt.outcome = AttemptOutcome.FAILED
         attempt.reason = str(exc)
         attempt.artifacts = {

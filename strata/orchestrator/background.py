@@ -839,7 +839,21 @@ class BackgroundWorker:
                     task_title=task.title,
                 )
                 logger.info(f"Running queued system job for task {task_id}")
-                await run_eval_job_task(task, storage, self._lane_model(lane))
+                await run_eval_job_task(
+                    task,
+                    storage,
+                    self._lane_model(lane),
+                    progress_fn=lambda **payload: self._mark_lane_progress(
+                        lane or infer_lane_from_task(task),
+                        step=payload.get("step", "system_job"),
+                        label=payload.get("label", "Working"),
+                        detail=payload.get("detail", ""),
+                        task_id=task.task_id,
+                        task_title=task.title,
+                        progress_label=payload.get("progress_label"),
+                        attempt_id=payload.get("attempt_id"),
+                    ),
+                )
                 await self._notify(task_id, task.state.value)
                 return
 

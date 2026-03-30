@@ -27,6 +27,50 @@ async def _noop_enqueue(*_args, **_kwargs):
     return None
 
 
+def test_run_attempt_upgrades_procedure_item_hints_and_notifies_working(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Procedure Step: Establish the starting verification posture",
+        description="Advance exactly one checklist item for onboarding.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={
+            "lane": "agent",
+            "procedure_checklist_item": {
+                "id": "verification_posture",
+                "title": "Establish the starting verification posture",
+            },
+        },
+    )
+    storage.commit()
+
+    notifications = []
+
+    async def capture_notify(task_id, state):
+        notifications.append((task_id, state))
+
+    async def succeed(task_obj, *_args, **_kwargs):
+        hints = dict((task_obj.constraints or {}).get("source_hints") or {})
+        assert hints
+        assert "strata/experimental/verifier.py" in list(hints.get("preferred_paths") or [])
+        assert task_obj.state == TaskState.WORKING
+
+    monkeypatch.setattr(attempt_runner, "_run_research", succeed)
+
+    success, error, attempt = __import__("asyncio").run(
+        attempt_runner.run_attempt(task, storage, DummyModel(), capture_notify, _noop_enqueue)
+    )
+
+    assert success is True
+    assert error is None
+    assert attempt.outcome == AttemptOutcome.SUCCEEDED
+    updated_task = storage.tasks.get_by_id(task.task_id)
+    hints = dict((updated_task.constraints or {}).get("source_hints") or {})
+    assert hints
+    assert (task.task_id, TaskState.WORKING.value) in notifications
+
+
 def test_failed_attempt_is_closed_when_task_body_raises(monkeypatch):
     storage = make_storage()
     task = storage.tasks.create(

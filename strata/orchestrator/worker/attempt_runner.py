@@ -75,6 +75,23 @@ def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
     return selected
 
 
+def _ensure_procedure_item_source_hints(task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    item_id = str(checklist_item.get("id") or "").strip()
+    if not item_id:
+        return False
+    source_hints = dict(constraints.get("source_hints") or {})
+    if source_hints:
+        return False
+    inferred = _procedure_checklist_item_source_hints(item_id)
+    if not inferred:
+        return False
+    constraints["source_hints"] = inferred
+    task.constraints = constraints
+    return True
+
+
 def _emit_task_communication(storage, task, *, content: str, source_kind: str) -> None:
     task_type = str(getattr(task.type, "value", "") or "").lower()
     summary = str(getattr(task, "title", "") or "").strip() or str(getattr(task, "description", "") or "").strip()[:160]
@@ -264,9 +281,12 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
 
     # Start a new Attempt
     attempt = storage.attempts.create(task_id=task.task_id)
+    constraints_updated = _ensure_procedure_item_source_hints(task)
     if task.state != TaskState.WORKING:
         task.state = TaskState.WORKING
     storage.commit()
+    if constraints_updated or task.state == TaskState.WORKING:
+        await notify_fn(task.task_id, task.state.value)
     started_at = time.perf_counter()
     step_history = []
 
