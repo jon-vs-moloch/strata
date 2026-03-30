@@ -42,6 +42,15 @@ export default function TaskPaneContent({
   const scopeCurrentTaskLabel = currentScope === 'home'
     ? `${laneCurrentTaskTitles?.agent || laneCurrentTaskTitles?.trainer || 'no active task'}`
     : (laneCurrentTaskTitles?.[currentScope] || 'no active task');
+  const scopeStepLabel = currentScope === 'home'
+    ? [
+        laneDetails?.trainer?.step_label ? `trainer ${String(laneDetails.trainer.step_label).toLowerCase()}` : '',
+        laneDetails?.agent?.step_label ? `agent ${String(laneDetails.agent.step_label).toLowerCase()}` : '',
+      ].filter(Boolean).join(' · ') || 'no active step'
+    : (scopeLaneDetail?.step_label || 'no active step');
+  const scopeStepDetail = currentScope === 'home'
+    ? ''
+    : [scopeLaneDetail?.step_detail, scopeLaneDetail?.progress_label].filter(Boolean).join(' · ');
   return (
     <>
       {activeNav !== 'dashboard' && laneFinishedTasks.length > 0 && (
@@ -76,7 +85,14 @@ export default function TaskPaneContent({
                 style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}
               >
                 {laneFinishedTasks.map((task) => (
-                  <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} nowMs={activityNowMs} />
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onArchive={() => handleArchiveTask(task.id)}
+                    nowMs={activityNowMs}
+                    laneDetail={laneDetails?.[task.lane] || null}
+                    detailLevel="compact"
+                  />
                 ))}
               </MotionDiv>
             )}
@@ -85,7 +101,14 @@ export default function TaskPaneContent({
       )}
       <AnimatePresence>
         {focusedTaskPaneTree.map((task) => (
-          <TaskCard key={task.id} task={task} onArchive={() => handleArchiveTask(task.id)} nowMs={activityNowMs} />
+          <TaskCard
+            key={task.id}
+            task={task}
+            onArchive={() => handleArchiveTask(task.id)}
+            nowMs={activityNowMs}
+            laneDetail={laneDetails?.[task.lane] || null}
+            detailLevel="compact"
+          />
         ))}
       </AnimatePresence>
 
@@ -137,6 +160,20 @@ export default function TaskPaneContent({
               {scopeCurrentTaskLabel}
             </span>
           </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: '#7f8091' }}>live step</span>
+            <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace", textAlign: 'right' }}>
+              {scopeStepLabel}
+            </span>
+          </div>
+          {scopeStepDetail && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+              <span style={{ color: '#7f8091' }}>step detail</span>
+              <span style={{ color: '#8ddfff', fontFamily: "'JetBrains Mono', monospace", textAlign: 'right' }}>
+                {scopeStepDetail}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </>

@@ -5,6 +5,7 @@ This file stores durable failure-investigation lessons so future audits can star
 Canonical location: `.knowledge/specs/investigation-patterns.md`
 
 Current durable guidance:
+- when writing findings or architecture notes, preserve the proper-noun convention for first-class system artifacts: `Procedure`, `Verifier`, `Audit`, and similar terms should stay capitalized when they mean the system object rather than the generic activity
 - ask "what failed first?" before focusing on the loudest downstream symptom; supervision churn and queue noise are often secondary failures
 - when a bad claim originates before attempt execution, investigate the generation surface itself; missing verification hooks upstream of task execution are real failures, not just missing retries downstream
 - preserve task semantics through recovery; if recovery replaces a bounded task with a generic shell like `Error Recover` or `Research manually`, treat that as a fresh failure, not progress

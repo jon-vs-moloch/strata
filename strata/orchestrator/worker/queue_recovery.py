@@ -23,7 +23,9 @@ async def recover_tasks(
 
     The default startup behavior is intentionally conservative: tasks that were
     actively running when the process died are recovered, but stale pending
-    backlog is not blindly replayed unless explicitly enabled.
+    backlog is not blindly replayed unless explicitly enabled. In normal Strata
+    operation we do enable pending replay, because decomposed child tasks should
+    resume immediately after restart instead of waiting for an idle timeout.
     """
     storage = storage_factory()
     logger.info("Starting recovery sweep for orphaned tasks...")

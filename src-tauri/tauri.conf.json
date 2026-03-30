@@ -9,6 +9,11 @@
     "devUrl": "http://127.0.0.1:5174",
     "frontendDist": "../strata_ui/dist"
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "desktop-updater-unconfigured"
+    }
+  },
   "app": {
     "windows": [
       {
@@ -23,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": "app",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

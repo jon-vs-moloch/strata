@@ -249,6 +249,16 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
             new_subtasks=[],
         )
 
+    if failure_kind == "task_boundary_violation":
+        return AttemptResolutionSchema(
+            reasoning=(
+                "This task crossed the oneshottable boundary: a single variance-bearing invocation was not enough "
+                "to complete it without needing a semantically new move. Decompose it into smaller subtasks."
+            ),
+            resolution="decompose",
+            new_subtasks=[],
+        )
+
     # B2. Iteration exhaustion on research-like work -> decompose
     if failure_kind == "iteration_budget_exhausted" or "iteration limit reached" in err_str:
         if lineage_iteration_failures >= int(policy.get("lineage_iteration_limit", 4) or 4):
@@ -302,10 +312,11 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
     ):
         return AttemptResolutionSchema(
             reasoning=(
-                "Decomposition failed to produce a usable plan. Do not spawn generic recovery shells; "
-                "route this to trainer supervision so the failing branch can be replaced or abandoned explicitly."
+                "Decomposition failed to produce a usable plan. Do not stop at escalation-by-default. "
+                "Treat this as a recoverable planning failure: rebuild the decomposition with more concrete task framing "
+                "or deterministic structure instead of spawning generic recovery shells."
             ),
-            resolution="abandon_to_parent",
+            resolution="internal_replan",
             new_subtasks=[],
         )
         
@@ -426,56 +437,82 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         await enqueue_fn(task.task_id)
         
     elif res == "decompose" or res == "internal_replan":
+        spawned_child_ids = []
+
+        def _matching_pending_child(*, title: str, task_type: TaskType) -> Optional[TaskModel]:
+            if not hasattr(storage, "session"):
+                return None
+            return (
+                storage.session.query(TaskModel)
+                .filter(TaskModel.parent_task_id == task.task_id)
+                .filter(TaskModel.title == title)
+                .filter(TaskModel.type == task_type)
+                .filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING, TaskState.PUSHED]))
+                .order_by(TaskModel.created_at.desc())
+                .first()
+            )
+
         if resolution_data.new_subtasks:
             for sub_proto in resolution_data.new_subtasks:
-                sub = storage.tasks.create(
-                    parent_task_id=task.task_id,
-                    title=f"Recovery: {sub_proto.title}",
-                    description=sub_proto.description,
-                    session_id=task.session_id,
-                    state=TaskState.PENDING,
-                    depth=task.depth + 1,
-                    constraints={"lane": task_lane} if task_lane else None,
-                )
-                sub.type = TaskType.IMPL
-                # Mandatory policy check
-                if requires_validator(sub):
-                    sub.constraints["validator_required"] = True
-                    logger.warning(f"Task {sub.task_id} requires a validator per system policy.")
+                recovery_title = f"Recovery: {sub_proto.title}"
+                sub = _matching_pending_child(title=recovery_title, task_type=TaskType.IMPL)
+                if sub is None:
+                    sub = storage.tasks.create(
+                        parent_task_id=task.task_id,
+                        title=recovery_title,
+                        description=sub_proto.description,
+                        session_id=task.session_id,
+                        state=TaskState.PENDING,
+                        depth=task.depth + 1,
+                        constraints={"lane": task_lane} if task_lane else None,
+                    )
+                    sub.type = TaskType.IMPL
+                    # Mandatory policy check
+                    if requires_validator(sub):
+                        sub.constraints["validator_required"] = True
+                        logger.warning(f"Task {sub.task_id} requires a validator per system policy.")
+                spawned_child_ids.append(sub.task_id)
                 storage.commit()
                 await enqueue_fn(sub.task_id)
-            task.state = TaskState.WORKING
         else:
             focus = _recovery_focus_task(storage, task)
             focus_title = str(getattr(focus, "title", "") or task.title or "task").strip()
             focus_description = _clip_text(str(getattr(focus, "description", "") or task.description or ""))
-            failover = storage.tasks.create(
-                title=f"Recovery Plan for {focus_title}",
-                description=(
-                    f"Rebuild a bounded recovery plan for the original task '{focus_title}'. "
-                    f"Original task context: {focus_description}. "
-                    f"Current failing task: '{task.title}'. "
-                    f"Failure analysis: {resolution_data.reasoning}. "
-                    f"Original error: {error}. "
-                    "Do not produce generic 'Error Recover' shells, manual-research placeholders, or empty file-list work. "
-                    "If the branch actually needs human clarification or an external decision, surface that explicitly instead of inventing implementation subtasks."
-                ),
-                parent_task_id=task.task_id,
-                type=TaskType.DECOMP,
-                state=TaskState.PENDING,
-                depth=task.depth + 1,
-                constraints={
-                    **({"lane": task_lane} if task_lane else {}),
-                    "recovery_focus_task_id": getattr(focus, "task_id", None),
-                    "recovery_focus_title": focus_title,
-                    "recovery_focus_description": focus_description,
-                    "avoid_generic_recovery_shell": True,
-                } if task_lane or focus_title else None,
-            )
+            failover_title = f"Recovery Plan for {focus_title}"
+            failover = _matching_pending_child(title=failover_title, task_type=TaskType.DECOMP)
+            if failover is None:
+                failover = storage.tasks.create(
+                    title=failover_title,
+                    description=(
+                        f"Rebuild a bounded recovery plan for the original task '{focus_title}'. "
+                        f"Original task context: {focus_description}. "
+                        f"Current failing task: '{task.title}'. "
+                        f"Failure analysis: {resolution_data.reasoning}. "
+                        f"Original error: {error}. "
+                        "Do not produce generic 'Error Recover' shells, manual-research placeholders, or empty file-list work. "
+                        "If the branch actually needs human clarification or an external decision, surface that explicitly instead of inventing implementation subtasks."
+                    ),
+                    parent_task_id=task.task_id,
+                    session_id=task.session_id,
+                    type=TaskType.DECOMP,
+                    state=TaskState.PENDING,
+                    depth=task.depth + 1,
+                    constraints={
+                        **({"lane": task_lane} if task_lane else {}),
+                        "recovery_focus_task_id": getattr(focus, "task_id", None),
+                        "recovery_focus_title": focus_title,
+                        "recovery_focus_description": focus_description,
+                        "avoid_generic_recovery_shell": True,
+                    } if task_lane or focus_title else None,
+                )
+            spawned_child_ids.append(failover.task_id)
             storage.commit()
             await enqueue_fn(failover.task_id)
-            task.state = TaskState.WORKING
             _demote_existing_blocking_question("The branch has a fresh autonomous recovery plan, so guidance can remain advisory while work continues.")
+        task.active_child_ids = list(dict.fromkeys([*(task.active_child_ids or []), *spawned_child_ids]))
+        task.state = TaskState.PUSHED
+        task.human_intervention_required = False
+        storage.commit()
             
     elif res == "abandon_to_parent":
         task.state = TaskState.ABANDONED

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from strata.prioritization.feedback import classify_feedback_priority
+from strata.storage.models import FeedbackSignalModel
 
 
 FEEDBACK_SIGNAL_INDEX_KEY = "feedback_signal:index"
@@ -28,6 +29,24 @@ def list_feedback_signals(
     session_id: Optional[str] = None,
     source_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    if hasattr(storage, "session"):
+        try:
+            FeedbackSignalModel.__table__.create(bind=storage.session.get_bind(), checkfirst=True)
+            safe_limit = max(1, min(int(limit), MAX_FEEDBACK_SIGNALS))
+            query = storage.session.query(FeedbackSignalModel)
+            if session_id:
+                query = query.filter(FeedbackSignalModel.session_id == str(session_id))
+            if source_type:
+                query = query.filter(FeedbackSignalModel.source_type == str(source_type))
+            rows = (
+                query.order_by(FeedbackSignalModel.created_at.desc(), FeedbackSignalModel.id.desc())
+                .limit(safe_limit)
+                .all()
+            )
+            return [dict(_signal_from_row(row)) for row in reversed(rows)]
+        except Exception:
+            pass
+
     rows = storage.parameters.peek_parameter(FEEDBACK_SIGNAL_INDEX_KEY, default_value=[]) or []
     if not isinstance(rows, list):
         rows = []
@@ -44,6 +63,19 @@ def get_feedback_signal(storage, signal_id: str) -> Optional[Dict[str, Any]]:
     target = str(signal_id or "").strip()
     if not target:
         return None
+    if hasattr(storage, "session"):
+        try:
+            FeedbackSignalModel.__table__.create(bind=storage.session.get_bind(), checkfirst=True)
+            row = (
+                storage.session.query(FeedbackSignalModel)
+                .filter(FeedbackSignalModel.signal_id == target)
+                .order_by(FeedbackSignalModel.id.desc())
+                .first()
+            )
+            if row is not None:
+                return dict(_signal_from_row(row))
+        except Exception:
+            pass
     rows = storage.parameters.peek_parameter(FEEDBACK_SIGNAL_INDEX_KEY, default_value=[]) or []
     if not isinstance(rows, list):
         rows = []
@@ -53,7 +85,60 @@ def get_feedback_signal(storage, signal_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _signal_from_row(row: FeedbackSignalModel) -> Dict[str, Any]:
+    return {
+        "signal_id": row.signal_id,
+        "source_type": row.source_type,
+        "source_id": row.source_id,
+        "signal_kind": row.signal_kind,
+        "signal_value": row.signal_value,
+        "source_actor": row.source_actor,
+        "session_id": row.session_id or "",
+        "source_preview": row.source_preview or "",
+        "note": row.note or "",
+        "expected_outcome": row.expected_outcome or "",
+        "observed_outcome": row.observed_outcome or "",
+        "metadata": dict(row.signal_metadata or {}),
+        "prioritization": dict(row.prioritization or {}),
+        "created_at": row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at),
+        "status": row.status or "logged",
+    }
+
+
 def _append_feedback_signal(storage, signal: Dict[str, Any]) -> Dict[str, Any]:
+    if hasattr(storage, "session"):
+        try:
+            from strata.storage.sqlite_write import flush_with_write_lock
+
+            FeedbackSignalModel.__table__.create(bind=storage.session.get_bind(), checkfirst=True)
+            storage.session.add(
+                FeedbackSignalModel(
+                    signal_id=str(signal.get("signal_id") or ""),
+                    source_type=str(signal.get("source_type") or ""),
+                    source_id=str(signal.get("source_id") or ""),
+                    signal_kind=str(signal.get("signal_kind") or ""),
+                    signal_value=str(signal.get("signal_value") or ""),
+                    source_actor=str(signal.get("source_actor") or "system"),
+                    session_id=str(signal.get("session_id") or "") or None,
+                    source_preview=str(signal.get("source_preview") or ""),
+                    note=str(signal.get("note") or ""),
+                    expected_outcome=str(signal.get("expected_outcome") or ""),
+                    observed_outcome=str(signal.get("observed_outcome") or ""),
+                    signal_metadata=dict(signal.get("metadata") or {}),
+                    prioritization=dict(signal.get("prioritization") or {}),
+                    status=str(signal.get("status") or "logged"),
+                )
+            )
+            bind = getattr(storage.session, "bind", None)
+            sqlite_enabled = str(getattr(getattr(bind, "url", None), "drivername", "") or "").startswith("sqlite")
+            flush_with_write_lock(storage.session, enabled=sqlite_enabled)
+            return signal
+        except Exception:
+            try:
+                storage.session.rollback()
+            except Exception:
+                pass
+
     rows = storage.parameters.peek_parameter(FEEDBACK_SIGNAL_INDEX_KEY, default_value=[]) or []
     if not isinstance(rows, list):
         rows = []

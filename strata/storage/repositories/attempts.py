@@ -6,9 +6,13 @@
 """
 
 from typing import List, Optional
+import time
+from uuid import uuid4
 from sqlalchemy.orm import Session
 from datetime import datetime
+from sqlalchemy.exc import OperationalError
 from strata.storage.models import AttemptModel, AttemptOutcome, AttemptResolution
+from strata.storage.sqlite_write import flush_with_write_lock, is_sqlite_locked_error
 
 class AttemptRepository:
     """
@@ -21,10 +25,23 @@ class AttemptRepository:
         """
         @summary Instantiate and persist a new AttemptModel.
         """
-        attempt = AttemptModel(**kwargs)
-        self.session.add(attempt)
-        self.session.flush()
-        return attempt
+        if not kwargs.get("attempt_id"):
+            kwargs["attempt_id"] = str(uuid4())
+        bind = getattr(self.session, "bind", None)
+        sqlite_enabled = str(getattr(getattr(bind, "url", None), "drivername", "") or "").startswith("sqlite")
+        retries = 8 if sqlite_enabled else 1
+        for index in range(retries):
+            attempt = AttemptModel(**kwargs)
+            self.session.add(attempt)
+            try:
+                flush_with_write_lock(self.session, enabled=sqlite_enabled)
+                return attempt
+            except OperationalError as exc:
+                self.session.rollback()
+                if not sqlite_enabled or not is_sqlite_locked_error(exc) or index >= retries - 1:
+                    raise
+                time.sleep(0.15 * (index + 1))
+        raise RuntimeError("Attempt creation retries exhausted.")
 
     def get_by_id(self, attempt_id: str) -> Optional[AttemptModel]:
         """

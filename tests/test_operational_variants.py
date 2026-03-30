@@ -14,6 +14,7 @@ from strata.experimental.variants import (
 )
 from strata.orchestrator.implementation import ImplementationModule
 from strata.orchestrator.judge import JudgeModule
+from strata.orchestrator.research import TaskBoundaryViolationError
 from strata.orchestrator.synthesis import SynthesisModule
 from strata.storage.models import Base, CandidateModel, TaskType
 from strata.storage.services.main import StorageManager
@@ -55,6 +56,21 @@ class FakeSynthesisModel:
         if self.calls == 2:
             return {"content": "merged output b"}
         return {"content": "unparseable preference"}
+
+
+class FakeToolCallingImplementationModel:
+    async def chat(self, messages, tools=None):
+        return {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tool-1",
+                    "function": {"name": "list_active_tools", "arguments": "{}"},
+                }
+            ],
+            "provider": "test",
+            "model": "tool-model",
+        }
 
 
 def test_scope_resolution_prefers_exact_then_generic():
@@ -225,6 +241,27 @@ def test_implementation_module_generates_candidates_for_scoped_variants():
     assert {candidate.prompt_version for candidate in candidates} == {variant_a["variant_id"], variant_b["variant_id"]}
     refreshed = storage.tasks.get_by_id(task.task_id)
     assert refreshed.constraints["candidate_generation"]["generated_count"] == 2
+
+
+def test_implementation_tool_turn_raises_task_boundary_violation():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Implement feature",
+        description="Do the thing.",
+        constraints={"target_files": ["example.py"]},
+    )
+    task.type = TaskType.IMPL
+    storage.commit()
+
+    model = FakeToolCallingImplementationModel()
+    module = ImplementationModule(model_adapter=model, storage_manager=storage, research_module=FakeResearchModule())
+
+    try:
+        asyncio.run(module.implement_task(task.task_id))
+        assert False, "expected TaskBoundaryViolationError"
+    except TaskBoundaryViolationError as exc:
+        assert exc.failure_kind == "task_boundary_violation"
+        assert exc.autopsy["tool_call"]["name"] == "list_active_tools"
 
 
 def test_judge_records_ranked_variant_matchups_for_normal_ops(monkeypatch):

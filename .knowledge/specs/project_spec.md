@@ -29,6 +29,13 @@ Normal operating mode:
 - verification policy should be shared across tiers and anneal from measured error rate rather than from hardcoded role-specific trust
 - the product shell should stay minimal and trustworthy: bundled code should provide continuity and safe-mode fallback, while higher-level UI and tool surfaces should increasingly be delivered through validated runtime modules or plugins
 - task boundaries should be chosen so one variance-bearing invocation can plausibly complete the task; if work naturally requires inspect, then patch, then validate, those are separate subtasks rather than multiple progressive attempts at one task
+- because decomposition quality now carries more of the intelligence, durable procedures should be treated as a primary substrate for reusable process knowledge, recovery logic, and compounding behavioral improvement
+- formal terminology matters here: a generic `procedure` is ordinary language, while a `Procedure` is a durable system artifact representing a reusable and mutable workflow that can be rerun, refined, and eventually learned from prior successful decompositions
+- this proper-noun convention applies across the architecture: `Procedure`, `Verifier`, `Audit`, and similar capitalized terms name first-class system artifacts or subsystems, while lowercase terms refer to the ordinary generic activity
+- partial success should not be discarded; useful decompositions, clarified subgoals, successful recoveries, and reusable intermediate structure should be captured into durable artifacts such as Procedures, knowledge, or policy updates
+- failures should metabolize into durable improvements too; repeated failure modes, blocked branches, verifier findings, and recovery dead ends should cash out into Procedures, tool health, policy changes, or other persistent system adaptations
+- notifying the trainer is not, by itself, a recovery. When an autonomous branch fails to decompose or plan cleanly, the system should continue pursuing bounded self-recovery unless the branch is truly blocked on required external input or permission
+- failures should always produce an explicit "what's next" decision. The system should never treat a failed attempt as the end of the line without choosing a concrete continuation path such as decomposition, replanning, remediation, escalation, or other bounded follow-on work
 
 Canonical supporting references:
 - `README.md`
@@ -51,8 +58,13 @@ Operational guidance:
 - verification should be a fully general callable process over arbitrary steps and artifacts, not a post-attempt-only hook; audits may invoke verification, and verification outputs should themselves remain auditable
 - one attempt should correspond to one variance-bearing invocation plus bounded deterministic fallout before the next invocation; if another semantically different invocation is needed, prefer decomposition over treating it as just another progressive retry
 - long-running work, deterministic or non-deterministic, should emit explicit progress telemetry so the operator can distinguish healthy forward motion from true idleness or wedged execution
+- runtime surfaces should expose live attempt-step state in real time so the operator can see whether a lane is routing, generating, executing a tool, validating, reviewing, or truly idle
+- the agent should be allowed to discover and execute a decomposition needed to complete a Procedure, and once that decomposition proves stable, the resulting process should be eligible to fold back into the Procedure artifact itself
 - tool telemetry should support scope-aware circuit breakers so the system can learn "this tool is broken for this lane doing this class of work" and stop spamming the same failing call until remediation is underway
 - surprising signals should themselves remain auditable so the system can ask not only "what happened?" but also "was it right to be surprised by this?" and recalibrate its own attention policy
 - prefer evolving existing pipelines into shared primitives instead of creating adjacent special-purpose systems; a new subsystem should justify itself by becoming reusable across multiple Strata surfaces
 - plugin and module interfaces should be explicit and versioned so interchangeable product surfaces are normal behavior, not bespoke glue code
 - deterministic mutation search over mutable config fields should be treated as part of the system's evolutionary hardware; search that space deliberately before escalating to prompt or code mutation
+- inference throttling should support at least two explicit postures: `hard` ("do not exceed this limit") and `greedy` ("push up to the best currently believed safe/provider-friendly limit while probing carefully to improve that estimate")
+- local-resource policy should optimize for operator comfort rather than raw throughput alone; for local inference, the default target should be "not annoying" under current conditions, with ambiguous cases resolved in favor of quieter/lighter operation unless the operator has explicitly opted in to more aggressive behavior
+- the system should treat comfort constraints such as fan noise, memory pressure, and similar resource-side effects as measurable control surfaces, not merely informal preferences

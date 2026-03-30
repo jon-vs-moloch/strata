@@ -16,6 +16,7 @@ from sqlalchemy.exc import OperationalError
 from strata.core.lanes import session_matches_lane
 from strata.sessions.metadata import _session_metadata_key, get_session_metadata_from_value
 from strata.storage.models import MessageModel, ParameterModel
+from strata.storage.sqlite_write import flush_with_write_lock
 
 
 def _parse_timestamp(raw: Any) -> Optional[datetime]:
@@ -54,6 +55,8 @@ class MessageRepository:
         @outputs the created MessageModel
         """
         last_error = None
+        bind = getattr(self.session, "bind", None)
+        sqlite_enabled = str(getattr(getattr(bind, "url", None), "drivername", "") or "").startswith("sqlite")
         for attempt in range(5):
             msg = MessageModel(
                 role=role,
@@ -64,7 +67,7 @@ class MessageRepository:
             )
             try:
                 self.session.add(msg)
-                self.session.flush()
+                flush_with_write_lock(self.session, enabled=sqlite_enabled)
                 return msg
             except OperationalError as e:
                 last_error = e

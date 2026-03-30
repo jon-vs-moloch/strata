@@ -21,6 +21,10 @@ const DashboardPanel = ({ title, children }) => (
   </div>
 );
 
+const isDesktopRuntime = () =>
+  typeof window !== 'undefined' &&
+  Object.prototype.hasOwnProperty.call(window, '__TAURI_INTERNALS__');
+
 export default function SettingsView({ onResetDatabase, apiUrl, currentScope = 'home' }) {
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -31,12 +35,41 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
   const [automaticTaskGeneration, setAutomaticTaskGeneration] = useState(false);
   const [testingMode, setTestingMode] = useState(false);
   const [replayPendingOnStartup, setReplayPendingOnStartup] = useState(false);
-  const [allowCloudOnlyBoot, setAllowCloudOnlyBoot] = useState(false);
   const [heavyReflectionMode, setHeavyReflectionMode] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [registryConfig, setRegistryConfig] = useState({ trainer: [], agent: [] });
   const [registryPresets, setRegistryPresets] = useState({ trainer: {}, agent: {} });
   const [savingRegistry, setSavingRegistry] = useState(false);
+  const [desktopUpdateStatus, setDesktopUpdateStatus] = useState(null);
+  const [checkingDesktopUpdate, setCheckingDesktopUpdate] = useState(false);
+  const [installingDesktopUpdate, setInstallingDesktopUpdate] = useState(false);
+  const [restartingDesktop, setRestartingDesktop] = useState(false);
+  const [desktopUpdateCheckedAt, setDesktopUpdateCheckedAt] = useState(null);
+
+  const loadDesktopUpdateStatus = useCallback(async () => {
+    if (!isDesktopRuntime()) {
+      setDesktopUpdateStatus(null);
+      setDesktopUpdateCheckedAt(null);
+      return;
+    }
+    setCheckingDesktopUpdate(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const status = await invoke('desktop_update_status');
+      setDesktopUpdateStatus(status);
+      setDesktopUpdateCheckedAt(new Date().toISOString());
+    } catch (e) {
+      console.error('Failed to load desktop updater status', e);
+      setDesktopUpdateStatus({
+        desktop: true,
+        configured: false,
+        error: e?.message || 'Failed to load desktop updater status.',
+      });
+      setDesktopUpdateCheckedAt(new Date().toISOString());
+    } finally {
+      setCheckingDesktopUpdate(false);
+    }
+  }, []);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -46,7 +79,6 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
         setAutomaticTaskGeneration(Boolean(res.data.settings.automatic_task_generation));
         setTestingMode(Boolean(res.data.settings.testing_mode));
         setReplayPendingOnStartup(Boolean(res.data.settings.replay_pending_tasks_on_startup));
-        setAllowCloudOnlyBoot(Boolean(res.data.settings.allow_cloud_only_boot));
         setHeavyReflectionMode(Boolean(res.data.settings.heavy_reflection_mode));
       }
     } catch (e) {
@@ -78,7 +110,25 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     void loadSettings();
     void loadRegistry();
     void loadRegistryPresets();
-  }, [loadRegistry, loadRegistryPresets, loadSettings]);
+    void loadDesktopUpdateStatus();
+  }, [loadDesktopUpdateStatus, loadRegistry, loadRegistryPresets, loadSettings]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) return undefined;
+    const handleFocus = () => {
+      void loadDesktopUpdateStatus();
+    };
+    const intervalId = window.setInterval(() => {
+      void loadDesktopUpdateStatus();
+    }, 15 * 60 * 1000);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
+    };
+  }, [loadDesktopUpdateStatus]);
 
   const handleUpdateRegistry = async (pool, field, value, index = 0) => {
     const next = { ...registryConfig };
@@ -120,7 +170,6 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       automatic_task_generation: overrides.automatic_task_generation ?? automaticTaskGeneration,
       testing_mode: overrides.testing_mode ?? testingMode,
       replay_pending_tasks_on_startup: overrides.replay_pending_tasks_on_startup ?? replayPendingOnStartup,
-      allow_cloud_only_boot: overrides.allow_cloud_only_boot ?? allowCloudOnlyBoot,
       heavy_reflection_mode: overrides.heavy_reflection_mode ?? heavyReflectionMode,
     };
     setSavingSettings(true);
@@ -165,6 +214,48 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     }
   };
 
+  const handleInstallDesktopUpdate = async () => {
+    if (!isDesktopRuntime()) return;
+    setInstallingDesktopUpdate(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const result = await invoke('desktop_install_update');
+      setDesktopUpdateStatus((current) => ({
+        ...(current || {}),
+        update_available: false,
+        installed_version: result?.version || null,
+        restart_required: Boolean(result?.installed),
+        notes: result?.installed
+          ? `Update ${result.version || ''} installed. Restart the desktop app to finish applying it.`.trim()
+          : (current?.notes || 'No update was available to install.'),
+      }));
+    } catch (e) {
+      console.error('Failed to install desktop update', e);
+      setDesktopUpdateStatus((current) => ({
+        ...(current || {}),
+        error: e?.message || 'Failed to install desktop update.',
+      }));
+    } finally {
+      setInstallingDesktopUpdate(false);
+    }
+  };
+
+  const handleRestartDesktop = async () => {
+    if (!isDesktopRuntime()) return;
+    setRestartingDesktop(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('desktop_restart');
+    } catch (e) {
+      console.error('Failed to restart desktop app', e);
+      setDesktopUpdateStatus((current) => ({
+        ...(current || {}),
+        error: e?.message || 'Failed to restart desktop app.',
+      }));
+      setRestartingDesktop(false);
+    }
+  };
+
   const sectionLabel = { fontSize: '11px', fontWeight: 700, color: '#9499ad', letterSpacing: '0.08em', marginBottom: '8px' };
   const infoValue = {
     background: '#1c1c22', border: '1px solid rgba(255,255,255,0.05)',
@@ -178,6 +269,13 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     display: 'flex', flexDirection: 'column', gap: '8px'
   };
   const visiblePools = currentScope === 'home' ? ['trainer', 'agent'] : [currentScope];
+  const desktopUpdateSummary = desktopUpdateStatus?.restart_required
+    ? `Restart ready | update ${desktopUpdateStatus.installed_version || desktopUpdateStatus.latest_version || ''}`.trim()
+    : desktopUpdateStatus?.update_available
+      ? `Update available: ${desktopUpdateStatus.latest_version || 'new version'}`
+      : desktopUpdateStatus?.configured
+        ? 'Desktop is current on this channel.'
+        : desktopUpdateStatus?.error || 'Desktop updater is not configured yet.';
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -213,6 +311,109 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
           </div>
         )}
       </DashboardPanel>
+
+      {isDesktopRuntime() && (
+        <DashboardPanel title="DESKTOP UPDATES">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <div>
+              <div style={sectionLabel}>DESKTOP UPDATES</div>
+              <div style={{ fontSize: '13px', color: '#c7c8d6', lineHeight: 1.6 }}>
+                {desktopUpdateStatus?.configured
+                  ? `Channel ${desktopUpdateStatus.channel || 'alpha'} · current desktop ${desktopUpdateStatus.current_version || 'unknown'}`
+                  : 'Desktop updater is present but not configured with a signed channel yet.'}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => void loadDesktopUpdateStatus()}
+                disabled={checkingDesktopUpdate}
+                style={{
+                  background: checkingDesktopUpdate ? 'rgba(255,255,255,0.04)' : 'rgba(130,87,229,0.15)',
+                  border: '1px solid rgba(130,87,229,0.3)',
+                  borderRadius: '8px',
+                  padding: '0 14px',
+                  height: '36px',
+                  color: '#8257e5',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                {checkingDesktopUpdate ? 'Checking…' : 'Check for updates'}
+              </button>
+              <button
+                onClick={() => void handleInstallDesktopUpdate()}
+                disabled={installingDesktopUpdate || !desktopUpdateStatus?.update_available}
+                style={{
+                  background: installingDesktopUpdate || !desktopUpdateStatus?.update_available ? 'rgba(255,255,255,0.04)' : 'rgba(0,242,148,0.12)',
+                  border: '1px solid rgba(0,242,148,0.25)',
+                  borderRadius: '8px',
+                  padding: '0 14px',
+                  height: '36px',
+                  color: desktopUpdateStatus?.update_available ? '#00f294' : '#6d7387',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: desktopUpdateStatus?.update_available ? 'pointer' : 'default',
+                }}
+              >
+                {installingDesktopUpdate ? 'Installing…' : 'Install update'}
+              </button>
+              <button
+                onClick={() => void handleRestartDesktop()}
+                disabled={restartingDesktop || !desktopUpdateStatus?.restart_required}
+                style={{
+                  background: restartingDesktop || !desktopUpdateStatus?.restart_required ? 'rgba(255,255,255,0.04)' : 'rgba(255,176,32,0.12)',
+                  border: '1px solid rgba(255,176,32,0.25)',
+                  borderRadius: '8px',
+                  padding: '0 14px',
+                  height: '36px',
+                  color: desktopUpdateStatus?.restart_required ? '#ffb020' : '#6d7387',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: desktopUpdateStatus?.restart_required ? 'pointer' : 'default',
+                }}
+              >
+                {restartingDesktop ? 'Restarting…' : 'Restart app'}
+              </button>
+            </div>
+          </div>
+          <div style={{ ...inputGroupStyle, marginTop: '4px' }}>
+            <div style={{ fontSize: '12px', color: '#9499ad' }}>
+              {desktopUpdateSummary}
+            </div>
+            {desktopUpdateCheckedAt && (
+              <div style={{ fontSize: '11px', color: '#6d7387' }}>
+                Last checked: {new Date(desktopUpdateCheckedAt).toLocaleString()}
+              </div>
+            )}
+            {desktopUpdateStatus?.published_at && (
+              <div style={{ fontSize: '11px', color: '#6d7387' }}>
+                Published: {desktopUpdateStatus.published_at}
+              </div>
+            )}
+            {desktopUpdateStatus?.installed_version && (
+              <div style={{ fontSize: '11px', color: '#ffb020' }}>
+                Installed and pending restart: {desktopUpdateStatus.installed_version}
+              </div>
+            )}
+            {desktopUpdateStatus?.notes && (
+              <div style={{ fontSize: '11px', color: '#c7c8d6', lineHeight: 1.5 }}>
+                {desktopUpdateStatus.notes}
+              </div>
+            )}
+            {desktopUpdateStatus?.endpoint && (
+              <div style={{ ...infoValue, fontSize: '11px', color: '#8c92a8' }}>
+                {desktopUpdateStatus.endpoint}
+              </div>
+            )}
+            {!desktopUpdateStatus?.configured && (
+              <div style={{ fontSize: '11px', color: '#6d7387', lineHeight: 1.5 }}>
+                Configure `STRATA_DESKTOP_UPDATE_ENDPOINT`, `STRATA_DESKTOP_UPDATE_PUBKEY`, and `TAURI_SIGNING_PRIVATE_KEY`, then run `npm run desktop:build:alpha` to publish a signed alpha build.
+              </div>
+            )}
+          </div>
+        </DashboardPanel>
+      )}
 
       <DashboardPanel title="MODEL REGISTRY">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -299,7 +500,6 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
             ['Automatically generate tasks', automaticTaskGeneration, setAutomaticTaskGeneration, 'automatic_task_generation', 'Lets the chat model spawn background research and implementation tasks on its own. Default is off for quieter testing.'],
             ['Testing mode', testingMode, setTestingMode, 'testing_mode', 'Suppresses autonomous idle task generation so you can run focused evaluations without extra noise.'],
             ['Replay pending backlog on startup', replayPendingOnStartup, setReplayPendingOnStartup, 'replay_pending_tasks_on_startup', 'Re-enqueues old pending tasks after a reboot. Leave this off unless you intentionally want to resume backlog work.'],
-            ['Allow cloud-only boot', allowCloudOnlyBoot, setAllowCloudOnlyBoot, 'allow_cloud_only_boot', 'Lets the worker start on the trainer tier when the local agent endpoint is unavailable instead of failing startup.'],
             ['Heavy reflection mode', heavyReflectionMode, setHeavyReflectionMode, 'heavy_reflection_mode', 'Makes the trainer lane seed larger bootstrap supervision batches when idle so overnight runs synthesize telemetry faster.'],
           ].map(([label, checked, setter, field, helper]) => (
             <label key={field} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>

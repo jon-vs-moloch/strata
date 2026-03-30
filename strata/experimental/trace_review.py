@@ -721,6 +721,12 @@ def _collect_verifier_reviews(trace_summary: Dict[str, Any]) -> List[Dict[str, A
         verifier = dict(((attempt or {}).get("artifacts") or {}).get("verifier") or {})
         if verifier:
             reviews.append(verifier)
+    for artifact in trace_summary.get("observability_artifacts") or []:
+        if str((artifact or {}).get("artifact_kind") or "").strip().lower() != "verifier_review":
+            continue
+        payload = dict((artifact or {}).get("payload") or {})
+        if payload:
+            reviews.append(payload)
     return reviews
 
 

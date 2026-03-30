@@ -20,9 +20,10 @@ import asyncio
 import os
 from sqlalchemy.exc import OperationalError
 from strata.storage.services.main import StorageManager
-from strata.storage.models import TaskModel, TaskType, TaskState, ParameterModel
+from strata.storage.models import TaskModel, TaskType, TaskState, ParameterModel, task_state_api_value
 from strata.storage.retention import get_retention_policy, get_retention_runtime, run_retention_maintenance
 from strata.models.adapter import ModelAdapter
+from strata.models.providers import GenericOpenAICompatibleProvider
 from strata.orchestrator.background import BackgroundWorker
 from strata.api.hotreload import HotReloader
 from strata.api.chat_tools import load_dynamic_tools
@@ -32,7 +33,7 @@ from strata.api.knowledge_admin import register_knowledge_admin_routes
 from strata.api.retention_admin import register_retention_admin_routes
 from strata.api.spec_admin import register_spec_admin_routes
 from strata.api.runtime_admin import register_runtime_admin_routes
-from strata.core.lanes import infer_lane_from_session_id, normalize_lane
+from strata.core.lanes import canonical_session_id_for_lane, infer_lane_from_session_id, normalize_lane
 from strata.memory.semantic import SemanticMemory
 from strata.orchestrator.worker.telemetry import build_telemetry_snapshot
 from strata.models.providers import get_provider_telemetry_snapshot
@@ -71,8 +72,21 @@ GLOBAL_SETTINGS = {
     "max_sync_tool_iterations": 3,
     "automatic_task_generation": True,
     "testing_mode": False,
-    "replay_pending_tasks_on_startup": False,
+    "replay_pending_tasks_on_startup": True,
     "heavy_reflection_mode": False,
+    "inference_throttle_policy": {
+        "throttle_mode": "hard",
+        "operator_comfort": {
+            "profile": "quiet",
+            "ambiguity_bias": "prefer_quiet",
+            "allow_annoying_if_explicit": False,
+            "context": {
+                "machine_in_use": True,
+                "room_occupied": True,
+                "ambient_noise_masking": False,
+            },
+        },
+    },
 }
 SETTINGS_PARAMETER_KEY = "orchestrator_global_settings"
 SETTINGS_PARAMETER_DESCRIPTION = (
@@ -146,6 +160,21 @@ def _normalized_settings(payload: Optional[Dict[str, Any]] = None) -> Dict[str, 
     normalized = dict(GLOBAL_SETTINGS)
     if payload:
         normalized.update(payload)
+        current_policy = dict(GLOBAL_SETTINGS.get("inference_throttle_policy") or {})
+        incoming_policy = dict(payload.get("inference_throttle_policy") or {})
+        merged_policy = dict(current_policy)
+        merged_policy.update({k: v for k, v in incoming_policy.items() if k != "operator_comfort"})
+        current_comfort = dict(current_policy.get("operator_comfort") or {})
+        incoming_comfort = dict(incoming_policy.get("operator_comfort") or {})
+        merged_comfort = dict(current_comfort)
+        merged_comfort.update({k: v for k, v in incoming_comfort.items() if k != "context"})
+        current_context = dict(current_comfort.get("context") or {})
+        incoming_context = dict(incoming_comfort.get("context") or {})
+        merged_context = dict(current_context)
+        merged_context.update(incoming_context)
+        merged_comfort["context"] = merged_context
+        merged_policy["operator_comfort"] = merged_comfort
+        normalized["inference_throttle_policy"] = merged_policy
     return normalized
 
 
@@ -224,6 +253,9 @@ async def lifespan(app: FastAPI):
             description=SETTINGS_PARAMETER_DESCRIPTION,
         ) or {}
         GLOBAL_SETTINGS.update(_normalized_settings(persisted_settings))
+        GenericOpenAICompatibleProvider.set_runtime_policy(
+            GLOBAL_SETTINGS.get("inference_throttle_policy") or {}
+        )
         try:
             run_retention_maintenance(storage)
         except OperationalError as exc:
@@ -333,11 +365,14 @@ async def _enqueue_eval_job_task(
             if existing:
                 return existing
         try:
-            lane = normalize_lane(eval_job.get("reviewer_tier")) or infer_lane_from_session_id(session_id)
+            lane = normalize_lane(eval_job.get("reviewer_tier")) or infer_lane_from_session_id(session_id) or "trainer"
+            resolved_session_id = str(session_id or "").strip() or None
+            if resolved_session_id is None:
+                resolved_session_id = canonical_session_id_for_lane(lane, session_id)
             task = storage.tasks.create(
                 title=title,
                 description=description,
-                session_id=session_id,
+                session_id=resolved_session_id,
                 state=TaskState.PENDING,
                 constraints={
                     "lane": lane,
@@ -407,11 +442,14 @@ async def _queue_eval_system_job(
         if existing:
             return existing
         try:
-            lane = normalize_lane(payload.get("reviewer_tier")) or infer_lane_from_session_id(session_id)
+            lane = normalize_lane(payload.get("reviewer_tier")) or infer_lane_from_session_id(session_id) or "trainer"
+            resolved_session_id = str(session_id or "").strip() or None
+            if resolved_session_id is None:
+                resolved_session_id = canonical_session_id_for_lane(lane, session_id)
             task = storage.tasks.create(
                 title=title,
                 description=description,
-                session_id=session_id,
+                session_id=resolved_session_id,
                 state=TaskState.PENDING,
                 type=TaskType.JUDGE,
                 constraints={
@@ -570,7 +608,7 @@ async def list_eval_jobs(
             {
                 "task_id": task.task_id,
                 "title": task.title,
-                "state": task.state.value.lower(),
+                "state": task_state_api_value(task.state),
                 "session_id": task.session_id,
                 "created_at": task.created_at.isoformat() if task.created_at else None,
                 "updated_at": task.updated_at.isoformat() if task.updated_at else None,
@@ -585,4 +623,9 @@ async def list_eval_jobs(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("strata.api.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "strata.api.main:app",
+        host=os.environ.get("STRATA_API_HOST", "0.0.0.0"),
+        port=int(os.environ.get("STRATA_API_PORT", "8000")),
+        reload=str(os.environ.get("STRATA_API_RELOAD", "")).strip().lower() in {"1", "true", "yes", "on"},
+    )

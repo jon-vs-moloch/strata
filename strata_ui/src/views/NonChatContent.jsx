@@ -174,7 +174,14 @@ const TasksView = ({
         {activeTasks.length ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {activeTasks.map((task) => (
-              <TaskCard key={task.id} task={task} onArchive={() => onArchiveTask(task.id)} nowMs={nowMs} />
+              <TaskCard
+                key={task.id}
+                task={task}
+                onArchive={() => onArchiveTask(task.id)}
+                nowMs={nowMs}
+                laneDetail={laneDetails?.[task.lane] || null}
+                detailLevel="full"
+              />
             ))}
           </div>
         ) : (
@@ -212,7 +219,14 @@ const TasksView = ({
           finishedTasks.length ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {finishedTasks.map((task) => (
-                <TaskCard key={task.id} task={task} onArchive={() => onArchiveTask(task.id)} nowMs={nowMs} />
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  onArchive={() => onArchiveTask(task.id)}
+                  nowMs={nowMs}
+                  laneDetail={laneDetails?.[task.lane] || null}
+                  detailLevel="full"
+                />
               ))}
             </div>
           ) : (

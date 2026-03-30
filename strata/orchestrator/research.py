@@ -103,6 +103,18 @@ class ResearchIterationLimitError(Exception):
         self.autopsy = dict(autopsy or {})
 
 
+class TaskBoundaryViolationError(Exception):
+    """
+    @summary Structured failure for work that cannot complete within a single variance-bearing invocation.
+    """
+
+    def __init__(self, *, public_message: str, autopsy: Dict[str, Any]):
+        super().__init__(public_message)
+        self.public_message = public_message
+        self.failure_kind = "task_boundary_violation"
+        self.autopsy = dict(autopsy or {})
+
+
 def _clip_text(value: Any, limit: int = 500) -> str:
     text = str(value or "")
     if len(text) <= limit:
@@ -163,6 +175,43 @@ def _build_iteration_limit_autopsy(
             "for quick recovery or verifier review."
         ),
     }
+
+
+def _build_task_boundary_autopsy(
+    *,
+    task_description: str,
+    target_scope: str,
+    task_context: Optional[Dict[str, Any]],
+    response: Optional[Dict[str, Any]],
+    tool_call: Optional[Dict[str, Any]] = None,
+    tool_result_preview: str = "",
+    next_step_hint: str = "",
+) -> Dict[str, Any]:
+    serialized_response = _serialize_research_turn(
+        {
+            "role": "assistant",
+            "content": (response or {}).get("content"),
+            "tool_calls": (response or {}).get("tool_calls") or [],
+        }
+    )
+    autopsy: Dict[str, Any] = {
+        "failure_kind": "task_boundary_violation",
+        "task_description": str(task_description or ""),
+        "target_scope": str(target_scope or "codebase"),
+        "task_context": dict(task_context or {}),
+        "single_turn_contract": (
+            "A task attempt must complete within one variance-bearing invocation plus bounded deterministic fallout."
+        ),
+        "model_response": serialized_response,
+        "next_step_hint": str(next_step_hint or ""),
+    }
+    if tool_call:
+        autopsy["tool_call"] = _serialize_research_turn(
+            {"role": "assistant", "tool_calls": [tool_call], "content": None}
+        ).get("tool_calls", [{}])[0]
+    if tool_result_preview:
+        autopsy["tool_result_preview"] = _clip_text(tool_result_preview, 1200)
+    return autopsy
 
 
 def _should_return_raw_file(
@@ -265,6 +314,8 @@ class ResearchModule:
         target_scope: str = "codebase",
         context_hints: Optional[Dict[str, Any]] = None,
         task_context: Optional[Dict[str, Any]] = None,
+        progress_fn=None,
+        attempt_id: Optional[str] = None,
     ) -> ResearchReport:
         """
         @summary Autonomous agent loop for research. Decomposes the task, queries the web/codebase iteratively, and synthesizes.
@@ -514,57 +565,97 @@ class ResearchModule:
 
         # Use the centralized dynamic parameter telemetry module
         policy = load_research_iteration_policy(self.storage)
-        max_iterations = int(policy.get("max_iterations", 6) or 6)
-        
-        final_report_data = None
-        knowledge_pages = KnowledgePageStore(self.storage)
-        
-        for iteration in range(max_iterations):
-            print(f"Research Loop Iteration {iteration+1}/{max_iterations}")
-            response = await self.model.chat(messages, tools=RESEARCH_TOOLS)
-            
-            if response.get("status") == "error":
-                err_msg = response.get("message", "Unknown model adapter error.")
-                raise Exception(f"Research loop aborted: Model adapter returned error: {err_msg}")
 
-            tool_calls = response.get("tool_calls")
-            if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
-                call = tool_calls[0]
-                func_name = call.get("function", {}).get("name")
-                try:
-                    args = json.loads(call.get("function", {}).get("arguments", "{}"))
-                except:
-                    args = {}
-                throttle = should_throttle_tool(
-                    self.storage,
-                    tool_name=func_name,
-                    lane=research_lane,
-                    task_type=research_task_type,
+        knowledge_pages = KnowledgePageStore(self.storage)
+        if progress_fn:
+            progress_fn(
+                step="model_turn",
+                label="Running research turn",
+                detail=f"{target_scope} single-shot research",
+                attempt_id=attempt_id,
+                progress_label="model thinking",
+            )
+        print(f"Starting single-shot research attempt for: {task_description[:50]}...")
+        response = await self.model.chat(messages, tools=RESEARCH_TOOLS)
+
+        if response.get("status") == "error":
+            err_msg = response.get("message", "Unknown model adapter error.")
+            raise Exception(f"Research loop aborted: Model adapter returned error: {err_msg}")
+
+        tool_calls = response.get("tool_calls") or []
+        if len(tool_calls) > 1:
+            raise TaskBoundaryViolationError(
+                public_message=(
+                    "Research task attempted multiple tool calls in a single variance-bearing invocation. "
+                    "Decompose the task into smaller oneshottable units."
+                ),
+                autopsy=_build_task_boundary_autopsy(
+                    task_description=task_description,
+                    target_scope=target_scope,
+                    task_context=task_context,
+                    response=response,
+                    next_step_hint="Split the work so each task needs at most one research tool interaction before completion.",
+                ),
+            )
+
+        final_report_data = None
+        if tool_calls:
+            call = tool_calls[0]
+            func_name = call.get("function", {}).get("name")
+            try:
+                args = json.loads(call.get("function", {}).get("arguments", "{}"))
+            except Exception:
+                args = {}
+            throttle = should_throttle_tool(
+                self.storage,
+                tool_name=func_name,
+                lane=research_lane,
+                task_type=research_task_type,
+            )
+            if throttle.get("throttle") and func_name != "finalize_research":
+                tool_result = (
+                    f"Tool '{func_name}' is currently {throttle.get('status')} for this exact scope and has been circuit-broken. "
+                    f"Reason: {throttle.get('reason')}. Choose another tool, replan, or trigger tooling repair instead of retrying it unchanged."
                 )
-                if throttle.get("throttle") and func_name != "finalize_research":
-                    tool_result = (
-                        f"Tool '{func_name}' is currently {throttle.get('status')} for this exact scope and has been circuit-broken. "
-                        f"Reason: {throttle.get('reason')}. Choose another tool, replan, or trigger tooling repair instead of retrying it unchanged."
+                _record_tool_event(
+                    func_name,
+                    outcome="blocked",
+                    failure_kind="circuit_breaker",
+                    details={"health": throttle.get("health") or {}},
+                )
+                raise TaskBoundaryViolationError(
+                    public_message=(
+                        "Research task selected a circuit-broken tool and would require another variance-bearing turn to continue. "
+                        "Decompose or replan the task instead of looping within the same attempt."
+                    ),
+                    autopsy=_build_task_boundary_autopsy(
+                        task_description=task_description,
+                        target_scope=target_scope,
+                        task_context=task_context,
+                        response=response,
+                        tool_call=call,
+                        tool_result_preview=tool_result,
+                        next_step_hint="Choose a different tool or split the task so tool repair and research are separate tasks.",
+                    ),
+                )
+
+            if func_name == "finalize_research":
+                final_report_data = args
+            else:
+                if progress_fn:
+                    progress_fn(
+                        step="tool_execution",
+                        label="Executing research tool",
+                        detail=str(func_name or "tool"),
+                        attempt_id=attempt_id,
+                        progress_label=f"tool {func_name}",
                     )
-                    _record_tool_event(
-                        func_name,
-                        outcome="blocked",
-                        failure_kind="circuit_breaker",
-                        details={"health": throttle.get("health") or {}},
-                    )
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    continue
-                    
-                if func_name == "finalize_research":
-                    final_report_data = args
-                    break
-                    
-                elif func_name == "list_directory":
+                tool_result = ""
+                tool_outcome = "success"
+                failure_kind = None
+                if func_name == "list_directory":
                     rel_path = args.get("path", ".") or "."
                     print(f"  -> Research Agent listing directory: {rel_path}")
-                    tool_outcome = "success"
-                    failure_kind = None
                     try:
                         directory = (Path(root) / rel_path).resolve()
                         repo_root = Path(root).resolve()
@@ -587,27 +678,16 @@ class ResearchModule:
                         tool_outcome = "broken"
                         failure_kind = "directory_listing_failed"
 
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(
-                        func_name,
-                        outcome=tool_outcome,
-                        failure_kind=failure_kind,
-                        details={"path": rel_path, "tool_result": tool_result[:500]},
-                    )
-
                 elif func_name == "search_web":
                     query = args.get("query", "python")
                     print(f"  -> Research Agent searching web for: {query}")
-                    tool_outcome = "success"
-                    failure_kind = None
                     try:
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(
                                 "https://html.duckduckgo.com/html/",
                                 params={"q": query},
                                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124"},
-                                timeout=8.0
+                                timeout=8.0,
                             )
                             resp.raise_for_status()
                             snippets = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', resp.text, re.IGNORECASE | re.DOTALL)
@@ -617,22 +697,11 @@ class ResearchModule:
                         tool_result = f"Search failed: {e}"
                         tool_outcome = "broken"
                         failure_kind = "search_failed"
-                        
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(
-                        func_name,
-                        outcome=tool_outcome,
-                        failure_kind=failure_kind,
-                        details={"query": query, "tool_result": tool_result[:500]},
-                    )
-                    
+
                 elif func_name == "read_file":
                     filepath = args.get("filepath", "")
                     print(f"  -> Research Agent reading file: {filepath}")
                     full_path = os.path.join(root, filepath)
-                    tool_outcome = "success"
-                    failure_kind = None
 
                     async def fetch_raw_content():
                         with open(full_path, "r", encoding="utf-8") as f:
@@ -650,33 +719,21 @@ class ResearchModule:
                             if len(raw_content) > 12000:
                                 tool_result += "\n... truncated ..."
                         else:
-                            # Apply Progressive Disclosure Wrapper for non-critical reads.
                             tool_result = await self.storage.get_resource_summary(
                                 resource_id=filepath,
                                 raw_content_callback=fetch_raw_content,
-                                model_adapter=self.model
+                                model_adapter=self.model,
                             )
                     except Exception as e:
                         tool_result = f"File read failed: {e}"
                         tool_outcome = "broken"
                         failure_kind = "file_read_failed"
 
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(
-                        func_name,
-                        outcome=tool_outcome,
-                        failure_kind=failure_kind,
-                        details={"filepath": filepath, "tool_result": tool_result[:500]},
-                    )
-
                 elif func_name == "write_library_file":
                     fname = args.get("filename", "untitled.md")
                     content = args.get("content", "")
                     kb_dir = os.path.join(root, ".knowledge")
                     os.makedirs(kb_dir, exist_ok=True)
-                    tool_outcome = "success"
-                    failure_kind = None
                     try:
                         with open(os.path.join(kb_dir, fname), "w", encoding="utf-8") as f:
                             f.write(content)
@@ -686,15 +743,7 @@ class ResearchModule:
                         tool_result = f"Failed to write file: {e}"
                         tool_outcome = "broken"
                         failure_kind = "library_write_failed"
-                        
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(
-                        func_name,
-                        outcome=tool_outcome,
-                        failure_kind=failure_kind,
-                        details={"filename": fname, "tool_result": tool_result[:500]},
-                    )
+
                 elif func_name == "list_knowledge_pages":
                     pages = knowledge_pages.list_pages(
                         query=args.get("query"),
@@ -712,9 +761,7 @@ class ResearchModule:
                             f"last_updated={page.get('last_updated')}"
                             for page in pages
                         )
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success", details={"query": args.get("query")})
+
                 elif func_name == "read_knowledge_page":
                     slug = str(args.get("slug") or "")
                     heading = str(args.get("heading") or "").strip()
@@ -724,15 +771,11 @@ class ResearchModule:
                     else:
                         page = knowledge_pages.get_page(slug, audience="operator")
                         tool_result = page.get("body") or f"No synthesized knowledge page found for '{slug}'."
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success", details={"slug": slug, "heading": heading})
+
                 elif func_name == "inspect_knowledge_maintenance":
                     report = knowledge_pages.get_maintenance_report()
                     tool_result = json.dumps(report, indent=2) if report else "No knowledge maintenance report is available yet."
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success")
+
                 elif func_name == "submit_feedback_signal":
                     signal = register_feedback_signal(
                         self.storage,
@@ -750,9 +793,7 @@ class ResearchModule:
                     )
                     self.storage.commit()
                     tool_result = json.dumps(signal, indent=2)
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success", details={"signal_id": signal.get("signal_id")})
+
                 elif func_name == "propose_knowledge_merge":
                     canonical_slug = str(args.get("canonical_slug") or "")
                     duplicate_slug = str(args.get("duplicate_slug") or "")
@@ -772,9 +813,7 @@ class ResearchModule:
                         f"Queued knowledge merge proposal task {task.task_id} to evaluate '{canonical_slug}' "
                         f"against duplicate candidate '{duplicate_slug}'."
                     )
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success", details={"canonical_slug": canonical_slug, "duplicate_slug": duplicate_slug})
+
                 elif func_name == "propose_knowledge_correction":
                     slug = str(args.get("slug") or "")
                     reason = str(args.get("reason") or "possible knowledge correction needed")
@@ -790,9 +829,7 @@ class ResearchModule:
                     if self.enqueue_task:
                         await self.enqueue_task(task.task_id)
                     tool_result = f"Queued knowledge correction task {task.task_id} for '{slug}'."
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success", details={"slug": slug})
+
                 elif func_name == "queue_knowledge_refresh":
                     slug = str(args.get("slug") or "")
                     reason = str(args.get("reason") or "page may be stale")
@@ -807,21 +844,49 @@ class ResearchModule:
                     if self.enqueue_task:
                         await self.enqueue_task(task.task_id)
                     tool_result = f"Queued knowledge refresh task {task.task_id} for '{slug}'."
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
-                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
-                    _record_tool_event(func_name, outcome="success", details={"slug": slug})
-            else:
-                # LLM failed to call a tool, force it
-                messages.append({"role": "assistant", "content": response.get("content", "")})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "You MUST call a tool. For codebase or alignment tasks, inspect the local repository with "
-                            "`list_directory` or `read_file` before saying anything is missing. If you are done, call finalize_research."
-                        ),
-                    }
+
+                else:
+                    tool_result = f"Unsupported research tool call: {func_name}"
+                    tool_outcome = "broken"
+                    failure_kind = "unsupported_tool"
+
+                _record_tool_event(
+                    func_name,
+                    outcome=tool_outcome,
+                    failure_kind=failure_kind,
+                    details={"tool_result": tool_result[:500]},
                 )
+                raise TaskBoundaryViolationError(
+                    public_message=(
+                        "Research task required a second variance-bearing move after completing a tool interaction. "
+                        "Decompose it into smaller oneshottable research tasks."
+                    ),
+                    autopsy=_build_task_boundary_autopsy(
+                        task_description=task_description,
+                        target_scope=target_scope,
+                        task_context=task_context,
+                        response=response,
+                        tool_call=call,
+                        tool_result_preview=tool_result,
+                        next_step_hint=(
+                            "Split the work so one task can inspect exactly one source or artifact and a later task can synthesize."
+                        ),
+                    ),
+                )
+        else:
+            raise TaskBoundaryViolationError(
+                public_message=(
+                    "Research task did not complete in one bounded turn and did not emit finalize_research. "
+                    "Reframe or decompose it into a oneshottable task."
+                ),
+                autopsy=_build_task_boundary_autopsy(
+                    task_description=task_description,
+                    target_scope=target_scope,
+                    task_context=task_context,
+                    response=response,
+                    next_step_hint="Create a smaller research task whose answer can be finalized in one variance-bearing invocation.",
+                ),
+            )
                 
         from datetime import datetime
         kb_dir = os.path.join(root, ".knowledge")
@@ -829,7 +894,7 @@ class ResearchModule:
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         
         if not final_report_data:
-            # Fallback if loop exhausted: Save the WIP trace and THROW so it triggers a failover!
+            # Fallback if no final report was emitted.
             wip_file = os.path.join(kb_dir, f"wip_research_{ts}.md")
             with open(wip_file, "w", encoding="utf-8") as f:
                 f.write(f"# WIP Research Dump: {task_description}\\n\\n")
@@ -847,7 +912,7 @@ class ResearchModule:
             )
             raise ResearchIterationLimitError(
                 public_message=(
-                    "Agent iteration limit reached. Partial context saved to durable "
+                    "Research task ended without finalize_research. Partial context saved to durable "
                     f"`.knowledge` library at: {wip_file}"
                 ),
                 autopsy=autopsy,

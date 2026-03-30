@@ -15,19 +15,31 @@ HEALTH_URL="http://127.0.0.1:8000/admin/test"
 START_BOOTSTRAP_SUPERVISOR="${START_BOOTSTRAP_SUPERVISOR:-1}"
 SUPERVISOR_MODE="${SUPERVISOR_MODE:-continuous}"
 API_PATTERN="uvicorn strata.api.main:app --host 127.0.0.1 --port 8000"
+API_CMD=(env PYTHONUNBUFFERED=1 ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000)
+SUPERVISOR_CMD=(env PYTHONUNBUFFERED=1 PYTHONPATH=. SUPERVISOR_MODE="$SUPERVISOR_MODE" ./venv/bin/python scripts/bootstrap_supervisor.py)
 
 cleanup_stale_api_processes() {
   local api_pids=()
   while IFS= read -r pid; do
     [ -n "$pid" ] && api_pids+=("$pid")
   done < <(pgrep -f "$API_PATTERN" || true)
-  if [ "${#api_pids[@]}" -le 1 ]; then
+  if [ "${#api_pids[@]}" -eq 0 ]; then
     return
   fi
-  echo "Stopping stale API processes: ${api_pids[*]:1}"
-  kill "${api_pids[@]:1}" >/dev/null 2>&1 || true
+  echo "Stopping API processes: ${api_pids[*]}"
+  kill "${api_pids[@]}" >/dev/null 2>&1 || true
   sleep 1
-  kill -9 "${api_pids[@]:1}" >/dev/null 2>&1 || true
+  kill -9 "${api_pids[@]}" >/dev/null 2>&1 || true
+}
+
+launch_detached() {
+  local logfile="$1"
+  shift
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" </dev/null > "$logfile" 2>&1 &
+  else
+    nohup "$@" </dev/null > "$logfile" 2>&1 &
+  fi
 }
 
 start_api() {
@@ -37,8 +49,7 @@ start_api() {
     return
   fi
   echo "Starting API..."
-  nohup ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000 \
-    > strata/runtime/api.log 2>&1 &
+  launch_detached strata/runtime/api.log "${API_CMD[@]}"
 }
 
 wait_for_api() {
@@ -60,8 +71,7 @@ start_supervisor() {
     return
   fi
   echo "Starting bootstrap supervisor in ${SUPERVISOR_MODE} mode..."
-  nohup env PYTHONPATH=. SUPERVISOR_MODE="$SUPERVISOR_MODE" ./venv/bin/python scripts/bootstrap_supervisor.py \
-    > strata/runtime/bootstrap_supervisor.log 2>&1 &
+  launch_detached strata/runtime/bootstrap_supervisor.log "${SUPERVISOR_CMD[@]}"
 }
 
 start_api

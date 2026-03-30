@@ -5,6 +5,7 @@
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 from strata.communication.primitives import build_communication_decision, deliver_communication_decision
 from strata.core.lanes import infer_lane_from_task
@@ -57,7 +58,63 @@ def _is_non_actionable_recovery_subtask(proto) -> bool:
         return True
     return False
 
-async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueue_fn):
+
+def _recoverable_focus_task(storage, task):
+    focus_task_id = str((getattr(task, "constraints", {}) or {}).get("recovery_focus_task_id") or "").strip()
+    if focus_task_id and hasattr(storage, "tasks"):
+        focus = storage.tasks.get_by_id(focus_task_id)
+        if focus is not None:
+            return focus
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if parent_task_id and hasattr(storage, "tasks"):
+        focus = storage.tasks.get_by_id(parent_task_id)
+        if focus is not None:
+            return focus
+    return task
+
+
+def _procedure_checklist_subtasks(storage, task):
+    focus = _recoverable_focus_task(storage, task)
+    constraints = dict(getattr(focus, "constraints", {}) or {})
+    checklist = list(constraints.get("procedure_checklist") or [])
+    if not checklist:
+        return []
+    procedure_title = str(constraints.get("procedure_title") or getattr(focus, "title", "") or "Procedure").strip()
+    created = []
+    for item in checklist:
+        item_id = str(item.get("id") or "").strip()
+        item_title = str(item.get("title") or "").strip()
+        verification = str(item.get("verification") or "").strip()
+        if not item_title:
+            continue
+        created.append(
+            {
+                "title": f"Procedure Step: {item_title}",
+                "description": (
+                    f"Advance exactly one checklist item for the Procedure '{procedure_title}'. "
+                    f"Focus only on [{item_id}] {item_title}. "
+                    f"Verification target: {verification}. "
+                    "If the item cannot be completed directly, convert the missing information into an explicit pending question "
+                    "or durable attention item instead of broadening scope."
+                ).strip(),
+                "task_type": TaskType.RESEARCH,
+                "constraints": {
+                    "lane": dict(getattr(task, "constraints", {}) or {}).get("lane"),
+                    "procedure_id": constraints.get("procedure_id"),
+                    "procedure_title": procedure_title,
+                    "procedure_parent_task_id": getattr(focus, "task_id", None),
+                    "procedure_checklist_item": {
+                        "id": item_id,
+                        "title": item_title,
+                        "verification": verification,
+                    },
+                    "recovered_from_decomposition_failure": True,
+                },
+            }
+        )
+    return created
+
+async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueue_fn, progress_fn=None):
     """
     @summary Execute a single task attempt.
     """
@@ -75,16 +132,41 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         task.state = TaskState.WORKING
     storage.commit()
     started_at = time.perf_counter()
+    step_history = []
+
+    def _record_progress(*, step: str, label: str, detail: str = "", progress_label: str | None = None, attempt_id: str | None = None):
+        event = {
+            "step": str(step or "").strip().lower() or "unknown",
+            "label": str(label or "").strip() or "Working",
+            "detail": str(detail or "").strip(),
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        step_history.append(event)
+        if progress_fn:
+            progress_fn(
+                step=event["step"],
+                label=event["label"],
+                detail=event["detail"],
+                progress_label=progress_label,
+                attempt_id=attempt_id or attempt.attempt_id,
+            )
     
     logger.info(f"Running task {task.task_id} ({task.type.value}), Attempt {attempt.attempt_id}")
+    _record_progress(
+        step="attempt",
+        label="Attempt running",
+        detail=f"{task.type.value.lower()} attempt started",
+        progress_label="attempt active",
+        attempt_id=attempt.attempt_id,
+    )
 
     try:
         if task.type == TaskType.RESEARCH:
-            await _run_research(task, storage, model_adapter, enqueue_fn)
+            await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.DECOMP:
             await _run_decomposition(task, storage, model_adapter, enqueue_fn)
         elif task.type == TaskType.IMPL:
-            await _run_implementation(task, storage, model_adapter)
+            await _run_implementation(task, storage, model_adapter, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.JUDGE:
             await _run_judge(task, storage, model_adapter)
         else:
@@ -99,6 +181,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             attempt.artifacts["provider"] = model_adapter.last_response.provider
             attempt.artifacts["usage"] = model_adapter.last_response.usage or {}
         attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+        attempt.artifacts["step_history"] = list(step_history)
             
         task.state = TaskState.COMPLETE
         storage.commit()
@@ -113,6 +196,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             artifacts["provider"] = model_adapter.last_response.provider
             artifacts["usage"] = model_adapter.last_response.usage or {}
         artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+        artifacts["step_history"] = list(step_history)
         failure_kind = str(getattr(e, "failure_kind", "") or "").strip()
         if failure_kind:
             evidence["failure_kind"] = failure_kind
@@ -120,7 +204,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         if isinstance(autopsy, dict) and autopsy:
             evidence["autopsy"] = autopsy
         storage.rollback()
-        failed_attempt = storage.attempts.get_by_id(attempt.attempt_id)
+        failed_attempt = storage.attempts.get_by_id(attempt.attempt_id) if getattr(attempt, "attempt_id", None) else None
         if failed_attempt:
             failed_attempt.artifacts = {**dict(failed_attempt.artifacts or {}), **artifacts}
             failed_attempt.evidence = {**dict(failed_attempt.evidence or {}), **evidence}
@@ -143,13 +227,18 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
                 if should_flush:
                     flush_observability_writes()
             attempt = failed_attempt
+        else:
+            attempt.artifacts = {**dict(getattr(attempt, "artifacts", {}) or {}), **artifacts}
+            attempt.evidence = {**dict(getattr(attempt, "evidence", {}) or {}), **evidence}
         return False, e, attempt
 
-async def _run_research(task, storage, model_adapter, enqueue_fn):
+async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn=None, attempt_id=None):
     research = ResearchModule(model_adapter, storage, enqueue_task=enqueue_fn)
     report = await research.conduct_research(
         task_description=task.description,
         repo_path=task.repo_path,
+        progress_fn=progress_fn,
+        attempt_id=attempt_id,
         context_hints=dict(task.constraints or {}),
         task_context={
             "task_id": task.task_id,
@@ -173,12 +262,8 @@ async def _run_research(task, storage, model_adapter, enqueue_fn):
 async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
     decomp_mod = DecompositionModule(model_adapter, storage)
     decomp = await decomp_mod.decompose_task(task.title, task.description)
-    if not decomp.subtasks:
-        raise RuntimeError(
-            "Decomposition produced no actionable subtasks. Escalate for trainer intervention instead of spawning generic recovery work."
-        )
     actionable = []
-    for tid, proto in decomp.subtasks.items():
+    for tid, proto in (decomp.subtasks or {}).items():
         if _is_non_actionable_recovery_subtask(proto):
             logger.warning(
                 "Rejected non-actionable recovery subtask from decomposition for task %s: %s",
@@ -188,9 +273,31 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             continue
         actionable.append((tid, proto))
     if not actionable:
+        procedure_fallback = _procedure_checklist_subtasks(storage, task)
+        if procedure_fallback:
+            spawned_ids = []
+            for item in procedure_fallback:
+                sub = storage.tasks.create(
+                    title=item["title"],
+                    description=item["description"],
+                    session_id=task.session_id,
+                    parent_task_id=task.task_id,
+                    state=TaskState.PENDING,
+                    constraints=item["constraints"],
+                    flush=False,
+                )
+                sub.type = item["task_type"]
+                sub.depth = task.depth + 1
+                spawned_ids.append(sub.task_id)
+            task.state = TaskState.WORKING
+            storage.commit()
+            for task_id in spawned_ids:
+                await enqueue_fn(task_id)
+            return
         raise RuntimeError(
-            "Decomposition produced only generic recovery placeholders. Escalate for trainer intervention instead of spawning semantic-free retry work."
+            "Decomposition produced no actionable subtasks. Treat this as a recoverable planning failure and generate a more concrete recovery plan instead of escalating by default."
         )
+    spawned_ids = []
     for tid, proto in actionable:
         sub = storage.tasks.create(
             title=proto.title,
@@ -198,6 +305,7 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             session_id=task.session_id,
             parent_task_id=task.task_id,
             state=TaskState.PENDING,
+            flush=False,
             constraints={
                 "target_files": proto.target_files,
                 "edit_type": proto.edit_type,
@@ -207,15 +315,16 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
         )
         sub.type = TaskType.IMPL
         sub.depth = task.depth + 1
-        storage.commit()
-        await enqueue_fn(sub.task_id)
+        spawned_ids.append(sub.task_id)
     task.state = TaskState.WORKING
     storage.commit()
+    for task_id in spawned_ids:
+        await enqueue_fn(task_id)
 
-async def _run_implementation(task, storage, model_adapter):
+async def _run_implementation(task, storage, model_adapter, *, progress_fn=None, attempt_id=None):
     research_mod = ResearchModule(model_adapter, storage)
     impl_mod = ImplementationModule(model_adapter, storage, research_mod)
-    candidate_ids = await impl_mod.implement_task(task.task_id)
+    candidate_ids = await impl_mod.implement_task(task.task_id, progress_fn=progress_fn, attempt_id=attempt_id)
     _emit_task_communication(
         storage,
         task,

@@ -23,6 +23,7 @@ class DummyTask:
         self.depth = 0
         self.priority = priority
         self.constraints = {}
+        self.active_child_ids = []
         self.human_intervention_required = False
 
 
@@ -140,6 +141,19 @@ def test_multistage_task_deterministically_decomposes():
 
     assert resolution.resolution == "decompose"
     assert "task-boundary" in resolution.reasoning.lower() or "oneshottable" in resolution.reasoning.lower()
+
+
+def test_task_boundary_violation_deterministically_decomposes():
+    storage = DummyStorage()
+    task = DummyTask()
+
+    class BoundaryError(RuntimeError):
+        failure_kind = "task_boundary_violation"
+
+    resolution = asyncio.run(determine_resolution(task, BoundaryError("needs another move"), PromptCapturingModel(), storage))
+
+    assert resolution.resolution == "decompose"
+    assert "oneshottable" in resolution.reasoning.lower() or "boundary" in resolution.reasoning.lower()
 
 
 def test_blocked_weak_task_queues_strong_escalation_review(monkeypatch):
@@ -271,7 +285,7 @@ def test_clarification_research_iteration_limit_blocks_instead_of_decompose():
     assert resolution.resolution == "blocked"
 
 
-def test_failed_decomposition_prefers_abandon_to_parent():
+def test_failed_decomposition_prefers_internal_replan():
     task = DummyTask()
     task.type = TaskType.DECOMP
     task.title = "Recovery Plan for Error Recover"
@@ -285,7 +299,7 @@ def test_failed_decomposition_prefers_abandon_to_parent():
         )
     )
 
-    assert resolution.resolution == "abandon_to_parent"
+    assert resolution.resolution == "internal_replan"
 
 
 def test_recovery_shell_iteration_limit_prefers_internal_replan():
@@ -362,12 +376,12 @@ def test_recovery_shell_iteration_limit_abandons_after_lineage_cap():
 
 
 def test_internal_replan_failover_preserves_original_task_focus():
-    root = DummyTask(task_id="root-task")
+    root = DummyTask(task_id="root-task", session_id="agent:default")
     root.title = "Procedure: Operator Onboarding"
     root.description = "Confirm operator preferences and unresolved onboarding questions."
     root.type = TaskType.RESEARCH
 
-    task = DummyTask(task_id="recover-3")
+    task = DummyTask(task_id="recover-3", session_id="agent:default")
     task.title = "Error Recover"
     task.description = "Initial decomposition failed. Research manually."
     task.parent_task_id = root.task_id
@@ -388,8 +402,11 @@ def test_internal_replan_failover_preserves_original_task_focus():
 
     created = storage.tasks.created[0]
     assert created.title == "Recovery Plan for Procedure: Operator Onboarding"
+    assert created.session_id == "agent:default"
     assert "Do not produce generic 'Error Recover' shells" in created.description
     assert created.constraints["recovery_focus_task_id"] == root.task_id
+    assert task.state == TaskState.PUSHED
+    assert task.active_child_ids == ["repair-1"]
     assert queued == ["repair-1"]
 
 
@@ -428,6 +445,24 @@ def test_abandon_to_parent_agent_task_queues_trainer_intervention():
     payload = queued_review_payloads[0]
     assert payload["kind"] == "trace_review"
     assert payload["payload"]["supervision_reason"] == "abandon_to_parent_recovery_loop"
+
+
+def test_failed_decomposition_prefers_internal_replan_over_abandon():
+    storage = DummyStorage()
+    task = DummyTask()
+    task.type = TaskType.DECOMP
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            RuntimeError("Decomposition produced no actionable subtasks."),
+            PromptCapturingModel(),
+            storage,
+        )
+    )
+
+    assert resolution.resolution == "internal_replan"
+    assert "recoverable planning failure" in resolution.reasoning.lower()
 
 
 def test_determine_resolution_prompt_includes_attempt_intelligence():

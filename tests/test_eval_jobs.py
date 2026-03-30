@@ -8,7 +8,7 @@ from strata.api import main as api_main
 from strata.sessions.metadata import set_session_metadata
 from strata.eval.job_runner import run_eval_job_task
 from strata.orchestrator.user_questions import get_question_for_source
-from strata.storage.models import Base, TaskState, TaskType
+from strata.storage.models import AttemptOutcome, Base, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
 
@@ -80,6 +80,46 @@ def test_queue_eval_system_job_uses_reviewer_tier_as_lane(monkeypatch):
     assert task is not None
     assert task.constraints["lane"] == "trainer"
     assert task.session_id == "agent:default"
+    assert enqueued == [task.task_id]
+
+
+def test_queue_eval_system_job_defaults_judge_work_to_trainer_lane(monkeypatch):
+    storage = make_storage()
+    enqueued = []
+
+    async def fake_enqueue(task_id: str):
+        enqueued.append(task_id)
+
+    monkeypatch.setattr(api_main._worker, "enqueue", fake_enqueue)
+
+    result = asyncio.run(
+        api_main._queue_eval_system_job(
+            storage,
+            kind="bootstrap_cycle",
+            title="Bootstrap Cycle",
+            description="Queued trainer-over-agent bootstrap cycle.",
+            payload={
+                "proposer_tiers": ["agent", "trainer"],
+                "auto_promote": True,
+                "suite_name": "bootstrap_mcq_v1",
+                "run_count": 1,
+                "baseline_change_id": "baseline",
+            },
+            session_id=None,
+            dedupe_signature={
+                "suite_name": "bootstrap_mcq_v1",
+                "run_count": 1,
+                "proposer_tiers": ["agent", "trainer"],
+            },
+        )
+    )
+
+    task = storage.tasks.get_by_id(result["task_id"])
+
+    assert result["status"] == "queued"
+    assert task is not None
+    assert task.constraints["lane"] == "trainer"
+    assert task.session_id == "trainer:default"
     assert enqueued == [task.task_id]
 
 
@@ -162,6 +202,51 @@ def test_run_eval_job_task_completes_benchmark_job(monkeypatch):
     assert reloaded_task.state == TaskState.COMPLETE
     assert reloaded_task.constraints["system_job_result"]["status"] == "completed"
     assert reloaded_task.constraints["system_job_result"]["kind"] == "benchmark"
+
+
+def test_run_eval_job_task_supersedes_prior_open_attempts(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Queued benchmark",
+        description="run benchmark",
+        state=TaskState.WORKING,
+        type=TaskType.JUDGE,
+        constraints={
+            "system_job": {
+                "kind": "benchmark",
+                "payload": {"candidate_change_id": "queued_candidate", "run_label": "queued-run"},
+            }
+        },
+    )
+    storage.commit()
+
+    prior = storage.attempts.create(task_id=task.task_id)
+    storage.commit()
+
+    async def fake_run_benchmark(**_kwargs):
+        return {
+            "run_label": "queued-run",
+            "prompt_count": 1,
+            "baseline_wins": 0,
+            "harness_wins": 1,
+            "ties": 0,
+            "average_baseline_score": 5.0,
+            "average_harness_score": 8.0,
+            "samples": [],
+        }
+
+    monkeypatch.setattr("strata.eval.job_runner.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr("strata.eval.job_runner.persist_benchmark_report", lambda *args, **kwargs: None)
+
+    asyncio.run(run_eval_job_task(task, storage, model_adapter=None))
+    storage.session.expire_all()
+
+    attempts = storage.attempts.get_by_task_id(task.task_id)
+    cancelled = [attempt for attempt in attempts if attempt.attempt_id == prior.attempt_id]
+
+    assert cancelled
+    assert cancelled[0].outcome == AttemptOutcome.CANCELLED
+    assert cancelled[0].reason == "Superseded by a newer eval-job attempt."
 
 
 def test_run_eval_job_task_records_full_eval_source_task(monkeypatch):

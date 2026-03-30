@@ -14,6 +14,7 @@ import json
 import httpx
 from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
 from strata.experimental.variants import build_stage_scope, build_variant_execution_plan, classify_pool_pruning
+from strata.orchestrator.research import TaskBoundaryViolationError
 
 IMPLEMENTATION_META_TOOLS = [
     {
@@ -91,6 +92,39 @@ class ImplementationModule:
         from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
         self.tools_pipeline = ToolsPromotionPipeline(self.storage)
 
+    def _build_task_boundary_autopsy(
+        self,
+        *,
+        task: TaskModel,
+        response: Dict[str, Any],
+        variant: Dict[str, Any],
+        tool_call: Optional[Dict[str, Any]] = None,
+        tool_result_preview: str = "",
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "failure_kind": "task_boundary_violation",
+            "task_id": task.task_id,
+            "task_title": str(task.title or ""),
+            "task_description": str(task.description or ""),
+            "variant_id": str(variant.get("variant_id") or ""),
+            "single_turn_contract": (
+                "An implementation task attempt must complete within one variance-bearing invocation plus bounded deterministic fallout."
+            ),
+            "model_response": {
+                "content": str(response.get("content") or "")[:1600],
+                "tool_call_count": len(response.get("tool_calls") or []),
+            },
+        }
+        if tool_call:
+            payload["tool_call"] = {
+                "id": str(tool_call.get("id") or ""),
+                "name": str((tool_call.get("function") or {}).get("name") or ""),
+                "arguments": str((tool_call.get("function") or {}).get("arguments") or "")[:800],
+            }
+        if tool_result_preview:
+            payload["tool_result_preview"] = str(tool_result_preview)[:1200]
+        return payload
+
     def _resolve_generation_variants(self, task: TaskModel) -> List[Dict[str, Any]]:
         constraints = dict(task.constraints or {})
         stage_scope = str(
@@ -126,7 +160,14 @@ class ImplementationModule:
             }
         ]
 
-    async def implement_task(self, task_id: str, global_research: Optional[ResearchReport] = None) -> List[str]:
+    async def implement_task(
+        self,
+        task_id: str,
+        global_research: Optional[ResearchReport] = None,
+        *,
+        progress_fn=None,
+        attempt_id: Optional[str] = None,
+    ) -> List[str]:
         """
         @summary Execute a coding task with a two-pass research strategy.
         """
@@ -141,7 +182,9 @@ class ImplementationModule:
         # Pass 2: Local Research focused on the Files
         local_research: ResearchReport = await self.researcher.conduct_research(
             task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
-            repo_path=task.repo_path
+            repo_path=task.repo_path,
+            progress_fn=progress_fn,
+            attempt_id=attempt_id,
         )
 
         # Get past failures to avoid infinite loops
@@ -195,72 +238,95 @@ class ImplementationModule:
                     "role": "system",
                     "content": f"{system_prompt}\n\nVariant Instruction:\n{instruction}",
                 }
-            iteration = 0
-            max_iters = 5
             content = ""
             response = {}
-            while iteration < max_iters:
-                response = await self.model.chat(variant_messages, tools=IMPLEMENTATION_META_TOOLS)
-                content = response.get("content", "")
-                tool_calls = response.get("tool_calls", None)
-                
-                if not tool_calls:
-                    break
-                    
-                variant_messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-                
-                for call in tool_calls:
-                    func_name = call["function"]["name"]
-                    args = json.loads(call["function"]["arguments"])
-                    tool_result = ""
-                    
-                    try:
-                        if func_name == "list_active_tools":
-                            tools_dir = "strata/tools"
-                            os.makedirs(tools_dir, exist_ok=True)
-                            files = [f for f in os.listdir(tools_dir) if f.endswith(".py") or f.endswith(".experimental.py")]
-                            tool_result = f"Dynamic files in tools/: {files}"
-                            
-                        elif func_name == "read_tool_source":
-                            name = args["tool_name"]
-                            path = f"strata/tools/{name}.py"
-                            if not os.path.exists(path):
-                                path = f"strata/tools/{name}.experimental.py"
-                            
-                            if os.path.exists(path):
-                                with open(path, "r") as f:
-                                    tool_result = f.read()
-                            else:
-                                tool_result = f"Tool {name} not found."
-                                
-                        elif func_name == "upsert_tool_source":
-                            name = args["tool_name"]
-                            source = args["source"]
-                            os.makedirs("strata/tools", exist_ok=True)
-                            path = f"strata/tools/{name}.experimental.py"
-                            with open(path, "w") as f:
-                                f.write(source)
-                            tool_result = f"Successfully wrote to {path}. You must call trigger_tool_promotion to make it live."
-                            
-                        elif func_name == "trigger_tool_promotion":
-                            name = args["tool_name"]
-                            success, message = await self.tools_pipeline.validate_and_promote(name)
-                            tool_result = message
-                                
-                        variant_messages.append({
-                            "role": "tool",
-                            "tool_call_id": call["id"],
-                            "name": func_name,
-                            "content": tool_result
-                        })
-                    except Exception as e:
-                        variant_messages.append({
-                            "role": "tool",
-                            "tool_call_id": call["id"],
-                            "name": func_name,
-                            "content": f"Error: {str(e)}"
-                        })
-                iteration += 1
+            if progress_fn:
+                progress_fn(
+                    step="model_turn",
+                    label="Generating implementation",
+                    detail=str(variant.get("variant_id") or "implementation_prompt.generic"),
+                    attempt_id=attempt_id,
+                    progress_label="model generating",
+                )
+            response = await self.model.chat(variant_messages, tools=IMPLEMENTATION_META_TOOLS)
+            content = response.get("content", "")
+            tool_calls = response.get("tool_calls") or []
+
+            if len(tool_calls) > 1:
+                raise TaskBoundaryViolationError(
+                    public_message=(
+                        "Implementation task attempted multiple tool calls in a single variance-bearing invocation. "
+                        "Decompose it into smaller oneshottable tasks."
+                    ),
+                    autopsy=self._build_task_boundary_autopsy(
+                        task=task,
+                        response=response,
+                        variant=variant,
+                    ),
+                )
+
+            if tool_calls:
+                call = tool_calls[0]
+                func_name = call["function"]["name"]
+                args = json.loads(call["function"]["arguments"])
+                tool_result = ""
+                if progress_fn:
+                    progress_fn(
+                        step="tool_execution",
+                        label="Executing implementation tool",
+                        detail=func_name,
+                        attempt_id=attempt_id,
+                        progress_label=f"tool {func_name}",
+                    )
+
+                if func_name == "list_active_tools":
+                    tools_dir = "strata/tools"
+                    os.makedirs(tools_dir, exist_ok=True)
+                    files = [f for f in os.listdir(tools_dir) if f.endswith(".py") or f.endswith(".experimental.py")]
+                    tool_result = f"Dynamic files in tools/: {files}"
+
+                elif func_name == "read_tool_source":
+                    name = args["tool_name"]
+                    path = f"strata/tools/{name}.py"
+                    if not os.path.exists(path):
+                        path = f"strata/tools/{name}.experimental.py"
+
+                    if os.path.exists(path):
+                        with open(path, "r") as f:
+                            tool_result = f.read()
+                    else:
+                        tool_result = f"Tool {name} not found."
+
+                elif func_name == "upsert_tool_source":
+                    name = args["tool_name"]
+                    source = args["source"]
+                    os.makedirs("strata/tools", exist_ok=True)
+                    path = f"strata/tools/{name}.experimental.py"
+                    with open(path, "w") as f:
+                        f.write(source)
+                    tool_result = f"Successfully wrote to {path}. You must call trigger_tool_promotion to make it live."
+
+                elif func_name == "trigger_tool_promotion":
+                    name = args["tool_name"]
+                    _success, message = await self.tools_pipeline.validate_and_promote(name)
+                    tool_result = message
+
+                else:
+                    tool_result = f"Unsupported implementation tool call: {func_name}"
+
+                raise TaskBoundaryViolationError(
+                    public_message=(
+                        "Implementation task required another variance-bearing move after a tool interaction. "
+                        "Decompose it into smaller oneshottable tasks."
+                    ),
+                    autopsy=self._build_task_boundary_autopsy(
+                        task=task,
+                        response=response,
+                        variant=variant,
+                        tool_call=call,
+                        tool_result_preview=tool_result,
+                    ),
+                )
 
             from uuid import uuid4
             candidate_id = str(uuid4())

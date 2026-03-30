@@ -9,6 +9,7 @@ import time
 import os
 import json
 import asyncio
+from datetime import datetime
 from typing import Any, Dict
 
 from strata.api.experiment_runtime import (
@@ -126,6 +127,14 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
     payload = dict(system_job.get("payload") or {})
     if not kind:
         raise ValueError("Task is missing system_job.kind")
+
+    for prior_attempt in storage.attempts.get_by_task_id(task.task_id):
+        if prior_attempt.outcome is None and prior_attempt.ended_at is None:
+            storage.attempts.update_outcome(
+                prior_attempt.attempt_id,
+                AttemptOutcome.CANCELLED,
+                reason="Superseded by a newer eval-job attempt.",
+            )
 
     attempt = storage.attempts.create(task_id=task.task_id)
     task.state = TaskState.WORKING
@@ -494,7 +503,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
 
         duration_s = time.perf_counter() - started_at
         attempt.outcome = AttemptOutcome.SUCCEEDED
-        attempt.ended_at = attempt.started_at
+        attempt.ended_at = datetime.utcnow()
         attempt.artifacts = {
             "job_kind": kind,
             "duration_s": duration_s,

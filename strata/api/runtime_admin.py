@@ -21,8 +21,10 @@ from strata.core.lanes import normalize_lane
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
+from strata.observability.host import get_host_telemetry_snapshot
 from strata.procedures.registry import get_procedure, list_procedures, queue_procedure, save_procedure
 from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
+from strata.storage.models import task_state_api_value
 
 
 def register_runtime_admin_routes(
@@ -196,7 +198,7 @@ def register_runtime_admin_routes(
                     "task_id": task.task_id,
                     "title": task.title,
                     "kind": job_kind,
-                    "state": task.state.value.lower(),
+                    "state": task_state_api_value(task.state),
                     "updated_at": task.updated_at.isoformat() if task.updated_at else None,
                 }
             )
@@ -224,6 +226,10 @@ def register_runtime_admin_routes(
     @app.get("/admin/context/telemetry")
     async def get_context_telemetry(storage=Depends(get_storage)):
         return {"status": "ok", "context": get_context_load_telemetry(storage)}
+
+    @app.get("/admin/host/telemetry")
+    async def get_host_telemetry():
+        return {"status": "ok", "host": get_host_telemetry_snapshot()}
 
     @app.get("/admin/observability/attempts")
     async def get_attempt_observability(

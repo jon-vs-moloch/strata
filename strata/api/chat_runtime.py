@@ -19,6 +19,7 @@ from strata.context.loaded_files import build_loaded_context_block
 from strata.core.lanes import infer_lane_from_session_id
 from strata.models.adapter import ModelAdapter
 from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
+from strata.storage.models import task_state_api_value
 
 
 class ChatRuntime:
@@ -105,7 +106,7 @@ class ChatRuntime:
                     "session_id": task.session_id,
                     "title": task.title,
                     "description": task.description,
-                    "status": task.state.value.lower(),
+                    "status": task_state_api_value(task.state),
                     "type": task.type.value.lower(),
                     "depth": task.depth,
                     "human_intervention_required": task.human_intervention_required,

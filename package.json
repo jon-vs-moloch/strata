@@ -9,9 +9,13 @@
     "lint": "npm run lint --prefix strata_ui",
     "preview": "npm run preview --prefix strata_ui",
     "desktop:dev": "tauri dev --config src-tauri/tauri.conf.json",
-    "desktop:build": "tauri build --config src-tauri/tauri.conf.json"
+    "desktop:build": "tauri build --config src-tauri/tauri.conf.json",
+    "desktop:install": "bash ./scripts/install_desktop_safe.sh",
+    "desktop:build:alpha": "bash ./scripts/build_desktop_channel.sh alpha",
+    "desktop:build:stable": "bash ./scripts/build_desktop_channel.sh stable"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
     "axios": "^1.13.6",
     "clsx": "^2.1.1",
     "framer-motion": "^12.38.0",

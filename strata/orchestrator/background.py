@@ -369,6 +369,8 @@ class BackgroundWorker:
         self._current_task_ids: Dict[str, Optional[str]] = {lane: None for lane in LANE_NAMES}
         self._lane_started_at: Dict[str, Optional[datetime]] = {lane: None for lane in LANE_NAMES}
         self._lane_last_activity_at: Dict[str, Optional[datetime]] = {lane: None for lane in LANE_NAMES}
+        self._lane_activity_details: Dict[str, Dict[str, object]] = {lane: {} for lane in LANE_NAMES}
+        self._lane_step_history: Dict[str, list[Dict[str, object]]] = {lane: [] for lane in LANE_NAMES}
         self._lane_models: Dict[str, object] = {lane: self._model_adapter_factory() for lane in LANE_NAMES}
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
         self._tier_health = {"trainer": "unknown", "agent": "unknown"}
@@ -482,6 +484,8 @@ class BackgroundWorker:
             self._current_task_ids[lane] = None
             self._lane_started_at[lane] = None
             self._lane_last_activity_at[lane] = None
+            self._lane_activity_details[lane] = {}
+            self._lane_step_history[lane] = []
         logger.info("BackgroundWorker stopped")
 
     def set_on_update(self, callback):
@@ -492,6 +496,10 @@ class BackgroundWorker:
         for lane_name, current_task_id in self._current_task_ids.items():
             if current_task_id == task_id:
                 self._lane_last_activity_at[lane_name] = now
+                details = dict(self._lane_activity_details.get(lane_name) or {})
+                details["current_task_state"] = str(state or "").upper()
+                details["step_updated_at"] = now.isoformat()
+                self._lane_activity_details[lane_name] = details
                 break
         if self._on_update_callback:
             try:
@@ -501,6 +509,66 @@ class BackgroundWorker:
                     self._on_update_callback(task_id, state)
             except Exception as e:
                 logger.error(f"Failed to notify update: {e}")
+
+    def _mark_lane_progress(
+        self,
+        lane: Optional[str],
+        *,
+        step: str,
+        label: str,
+        detail: str = "",
+        task_id: Optional[str] = None,
+        task_title: Optional[str] = None,
+        attempt_id: Optional[str] = None,
+        progress_label: Optional[str] = None,
+    ) -> None:
+        normalized_lane = normalize_lane(lane)
+        if not normalized_lane:
+            return
+        now = datetime.now(timezone.utc)
+        self._lane_last_activity_at[normalized_lane] = now
+        details = dict(self._lane_activity_details.get(normalized_lane) or {})
+        event = {
+            "step": str(step or "").strip().lower() or "unknown",
+            "label": str(label or "").strip() or "Working",
+            "detail": str(detail or "").strip(),
+            "at": now.isoformat(),
+        }
+        details.update(
+            {
+                "step": event["step"],
+                "step_label": event["label"],
+                "step_detail": event["detail"],
+                "step_updated_at": now.isoformat(),
+            }
+        )
+        if task_id is not None:
+            details["current_task_id"] = str(task_id)
+        if task_title is not None:
+            details["current_task_title"] = str(task_title or "")
+        if attempt_id is not None:
+            details["active_attempt_id"] = str(attempt_id or "")
+        if progress_label is not None:
+            details["progress_label"] = str(progress_label or "")
+        history = list(self._lane_step_history.get(normalized_lane) or [])
+        previous = history[-1] if history else None
+        duplicate_event = (
+            isinstance(previous, dict)
+            and previous.get("step") == event["step"]
+            and previous.get("label") == event["label"]
+            and previous.get("detail") == event["detail"]
+        )
+        if not duplicate_event:
+            history.append(event)
+        self._lane_step_history[normalized_lane] = history[-18:]
+        details["recent_steps"] = list(self._lane_step_history[normalized_lane][-6:])
+        ticker_items = []
+        for item in self._lane_step_history[normalized_lane][-8:]:
+            rendered = f"{item.get('label')}{f': {item.get('detail')}' if item.get('detail') else ''}"
+            if not ticker_items or ticker_items[-1] != rendered:
+                ticker_items.append(rendered)
+        details["ticker_items"] = ticker_items
+        self._lane_activity_details[normalized_lane] = details
 
     async def enqueue(self, task_id: str):
         await self._lane_queue(self._lane_for_task_id(task_id)).put(task_id)
@@ -709,6 +777,14 @@ class BackgroundWorker:
                 now = datetime.now(timezone.utc)
                 self._lane_started_at[normalized_lane] = now
                 self._lane_last_activity_at[normalized_lane] = now
+                self._lane_activity_details[normalized_lane] = {
+                    "current_task_id": str(task_id),
+                    "step": "queued",
+                    "step_label": "Starting task",
+                    "step_detail": "",
+                    "step_updated_at": now.isoformat(),
+                }
+                self._lane_step_history[normalized_lane] = []
                 self._current_processes[normalized_lane] = asyncio.create_task(self._run_task_cycle(task_id, lane=normalized_lane))
                 try:
                     await self._current_processes[normalized_lane]
@@ -719,6 +795,8 @@ class BackgroundWorker:
                     self._current_task_ids[normalized_lane] = None
                     self._lane_started_at[normalized_lane] = None
                     self._lane_last_activity_at[normalized_lane] = datetime.now(timezone.utc)
+                    self._lane_activity_details[normalized_lane] = {}
+                    self._lane_step_history[normalized_lane] = []
                     await self._ensure_lane_idle_policies()
 
                 lane_queue.task_done()
@@ -752,6 +830,14 @@ class BackgroundWorker:
             if not task or task.state in [TaskState.COMPLETE, TaskState.CANCELLED]:
                 return
             if (task.constraints or {}).get("system_job"):
+                self._mark_lane_progress(
+                    lane or infer_lane_from_task(task),
+                    step="queued",
+                    label="Starting task",
+                    detail=str(task.title or task.description or task.task_id),
+                    task_id=task.task_id,
+                    task_title=task.title,
+                )
                 logger.info(f"Running queued system job for task {task_id}")
                 await run_eval_job_task(task, storage, self._lane_model(lane))
                 await self._notify(task_id, task.state.value)
@@ -773,6 +859,14 @@ class BackgroundWorker:
             lane_model = self._lane_model(lane or context.mode)
             lane_model.bind_execution_context(context)
             logger.info(f"Routing task {task_id} to {context.mode} execution context [Exp: {self._active_experiment_id}]")
+            self._mark_lane_progress(
+                lane or context.mode,
+                step="routing",
+                label="Routing",
+                detail=f"{task.type.value.lower()} via {context.mode}",
+                task_id=task.task_id,
+                task_title=task.title,
+            )
 
             constraints = dict(task.constraints or {})
             if constraints.get("lane") != context.mode:
@@ -784,7 +878,17 @@ class BackgroundWorker:
             
             # --- ATTEMPT ---
             success, error, attempt = await run_attempt(
-                task, storage, lane_model, self._notify, self.enqueue
+                task,
+                storage,
+                lane_model,
+                self._notify,
+                self.enqueue,
+                progress_fn=lambda **payload: self._mark_lane_progress(
+                    lane or context.mode,
+                    task_id=task.task_id,
+                    task_title=task.title,
+                    **payload,
+                ),
             )
             
             # Determine execution context details for metrics
@@ -793,14 +897,15 @@ class BackgroundWorker:
                 run_mode = "weak_eval"
             ctx_mode = context.mode
             change_id = getattr(context, "candidate_change_id", None)
+            attempt_artifacts = dict(getattr(attempt, "artifacts", {}) or {})
 
             def _record_attempt_efficiency_metrics(outcome: str):
                 from strata.orchestrator.worker.telemetry import record_metric
-                duration_s = float(attempt.artifacts.get("duration_s", 0.0) or 0.0)
-                usage = attempt.artifacts.get("usage") or {}
+                duration_s = float(attempt_artifacts.get("duration_s", 0.0) or 0.0)
+                usage = attempt_artifacts.get("usage") or {}
                 base_kwargs = {
                     "storage": storage,
-                    "model_id": f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
+                    "model_id": f"{attempt_artifacts.get('provider', 'unknown')}/{attempt_artifacts.get('model', 'unknown')}",
                     "task_type": task.type.value if hasattr(task.type, 'value') else str(task.type),
                     "task_id": task_id,
                     "run_mode": run_mode,
@@ -841,12 +946,30 @@ class BackgroundWorker:
                         )
 
             if not success:
+                self._mark_lane_progress(
+                    lane or context.mode,
+                    step="resolution",
+                    label="Resolving failure",
+                    detail=str(error or "")[:180],
+                    attempt_id=getattr(attempt, "attempt_id", None),
+                )
                 # Update attempt outcome to FAILED before review so the reviewer sees the actual failure state.
                 storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.FAILED, reason=str(error))
+                fallback_resolution = await determine_resolution(task, error, lane_model, storage)
 
                 review = None
                 try:
-                    review = await generate_plan_review(task, attempt, lane_model, storage)
+                    self._mark_lane_progress(
+                        lane or context.mode,
+                        step="review",
+                        label="Reviewing failed attempt",
+                        detail="Generating plan review",
+                        attempt_id=getattr(attempt, "attempt_id", None),
+                    )
+                    review = await asyncio.wait_for(
+                        generate_plan_review(task, attempt, lane_model, storage),
+                        timeout=8.0,
+                    )
                     storage.attempts.set_plan_review(attempt.attempt_id, review)
                     storage.commit()
                     should_flush = enqueue_attempt_observability_artifact(
@@ -864,7 +987,7 @@ class BackgroundWorker:
                     logger.error(f"Failed to generate failure-time plan review for attempt {attempt.attempt_id}: {review_err}")
 
                 # --- RESOLUTION ---
-                resolution_data = resolution_from_plan_review(review) or await determine_resolution(task, error, lane_model, storage)
+                resolution_data = resolution_from_plan_review(review) or fallback_resolution
                 
                 # Map string resolution to Enum
                 from strata.storage.models import AttemptResolution
@@ -882,7 +1005,7 @@ class BackgroundWorker:
                     storage,
                     metric_name="task_failure",
                     value=1.0,
-                    model_id=f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
+                    model_id=f"{attempt_artifacts.get('provider', 'unknown')}/{attempt_artifacts.get('model', 'unknown')}",
                     task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
                     task_id=task_id,
                     run_mode=run_mode,
@@ -908,7 +1031,7 @@ class BackgroundWorker:
                         storage,
                         metric_name="valid_candidate_rate",
                         value=valid_count / len(candidates),
-                        model_id=f"{attempt.artifacts.get('provider', 'unknown')}/{attempt.artifacts.get('model', 'unknown')}",
+                        model_id=f"{attempt_artifacts.get('provider', 'unknown')}/{attempt_artifacts.get('model', 'unknown')}",
                         task_type=task.type.value if hasattr(task.type, 'value') else str(task.type),
                         task_id=task_id,
                         run_mode=run_mode,
@@ -937,6 +1060,15 @@ class BackgroundWorker:
 
             # --- LIGHTWEIGHT VERIFICATION ---
             try:
+                attempt_id = getattr(attempt, "attempt_id", None)
+                task_id_str = getattr(task, "task_id", None)
+                self._mark_lane_progress(
+                    lane or context.mode,
+                    step="verification",
+                    label="Verifying output",
+                    detail="Checking correctness and quality",
+                    attempt_id=attempt_id,
+                )
                 verification = await verify_task_output(
                     storage,
                     task=task,
@@ -964,10 +1096,27 @@ class BackgroundWorker:
                         )
                     storage.commit()
             except Exception as verifier_err:
-                logger.error(f"Failed to verify attempt {attempt.attempt_id}: {verifier_err}")
+                try:
+                    storage.rollback()
+                except Exception:
+                    pass
+                logger.error(
+                    "Failed to verify attempt %s for task %s: %s",
+                    attempt_id,
+                    task_id_str,
+                    verifier_err,
+                )
             
             # --- REVIEW ---
             try:
+                attempt_id_str = getattr(attempt, "attempt_id", None)
+                self._mark_lane_progress(
+                    lane or context.mode,
+                    step="review",
+                    label="Reviewing branch health",
+                    detail="Updating plan review and attention signals",
+                    attempt_id=attempt_id_str,
+                )
                 existing_review = dict(getattr(attempt, "plan_review", {}) or {})
                 review = existing_review
                 if not review or not str(review.get("recommendation") or "").strip():
@@ -1006,7 +1155,19 @@ class BackgroundWorker:
                     )
                 storage.commit()
             except Exception as review_err:
-                logger.error(f"Failed to generate plan review for attempt {attempt.attempt_id}: {review_err}")
+                try:
+                    storage.rollback()
+                except Exception:
+                    pass
+                logger.error("Failed to generate plan review for attempt %s: %s", attempt_id_str, review_err)
+
+            self._mark_lane_progress(
+                lane or context.mode,
+                step="complete",
+                label="Attempt complete",
+                detail=f"{'succeeded' if success else 'failed'} · {task.state.value.lower()}",
+                attempt_id=getattr(attempt, "attempt_id", None),
+            )
 
         except Exception as e:
             logger.exception(f"Fatal error in _run_task_cycle for {task_id}: {e}")
@@ -1109,9 +1270,20 @@ class BackgroundWorker:
             "tier_health": self._tier_health.get(normalized_lane or "", "unknown"),
             "activity_mode": "UNKNOWN",
             "activity_label": "Unknown",
+            "activity_reason": "",
             "queue_depth": 0,
             "current_task_id": None,
             "current_task_started_at": None,
+            "current_task_title": "",
+            "current_task_state": None,
+            "active_attempt_id": None,
+            "step": "",
+            "step_label": "",
+            "step_detail": "",
+            "step_updated_at": None,
+            "progress_label": "",
+            "recent_steps": [],
+            "ticker_items": [],
             "last_activity_at": None,
             "heartbeat_state": "unknown",
             "heartbeat_age_s": None,
@@ -1130,6 +1302,7 @@ class BackgroundWorker:
             snapshot["current_task_started_at"] = started_at.isoformat()
         if last_activity_at is not None:
             snapshot["last_activity_at"] = last_activity_at.isoformat()
+        snapshot.update(dict(self._lane_activity_details.get(normalized_lane) or {}))
 
         now = datetime.now(timezone.utc)
         if last_activity_at is not None:
@@ -1147,25 +1320,32 @@ class BackgroundWorker:
         if status == "STOPPED":
             snapshot["activity_mode"] = "STOPPED"
             snapshot["activity_label"] = "Stopped"
+            snapshot["activity_reason"] = "Worker is offline."
         elif status == "PAUSED":
             snapshot["activity_mode"] = "PAUSED"
             snapshot["activity_label"] = "Paused"
+            snapshot["activity_reason"] = "Execution is paused."
         elif tier_health == "error":
             snapshot["activity_mode"] = "OFFLINE"
             snapshot["activity_label"] = "Offline"
+            snapshot["activity_reason"] = "Lane health is degraded."
         elif current_task_id:
             if snapshot["heartbeat_state"] == "stalled":
                 snapshot["activity_mode"] = "STALLED"
                 snapshot["activity_label"] = "Stalled"
+                snapshot["activity_reason"] = str(snapshot.get("step_detail") or snapshot.get("step_label") or "Waiting for progress heartbeat.").strip()
             else:
                 snapshot["activity_mode"] = "GENERATING"
                 snapshot["activity_label"] = "Generating"
+                snapshot["activity_reason"] = str(snapshot.get("step_detail") or snapshot.get("step_label") or snapshot.get("current_task_title") or "Making progress.").strip()
         elif snapshot["queue_depth"]:
             snapshot["activity_mode"] = "QUEUED"
             snapshot["activity_label"] = "Queued"
+            snapshot["activity_reason"] = "Runnable work is queued."
         else:
             snapshot["activity_mode"] = "IDLE"
             snapshot["activity_label"] = "Idle"
+            snapshot["activity_reason"] = "No runnable work is queued."
         return snapshot
 
     @property

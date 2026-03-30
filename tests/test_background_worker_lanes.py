@@ -15,6 +15,8 @@ from strata.procedures.registry import queue_procedure
 from strata.schemas.core import TaskDecomposition, TaskFraming
 from strata.storage.models import Base, TaskModel, TaskState, TaskType
 from strata.storage.services.main import StorageManager
+from strata.api.main import GLOBAL_SETTINGS
+from sqlalchemy.exc import OperationalError
 
 
 def make_storage():
@@ -220,6 +222,79 @@ def test_worker_status_includes_lane_runtime_details():
     assert agent_detail["heartbeat_age_s"] is not None
 
 
+def test_worker_status_exposes_live_step_details():
+    storage_factory = make_storage_factory()
+    worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
+    worker._running = True
+    worker._tier_health["agent"] = "ok"
+    worker._current_task_ids["agent"] = "task-123"
+    worker._current_processes["agent"] = object()
+    worker._lane_started_at["agent"] = datetime.now(timezone.utc)
+    worker._lane_last_activity_at["agent"] = datetime.now(timezone.utc)
+    worker._mark_lane_progress(
+        "agent",
+        step="tool_execution",
+        label="Executing research tool",
+        detail="read_file",
+        task_id="task-123",
+        task_title="Procedure: Operator Onboarding",
+        attempt_id="attempt-1",
+        progress_label="tool read_file",
+    )
+
+    agent_detail = worker.status["lane_details"]["agent"]
+
+    assert agent_detail["step"] == "tool_execution"
+    assert agent_detail["step_label"] == "Executing research tool"
+    assert agent_detail["step_detail"] == "read_file"
+    assert agent_detail["active_attempt_id"] == "attempt-1"
+    assert agent_detail["recent_steps"][-1]["label"] == "Executing research tool"
+    assert "Executing research tool: read_file" in agent_detail["ticker_items"][-1]
+
+
+def test_task_and_attempt_creation_retry_after_sqlite_lock(monkeypatch):
+    storage = make_storage()
+    try:
+        from strata.storage import repositories as repositories_pkg
+        import strata.storage.repositories.tasks as task_repo_module
+        import strata.storage.repositories.attempts as attempt_repo_module
+
+        original_task_flush = task_repo_module.flush_with_write_lock
+        original_attempt_flush = attempt_repo_module.flush_with_write_lock
+        task_calls = {"count": 0}
+        attempt_calls = {"count": 0}
+
+        def flaky_task_flush(session, *, enabled):
+            task_calls["count"] += 1
+            if task_calls["count"] == 1:
+                raise OperationalError("insert", {}, Exception("database is locked"))
+            return original_task_flush(session, enabled=enabled)
+
+        def flaky_attempt_flush(session, *, enabled):
+            attempt_calls["count"] += 1
+            if attempt_calls["count"] == 1:
+                raise OperationalError("insert", {}, Exception("database is locked"))
+            return original_attempt_flush(session, enabled=enabled)
+
+        monkeypatch.setattr(task_repo_module, "flush_with_write_lock", flaky_task_flush)
+        monkeypatch.setattr(attempt_repo_module, "flush_with_write_lock", flaky_attempt_flush)
+
+        task = storage.tasks.create(
+            title="Retryable task",
+            description="Should survive a transient sqlite lock.",
+            session_id="agent:default",
+            state=TaskState.PENDING,
+        )
+        attempt = storage.attempts.create(task_id=task.task_id)
+
+        assert task.task_id
+        assert attempt.attempt_id
+        assert task_calls["count"] >= 2
+        assert attempt_calls["count"] >= 2
+    finally:
+        storage.close()
+
+
 def test_lane_idle_policies_seed_strong_supervision_independently(monkeypatch):
     storage_factory = make_storage_factory()
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
@@ -275,6 +350,10 @@ def test_lane_idle_policies_can_seed_weak_even_when_other_lane_is_busy(monkeypat
     asyncio.run(worker._ensure_lane_idle_policies({"automatic_task_generation": True, "testing_mode": False}))
 
     assert calls == ["agent"]
+
+
+def test_runtime_defaults_replay_pending_tasks_on_startup():
+    assert GLOBAL_SETTINGS["replay_pending_tasks_on_startup"] is True
 
 
 def test_run_idle_tasks_seeds_onboarding_before_alignment(monkeypatch):
@@ -362,6 +441,7 @@ def test_run_decomposition_raises_when_no_actionable_subtasks():
         raise AssertionError("Expected empty decomposition to raise")
     except RuntimeError as exc:
         assert "no actionable subtasks" in str(exc).lower()
+        assert "recoverable planning failure" in str(exc).lower()
 
 
 def test_run_decomposition_rejects_generic_recovery_shell_subtasks():
@@ -383,7 +463,57 @@ def test_run_decomposition_rejects_generic_recovery_shell_subtasks():
         asyncio.run(_run_decomposition(task, storage, GenericRecoveryDecompModel(), enqueue_fn))
         raise AssertionError("Expected generic recovery placeholder to be rejected")
     except RuntimeError as exc:
-        assert "generic recovery placeholders" in str(exc).lower()
+        assert "recoverable planning failure" in str(exc).lower()
+
+
+def test_run_decomposition_falls_back_to_procedure_checklist_subtasks():
+    storage = make_storage()
+    root = storage.tasks.create(
+        title="Procedure: Operator Onboarding",
+        description="Run onboarding.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={
+            "lane": "agent",
+            "procedure_id": "operator_onboarding",
+            "procedure_title": "Operator Onboarding",
+            "procedure_checklist": [
+                {
+                    "id": "agent_name",
+                    "title": "Choose or confirm the agent name",
+                    "verification": "Session metadata contains participant names.",
+                },
+                {
+                    "id": "runtime_posture",
+                    "title": "Confirm runtime posture",
+                    "verification": "Runtime posture is durably recorded or queued.",
+                },
+            ],
+        },
+    )
+    decomp_task = storage.tasks.create(
+        title="Recovery Plan for Procedure: Operator Onboarding",
+        description="Create a bounded recovery plan.",
+        session_id="agent:default",
+        parent_task_id=root.task_id,
+        state=TaskState.PENDING,
+        constraints={"lane": "agent", "recovery_focus_task_id": root.task_id},
+    )
+    decomp_task.type = TaskType.DECOMP
+    storage.commit()
+
+    queued = []
+
+    async def enqueue_fn(task_id):
+        queued.append(task_id)
+
+    asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
+
+    created = [task for task in storage.session.query(TaskModel).all() if task.parent_task_id == decomp_task.task_id]
+    assert len(created) == 2
+    assert all(task.type == TaskType.RESEARCH for task in created)
+    assert all("procedure_checklist_item" in dict(task.constraints or {}) for task in created)
+    assert len(queued) == 2
 
 
 def test_blocked_weak_task_review_skips_when_no_new_evidence_after_review():

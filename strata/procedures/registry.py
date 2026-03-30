@@ -1,6 +1,6 @@
 """
 @module procedures.registry
-@purpose Durable procedure definitions and queue helpers.
+@purpose Durable Procedure definitions and queue helpers.
 """
 
 from __future__ import annotations
@@ -134,7 +134,10 @@ def save_procedure(storage, definition: Dict[str, Any]) -> Dict[str, Any]:
     storage.parameters.set_parameter(
         PROCEDURE_REGISTRY_KEY,
         {"procedures": procedures},
-        description="Durable registry of reusable procedures such as onboarding or maintenance checklists.",
+        description=(
+            "Durable registry of reusable Procedure artifacts such as onboarding or maintenance workflows. "
+            "A Procedure is a first-class reusable workflow artifact, not merely ordinary prose about a procedure."
+        ),
     )
     return normalized
 

@@ -2,6 +2,17 @@
 
 Minimal recursive work model for agentic systems.
 
+Naming note:
+
+- capitalized architecture terms refer to named first-class system artifacts or subsystems
+- lowercase terms refer to the generic activity or concept
+
+Examples:
+
+- `Procedure` != procedure
+- `Verifier` != verifier
+- `Audit` != audit
+
 ## 1. Purpose
 
 Define a simple, consistent model for representing work in a recursive system where:
@@ -9,6 +20,7 @@ Define a simple, consistent model for representing work in a recursive system wh
 - all meaningful objectives are `tasks`
 - all variance-bearing execution happens through `attempts`
 - deterministic fallout is still recorded, but is not confused with retryable learning
+- durable reusable workflow artifacts can capture successful decompositions as first-class `Procedure`s
 - success or failure is evaluated at explicit boundaries
 - parent tasks can route around failing children
 - root tasks cannot be bypassed
@@ -25,10 +37,13 @@ The system consists of:
   One variance-bearing invocation against a task.
 - `execution record`
   A record of one concrete invocation or step, whether deterministic or non-deterministic.
+- `Procedure`
+  A durable, reusable, mutable workflow artifact that can instantiate tasks and preserve how a class of work should be done.
 
 ### 2.2 Key principles
 
 - Tasks persist. Attempts end.
+- Procedures persist across many tasks and can be refined as the system learns better decompositions.
 - A task should be oneshottable at its own abstraction level.
 - If progress requires a second semantically different non-deterministic step, the task was underspecified and should decompose.
 - Deterministic work may surround an attempt, but does not become a new attempt just by taking time.
@@ -134,6 +149,23 @@ This means a task that really needs:
 3. validate
 
 should decompose into three tasks rather than accumulate three progressive attempts under one task.
+
+### 4.5 Procedures and decomposition
+
+A successful decomposition pattern should not remain trapped inside one branch forever.
+
+When the system repeatedly learns that a class of work decomposes in a stable way, that reusable process should be promoted into a `Procedure` artifact:
+
+- `procedure`
+  generic English description of a process
+- `Procedure`
+  a named system artifact with identity, instructions, checklist structure, success criteria, and eventually reusable subtask structure
+
+In other words:
+
+- tasks are the live work instances
+- attempts are the variance-bearing shots on those tasks
+- Procedures are the durable memory of how similar work should be structured in the future
 
 ### 4.3 Attempt fields
 

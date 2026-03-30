@@ -34,6 +34,21 @@ class TaskType(PyEnum):
     DECOMP = "DECOMP"
     JUDGE = "JUDGE"
 
+
+def task_state_api_value(state: object) -> str:
+    raw = getattr(state, "value", state)
+    normalized = str(raw or "").strip().lower()
+    if normalized == "pushed":
+        return "decomposed"
+    return normalized
+
+
+def task_state_display_label(state: object) -> str:
+    normalized = task_state_api_value(state)
+    if normalized == "decomposed":
+        return "Children in progress"
+    return normalized.replace("_", " ").title()
+
 class AttemptOutcome(PyEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -287,6 +302,33 @@ class AttemptObservabilityArtifactModel(Base):
     session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     artifact_kind: Mapped[str] = mapped_column(String, index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+class FeedbackSignalModel(Base):
+    """
+    @summary Append-only durable feedback and attention signals.
+    """
+    __tablename__ = "feedback_signals"
+    __table_args__ = (
+        Index("ix_feedback_signals_session_created", "session_id", "created_at"),
+        Index("ix_feedback_signals_source_created", "source_type", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    source_type: Mapped[str] = mapped_column(String, index=True)
+    source_id: Mapped[str] = mapped_column(String, index=True)
+    signal_kind: Mapped[str] = mapped_column(String, index=True)
+    signal_value: Mapped[str] = mapped_column(String)
+    source_actor: Mapped[str] = mapped_column(String, default="system")
+    session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    source_preview: Mapped[str] = mapped_column(String, default="")
+    note: Mapped[str] = mapped_column(String, default="")
+    expected_outcome: Mapped[str] = mapped_column(String, default="")
+    observed_outcome: Mapped[str] = mapped_column(String, default="")
+    signal_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    prioritization: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String, default="logged", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 class ToolExecutionEventModel(Base):

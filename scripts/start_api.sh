@@ -7,4 +7,4 @@ if [ -f .env.local ]; then
   set +a
 fi
 
-PYTHONPATH=. ./venv/bin/python strata/api/main.py
+PYTHONPATH=. ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000

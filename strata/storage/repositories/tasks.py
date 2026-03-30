@@ -7,10 +7,14 @@
 """
 
 from typing import List, Optional
+import time
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from uuid import uuid4
 from strata.storage.models import TaskModel, TaskState
 from strata.core.lanes import infer_lane_from_session_id, infer_lane_from_task, normalize_lane
+from strata.storage.sqlite_write import flush_with_write_lock, is_sqlite_locked_error
 
 class TaskRepository:
     """
@@ -29,7 +33,7 @@ class TaskRepository:
         """
         self.session = session
 
-    def create(self, **kwargs) -> TaskModel:
+    def create(self, *, flush: bool = True, **kwargs) -> TaskModel:
         """
         @summary Instantiate and persist a new TaskModel.
         @inputs dictionary of task attributes
@@ -47,10 +51,23 @@ class TaskRepository:
         if explicit_lane:
             constraints["lane"] = explicit_lane
         kwargs["constraints"] = constraints
-        task = TaskModel(**kwargs)
-        self.session.add(task)
-        self.session.flush() # Ensure ID is generated
-        return task
+        kwargs.setdefault("task_id", str(uuid4()))
+        bind = getattr(self.session, "bind", None)
+        sqlite_enabled = str(getattr(getattr(bind, "url", None), "drivername", "") or "").startswith("sqlite")
+        retries = 8 if sqlite_enabled and flush else 1
+        for index in range(retries):
+            task = TaskModel(**kwargs)
+            self.session.add(task)
+            try:
+                if flush:
+                    flush_with_write_lock(self.session, enabled=sqlite_enabled)  # Ensure ID is generated
+                return task
+            except OperationalError as exc:
+                self.session.rollback()
+                if not sqlite_enabled or not is_sqlite_locked_error(exc) or index >= retries - 1:
+                    raise
+                time.sleep(0.15 * (index + 1))
+        raise RuntimeError("Task creation retries exhausted.")
 
     def get_by_id(self, task_id: str) -> Optional[TaskModel]:
         """

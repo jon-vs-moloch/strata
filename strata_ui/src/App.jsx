@@ -12,6 +12,8 @@ import {
 
 const MotionDiv = motion.div;
 const MotionSpan = motion.span;
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0';
+const APP_CHANNEL = typeof __APP_CHANNEL__ === 'string' ? __APP_CHANNEL__ : 'dev';
 const NonChatContent = lazy(() => import('./views/NonChatContent'));
 const LazySettingsView = lazy(() => import('./views/SettingsView'));
 const MarkdownMessageBody = lazy(() => import('./components/MarkdownMessageBody'));
@@ -97,6 +99,7 @@ const defaultLaneDetail = {
   tier_health: 'unknown',
   activity_mode: 'IDLE',
   activity_label: 'Idle',
+  activity_reason: '',
   queue_depth: 0,
   runnable_count: 0,
   blocked_count: 0,
@@ -108,6 +111,13 @@ const defaultLaneDetail = {
   current_task_updated_at: null,
   active_attempt_id: null,
   active_attempt_started_at: null,
+  step: '',
+  step_label: '',
+  step_detail: '',
+  step_updated_at: null,
+  progress_label: '',
+  recent_steps: [],
+  ticker_items: [],
   heartbeat_state: 'unknown',
   heartbeat_age_s: null,
 };
@@ -2055,11 +2065,16 @@ function App() {
     const route = routingSummary?.[lane] || null;
     if (route?.error) return route.error;
     const taskTitle = laneCurrentTaskTitles?.[lane] || '';
-    const activityLabel = String(laneDetail.activity_label || laneDetail.activity_mode || 'Idle').trim();
     const heartbeatLabel = formatLaneHeartbeat(laneDetail);
+    const stepLabel = String(laneDetail.step_label || '').trim();
+    const stepDetail = String(laneDetail.step_detail || '').trim();
+    const activityReason = String(laneDetail.activity_reason || '').trim();
+    const activityMode = String(laneDetail.activity_mode || '').trim().toUpperCase();
     const parts = [
-      activityLabel,
-      taskTitle || '',
+      taskTitle || (activityMode === 'IDLE' ? 'No active task' : ''),
+      activityMode === 'STALLED'
+        ? (activityReason || stepDetail || stepLabel || 'Waiting for progress heartbeat')
+        : '',
       heartbeatLabel,
       friendlyTransportLabel(route?.transport),
       friendlyProviderLabel(route?.provider),
@@ -2127,11 +2142,24 @@ function App() {
     const root = path[0];
     if (!root) {
       const blocked = tasks.filter((task) => laneForTask(task) === scopeId && task.status === 'blocked').length;
+      const laneMode = String(laneDetail?.activity_mode || '').trim().toUpperCase();
+      const stalledReason = String(laneDetail?.step_detail || laneDetail?.step_label || '').trim();
+      const laneTaskTitle = String(laneCurrentTaskTitles?.[scopeId] || '').trim();
+      const stateLabel = laneMode === 'STALLED'
+        ? (stalledReason || 'waiting for progress')
+        : blocked > 0
+        ? 'blocked'
+        : laneMode === 'QUEUED'
+        ? 'queued'
+        : laneMode === 'GENERATING'
+        ? 'generating'
+        : 'idle';
       return {
         percent: 0,
-        summary: buildLaneMeta(scopeId),
-        currentTitle: laneCurrentTaskTitles?.[scopeId] || (blocked > 0 ? `${blocked} blocked` : 'Idle'),
-        label: laneCurrentTaskTitles?.[scopeId] || (blocked > 0 ? `${blocked} blocked` : 'Idle'),
+        summary: '',
+        currentTitle: laneTaskTitle || (blocked > 0 ? `${blocked} blocked task${blocked === 1 ? '' : 's'}` : 'No active task'),
+        currentStateLabel: stateLabel,
+        label: laneTaskTitle || 'No active task',
         countLabel: blocked > 0 ? 'Needs attention' : (laneDetail?.activity_label || 'No active task'),
         pathSegments: [],
         taskActionable: blocked > 0,
@@ -2175,10 +2203,12 @@ function App() {
       currentTitle: leafTitle,
       currentStateLabel: leafPaused
         ? 'paused'
+        : leaf.status === 'pushed'
+        ? 'children in progress'
         : laneActivityMode === 'GENERATING'
         ? 'generating'
         : laneActivityMode === 'STALLED'
-        ? 'stalled'
+        ? (String(laneDetail?.step_detail || laneDetail?.step_label || '').trim() || 'waiting for progress')
         : blockedDescendants > 0
         ? 'blocked'
         : leaf.status === 'pending'
@@ -2188,6 +2218,8 @@ function App() {
         : '',
       label: leafPaused
         ? `${leafTitle} · paused`
+        : leaf.status === 'pushed'
+        ? `${leafTitle} · decomposed`
         : blockedDescendants > 0
         ? `${leafTitle} · blocked`
         : leaf.status === 'working'
@@ -2248,7 +2280,7 @@ function App() {
       )}
 
       <div style={{ padding: '12px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)', background: '#09090b', flexShrink: 0, boxShadow: 'inset 0 -1px 0 rgba(255,255,255,0.02)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', width: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', width: '100%', minWidth: 0, overflow: 'hidden' }}>
           <button
             type="button"
             onClick={() => {
@@ -2257,7 +2289,7 @@ function App() {
               setScopeSessionIds((prev) => ({ ...prev, home: prev.home || sessionId }));
             }}
             style={{
-              minWidth: '180px',
+              minWidth: '160px',
               display: 'flex',
               alignItems: 'center',
               gap: '12px',
@@ -2275,9 +2307,12 @@ function App() {
               <div style={{ fontSize: '16px', fontWeight: 800, letterSpacing: '0.04em', color: '#f0f1f7' }}>
                 Strata
               </div>
+              <div style={{ fontSize: '10px', fontWeight: 700, letterSpacing: '0.08em', color: '#7d8296', textTransform: 'uppercase' }}>
+                v{APP_VERSION} | {APP_CHANNEL}
+              </div>
             </div>
           </button>
-          <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px', width: '100%', minWidth: 0 }}>
           {topTabs.map((tab) => {
             const active = currentScope === tab.id;
             const showGlobalControls = tab.id === 'home';
@@ -2294,6 +2329,9 @@ function App() {
                 accent={tab.accent}
                 active={active}
                 detail={tab.id === 'home' ? loopMeta : buildLaneMeta(tab.id)}
+                tickerItems={tab.id === 'home'
+                  ? [...(laneDetails?.trainer?.ticker_items || []), ...(laneDetails?.agent?.ticker_items || [])].slice(-10)
+                  : (laneDetails?.[tab.id]?.ticker_items || [])}
                 status={tab.id === 'home' ? workerStatus : (laneDetails?.[tab.id]?.activity_mode || laneStatuses?.[tab.id] || 'IDLE')}
                 agentEnabled={agentEnabled}
                 agentSuppressedByGlobal={agentSuppressedByGlobal}
@@ -2872,6 +2910,79 @@ const TelemetryCell = ({ value, label }) => (
   </div>
 );
 
+const TickerStrip = ({ text, active }) => {
+  const content = String(text || '').trim();
+  const containerRef = useRef(null);
+  const contentRef = useRef(null);
+  const [shouldScroll, setShouldScroll] = useState(false);
+  const repeated = `${content}   •   ${content}   •   ${content}`;
+  if (!content) return null;
+
+  useEffect(() => {
+    const measure = () => {
+      const container = containerRef.current;
+      const inner = contentRef.current;
+      if (!container || !inner) return;
+      setShouldScroll(inner.scrollWidth > container.clientWidth - 20);
+    };
+    measure();
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
+    }
+    return undefined;
+  }, [content, repeated]);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        position: 'relative',
+        overflow: 'hidden',
+        borderRadius: '999px',
+        border: `1px solid ${active ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.08)'}`,
+        background: active ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
+        height: '22px',
+        display: 'flex',
+        alignItems: 'center',
+      }}
+    >
+      <MotionDiv
+        ref={contentRef}
+        animate={shouldScroll ? { x: ['0%', '-33.333%'] } : { x: '0%' }}
+        transition={shouldScroll ? { duration: 18, ease: 'linear', repeat: Infinity } : { duration: 0 }}
+        style={{
+          display: 'inline-flex',
+          whiteSpace: 'nowrap',
+          fontSize: '10px',
+          color: active ? 'rgba(245,246,251,0.76)' : '#98a0b6',
+          fontFamily: "'JetBrains Mono', monospace",
+          paddingLeft: '10px',
+          gap: '24px',
+          minWidth: 'max-content',
+        }}
+      >
+        <span>{shouldScroll ? repeated : content}</span>
+      </MotionDiv>
+    </div>
+  );
+};
+
+const condenseTickerItems = (items) => {
+  const source = Array.isArray(items) ? items : [];
+  const condensed = [];
+  const seen = new Set();
+  for (const item of source) {
+    const text = String(item || '').trim();
+    if (!text) continue;
+    if (condensed[condensed.length - 1] === text) continue;
+    if (seen.has(text)) continue;
+    condensed.push(text);
+    seen.add(text);
+  }
+  return condensed;
+};
+
 const DashboardPanel = ({ title, children }) => (
   <div style={{ background: '#141418', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '14px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
     <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>{title}</div>
@@ -2885,6 +2996,7 @@ const TopModeTab = ({
   onClick,
   accent = 'neutral',
   detail = '',
+  tickerItems = [],
   status = '',
   agentEnabled = true,
   agentSuppressedByGlobal = false,
@@ -2954,13 +3066,13 @@ const TopModeTab = ({
   const progressValue = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
   const taskPaused = Boolean(progress?.taskPaused);
   const pathSegments = Array.isArray(progress?.pathSegments) ? progress.pathSegments : [];
-  const topObjective = stripInlineMarkdown(progress?.summary || detail || '');
+  const topObjective = stripInlineMarkdown(progress?.summary || '');
   const currentObjective = stripInlineMarkdown(progress?.currentTitle || '');
   const currentStateLabel = String(progress?.currentStateLabel || '').trim();
-  const currentObjectiveDisplay = currentObjective
-    ? `${currentObjective}${currentStateLabel ? ` · ${currentStateLabel}` : ''}`
-    : '';
-  const showSplitObjectives = Boolean(topObjective && currentObjective && topObjective !== currentObjective);
+  const currentObjectiveDisplay = currentObjective || '';
+  const tickerText = condenseTickerItems(tickerItems)
+    .slice(-8)
+    .join('   •   ');
   const singleLineObjective = currentObjectiveDisplay || topObjective || 'No active task';
   const agentActivelyRunnable = agentEnabled && !agentSuppressedByGlobal && apiStatus === 'ok';
   const taskControlsEnabled = Boolean(showControls && apiStatus === 'ok' && progress?.taskActionable);
@@ -3074,12 +3186,14 @@ const TopModeTab = ({
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', fontSize: '10px' }}>
-          <span style={{ color: active ? 'rgba(245,246,251,0.72)' : '#7d8296', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: showSplitObjectives ? '0 1 42%' : '1 1 auto' }}>
-            {showSplitObjectives ? topObjective : singleLineObjective}
+          <span style={{ color: active ? 'rgba(245,246,251,0.72)' : '#7d8296', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: '1 1 auto' }}>
+            {singleLineObjective}
           </span>
-          <span style={{ color: active ? 'rgba(245,246,251,0.82)' : '#a6abc0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', textAlign: 'right', flex: showSplitObjectives ? '1 1 58%' : '0 0 auto' }}>
-            {showSplitObjectives ? currentObjectiveDisplay : ''}
-          </span>
+          {currentStateLabel && (
+            <span style={{ color: active ? 'rgba(245,246,251,0.6)' : '#7d8296', whiteSpace: 'nowrap', flexShrink: 0, textTransform: 'capitalize' }}>
+              {currentStateLabel}
+            </span>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           {pathSegments.slice(0, -1).length > 0 && (
@@ -3176,6 +3290,7 @@ const TopModeTab = ({
             </div>
           )}
         </div>
+        <TickerStrip text={tickerText || singleLineObjective || 'No recent activity'} active={active} />
       </div>
     </div>
   );

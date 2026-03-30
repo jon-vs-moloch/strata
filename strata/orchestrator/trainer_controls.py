@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from strata.storage.models import TaskModel, TaskState
+from strata.storage.models import TaskModel, TaskState, task_state_api_value, task_state_display_label
 
 
 def _now() -> str:
@@ -34,7 +34,8 @@ def _task_summary(task: Optional[TaskModel]) -> Optional[Dict[str, Any]]:
     return {
         "task_id": task.task_id,
         "title": task.title,
-        "state": getattr(task.state, "value", str(task.state)),
+        "state": task_state_api_value(task.state),
+        "state_label": task_state_display_label(task.state),
         "type": getattr(task.type, "value", str(task.type)),
         "session_id": task.session_id,
         "lane": constraints.get("lane"),

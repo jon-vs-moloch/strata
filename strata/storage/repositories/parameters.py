@@ -9,6 +9,7 @@
 from typing import Any, Optional
 from sqlalchemy.orm import Session
 from strata.storage.models import ParameterModel
+from strata.storage.sqlite_write import flush_with_write_lock
 
 MAX_PARAMETER_HISTORY = 50
 
@@ -29,6 +30,10 @@ class ParameterRepository:
     def __init__(self, session: Session):
         self.session = session
 
+    def _sqlite_enabled(self) -> bool:
+        bind = getattr(self.session, "bind", None)
+        return str(getattr(getattr(bind, "url", None), "drivername", "") or "").startswith("sqlite")
+
     def get_parameter(self, key: str, default_value: Any, description: str = "") -> Any:
         """
         @summary Fetch a parameter value. If it doesn't exist, create it with the default.
@@ -43,7 +48,7 @@ class ParameterRepository:
                 value={"current": default_value, "history": []}
             )
             self.session.add(param)
-            self.session.flush() # ensure it gets an ID but dont commit yet
+            flush_with_write_lock(self.session, enabled=self._sqlite_enabled())  # ensure it gets an ID but dont commit yet
         
         # Track usage
         param.usage_count += 1
@@ -101,7 +106,7 @@ class ParameterRepository:
                 value={"current": value, "history": []}
             )
             self.session.add(param)
-            self.session.flush()
+            flush_with_write_lock(self.session, enabled=self._sqlite_enabled())
             return
 
         param.description = description or param.description

@@ -139,7 +139,15 @@ Follow-up work remains and should stay on the roadmap:
 - add lineage-level rollups/materialized summaries so the UI and agents can read branch pressure cheaply
 - make trainer/self-review jobs consume observability artifacts and attempt intelligence more explicitly
 - continue shaping raw observability into ergonomic summary surfaces that weak models can use without reconstructing state by hand
+- keep sharpening lane/runtime visibility so labels like `stalled`, `queued`, and `children in progress` always resolve to an explicit reason such as transport wait, database contention, missing progress heartbeat, or child-task handoff
+- keep refining `Procedure` execution so successful decompositions and reusable partial progress can fold back into durable `Procedure` artifacts instead of staying one-off runtime branches
 - treat mutable config fields as a first-class evolutionary search surface so bootstrap can explore deterministic config mutations before falling back to prompt or code mutation
+- add explicit inference-throttle postures (`hard` and `greedy`) and provider-limit probing so the system can distinguish strict ceilings from adaptive best-effort operation
+- add operator-comfort sensing and policy loops for local inference, including comfort-oriented targets such as fan-noise avoidance, memory-pressure avoidance, and other "not annoying" runtime constraints
+- split overloaded task `session_id` semantics into distinct concepts such as `workstream_id`, `source_session_id`, and lane ownership so task provenance, chat affinity, and execution routing stop sharing one field
+- add a signed desktop `alpha` updater/distribution channel so packaged desktop installs stay in lockstep with rapid internal iteration without manual rebuild/reinstall churn
+- harden the desktop launcher path so detached startup is as reliable and observable as foreground startup, with clear logs and safe recovery when the backend fails to stay bound to its port
+- if SQLite continues to interfere with core task/attempt control flow after hot-path write-shape hardening, graduate runtime state to Postgres rather than continuing to accumulate lock workarounds
 
 ### Phase 2. Managed Engine Supervision
 

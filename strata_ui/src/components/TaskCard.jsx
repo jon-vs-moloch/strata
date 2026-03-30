@@ -13,7 +13,7 @@ const STATUS_MAP = {
   blocked:             { bg: 'rgba(255,184,77,0.1)',  color: '#ffb84d', label: 'Blocked',     progress: '30%'  },
   abandoned:           { bg: 'rgba(255,153,0,0.1)',   color: '#ff9900', label: 'Abandoned',   progress: '100%' },
   cancelled:           { bg: 'rgba(148,153,173,0.1)', color: '#9499ad', label: 'Cancelled',   progress: '100%' },
-  pushed:              { bg: 'rgba(130,87,229,0.1)',  color: '#8257e5', label: 'Pushed',      progress: '10%'  },
+  pushed:              { bg: 'rgba(130,87,229,0.1)',  color: '#8257e5', label: 'Decomposed',  progress: '10%'  },
 };
 const DEFAULT_STATUS = { bg: 'rgba(148,153,173,0.1)', color: '#9499ad', label: 'Pending', progress: '0%' };
 
@@ -94,7 +94,7 @@ function stripInlineMarkdown(content) {
     .trim();
 }
 
-const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs }) => {
+const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs, laneDetail = null, detailLevel = 'compact' }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
   if (tasks.length === 0) return null;
 
@@ -120,7 +120,7 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs }) 
             exit={{ height: 0, opacity: 0 }}
             style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
           >
-            {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} nowMs={nowMs} />)}
+            {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />)}
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -128,7 +128,7 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs }) 
   );
 };
 
-const OlderAttemptsGroup = ({ attempts, taskUpdatedAt, nowMs, totalAttempts }) => {
+const OlderAttemptsGroup = ({ attempts, taskUpdatedAt, nowMs, totalAttempts, laneDetail = null, taskId = null, detailLevel = 'compact' }) => {
   const [expanded, setExpanded] = useState(false);
   if (!attempts.length) return null;
 
@@ -169,12 +169,15 @@ const OlderAttemptsGroup = ({ attempts, taskUpdatedAt, nowMs, totalAttempts }) =
               <AttemptRow
                 key={attempt.id}
                 attempt={attempt}
+                taskId={taskId}
                 index={idx + 4}
                 totalAttempts={totalAttempts}
                 taskUpdatedAt={taskUpdatedAt}
                 defaultExpanded={false}
                 nowMs={nowMs}
                 hasNewerAttempt={true}
+                laneDetail={laneDetail}
+                detailLevel={detailLevel}
               />
             ))}
           </MotionDiv>
@@ -267,7 +270,95 @@ const InterventionWidget = ({ taskId, taskSessionId, taskLane, pendingQuestion, 
   );
 };
 
-const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now() }) => {
+const StepHistoryPanel = ({ steps, detailLevel = 'compact', defaultExpanded = false }) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const entries = Array.isArray(steps) ? steps.filter(Boolean) : [];
+  if (!entries.length) return null;
+  const previewCount = detailLevel === 'full' ? Math.min(entries.length, 6) : Math.min(entries.length, 3);
+  const preview = entries.slice(-previewCount).reverse();
+  const visible = expanded || detailLevel === 'full' ? entries.slice().reverse() : preview;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+        <div style={{ fontSize: '10px', color: '#8b8d9e', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+          Step History · {entries.length}
+        </div>
+        {entries.length > previewCount && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            style={{
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              borderRadius: '999px',
+              color: '#c7c8d6',
+              fontSize: '10px',
+              padding: '4px 8px',
+              cursor: 'pointer',
+            }}
+          >
+            {expanded ? 'Show Recent' : 'Show All'}
+          </button>
+        )}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        {visible.map((step, index) => (
+          <StepHistoryRow key={`${step.at || 'step'}-${index}`} step={step} defaultExpanded={detailLevel === 'full' && index === 0} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const StepHistoryRow = ({ step, defaultExpanded = false }) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const label = String(step?.label || step?.step || 'Step').trim();
+  const detail = String(step?.detail || '').trim();
+  const at = String(step?.at || '').trim();
+  const hasMore = Boolean(detail);
+  return (
+    <div style={{ borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.02)' }}>
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        style={{
+          width: '100%',
+          background: 'none',
+          border: 'none',
+          padding: '8px 10px',
+          color: '#d9dbe7',
+          cursor: hasMore ? 'pointer' : 'default',
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: '10px',
+          textAlign: 'left',
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 }}>
+          <div style={{ fontSize: '11px', fontWeight: 700, color: '#e7e8ef' }}>{label}</div>
+          {detail && (
+            <div style={{ fontSize: '10px', color: '#8dcfff', fontFamily: "'JetBrains Mono', monospace", whiteSpace: expanded ? 'pre-wrap' : 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {detail}
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+          {at && <span style={{ fontSize: '10px', color: '#777' }}>{formatRelative(at)}</span>}
+          {hasMore ? (expanded ? <ChevronDown size={12} color="#777" /> : <ChevronRight size={12} color="#777" />) : null}
+        </div>
+      </button>
+      {expanded && detail && (
+        <div style={{ padding: '0 10px 10px', fontSize: '10px', color: '#aab0c4', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {detail}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact' }) => {
   const defaultExpanded = useMemo(() => !TERMINAL_STATUSES.has(task.status), [task.status]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
@@ -447,24 +538,35 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
                   <AttemptRow
                     key={attempt.id}
                     attempt={attempt}
+                    taskId={task.id}
                     index={idx + 1}
                     totalAttempts={attempts.length}
                     taskUpdatedAt={task.updated_at}
                     defaultExpanded={idx === 0 || attempt.outcome !== 'failed'}
                     nowMs={nowMs}
                     hasNewerAttempt={idx > 0}
+                    laneDetail={laneDetail}
+                    detailLevel={detailLevel}
                   />
                 ))}
                 {olderAttempts.length > 0 && (
-                  <OlderAttemptsGroup attempts={olderAttempts} taskUpdatedAt={task.updated_at} nowMs={nowMs} totalAttempts={attempts.length} />
+                  <OlderAttemptsGroup
+                    attempts={olderAttempts}
+                    taskUpdatedAt={task.updated_at}
+                    nowMs={nowMs}
+                    totalAttempts={attempts.length}
+                    laneDetail={laneDetail}
+                    taskId={task.id}
+                    detailLevel={detailLevel}
+                  />
                 )}
                </div>
             )}
             
             {/* Grouped Child Tasks */}
-            <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} />
-            <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} nowMs={nowMs} />
-            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} />
+            <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />
+            <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />
+            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -472,7 +574,7 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
   );
 };
 
-const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpanded = false, nowMs, hasNewerAttempt = false }) => {
+const AttemptRow = ({ attempt, taskId, index, totalAttempts, taskUpdatedAt, defaultExpanded = false, nowMs, hasNewerAttempt = false, laneDetail = null, detailLevel = 'compact' }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
   const hasOpenAttempt = !attempt.ended_at && !attempt.outcome;
@@ -487,8 +589,19 @@ const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpan
       : false
   );
   const isActive = hasOpenAttempt && !staleOpenAttempt && !hasNewerAttempt;
+  const liveAttemptMatch = isActive
+    && laneDetail
+    && String(laneDetail.current_task_id || '') === String(taskId || '')
+    && String(laneDetail.active_attempt_id || '') === String(attempt.id || '');
   const displayAttemptNumber = Math.max(1, (Number(totalAttempts) || 0) - index + 1);
   const artifacts = attempt.artifacts && typeof attempt.artifacts === 'object' ? attempt.artifacts : null;
+  const artifactDisplay = artifacts ? { ...artifacts } : null;
+  const persistedSteps = Array.isArray(artifacts?.step_history) ? artifacts.step_history : [];
+  if (artifactDisplay && Array.isArray(artifactDisplay.step_history)) {
+    delete artifactDisplay.step_history;
+  }
+  const liveSteps = liveAttemptMatch && Array.isArray(laneDetail?.recent_steps) ? laneDetail.recent_steps : [];
+  const stepHistory = liveSteps.length ? liveSteps : persistedSteps;
   const summaryBits = [];
   if (artifacts?.job_kind) summaryBits.push(`job ${artifacts.job_kind}`);
   if (artifacts?.duration_s) summaryBits.push(`${Number(artifacts.duration_s).toFixed(1)}s`);
@@ -496,6 +609,7 @@ const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpan
   if (artifacts?.provider || artifacts?.model) summaryBits.push(`${artifacts.provider || 'model'} / ${artifacts.model || 'unknown'}`);
   if (attempt.plan_review?.plan_health) summaryBits.push(`plan ${attempt.plan_review.plan_health}`);
   if (attempt.plan_review?.recommendation) summaryBits.push(`review ${String(attempt.plan_review.recommendation).replace(/_/g, ' ')}`);
+  if (liveAttemptMatch && laneDetail?.step_label) summaryBits.push(`live ${String(laneDetail.step_label).toLowerCase()}`);
   const isFailedAttempt = attempt.outcome === 'failed' || staleOpenAttempt;
   const collapseableFailedAttempt = isFailedAttempt && index > 1;
   return (
@@ -547,9 +661,18 @@ const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpan
               {isActive ? `Running for ${formatElapsed(attempt.started_at)}` : staleOpenAttempt ? `Open for ${formatElapsed(attempt.started_at)}` : `Ran for ${formatElapsed(attempt.started_at, attempt.ended_at)}`}
             </div>
             <div style={{ fontSize: '10px', color: isActive ? (recentlyActive ? '#00f294' : '#777') : staleOpenAttempt ? '#ffb84d' : '#777' }}>
-              {isActive ? (recentlyActive ? 'actively updating' : 'no recent heartbeat') : supersededOpenAttempt ? 'newer attempt exists' : staleOpenAttempt ? 'stale open attempt' : `ended ${formatRelative(attempt.ended_at)}`}
+              {isActive
+                ? (liveAttemptMatch && laneDetail?.step_label
+                  ? `${laneDetail.step_label}${laneDetail.progress_label ? ` · ${laneDetail.progress_label}` : ''}`
+                  : (recentlyActive ? 'actively updating' : 'no recent heartbeat'))
+                : supersededOpenAttempt ? 'newer attempt exists' : staleOpenAttempt ? 'stale open attempt' : `ended ${formatRelative(attempt.ended_at)}`}
             </div>
           </div>
+          {liveAttemptMatch && (laneDetail?.step_detail || laneDetail?.step_updated_at) && (
+            <div style={{ fontSize: '10px', color: '#8ddfff', marginTop: '4px', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {[laneDetail?.step_detail, laneDetail?.step_updated_at ? `updated ${formatRelative(laneDetail.step_updated_at)}` : ''].filter(Boolean).join(' · ')}
+            </div>
+          )}
           {summaryBits.length > 0 && (
             <div style={{ fontSize: '10px', color: '#666', marginTop: '4px', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {summaryBits.join(' · ')}
@@ -589,12 +712,17 @@ const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpan
                   <span>Confidence: {attempt.plan_review.confidence ?? '—'}</span>
                 </div>
               )}
-              {artifacts && (
+              <StepHistoryPanel
+                steps={stepHistory}
+                detailLevel={detailLevel}
+                defaultExpanded={detailLevel === 'full' && Boolean(stepHistory.length)}
+              />
+              {artifactDisplay && Object.keys(artifactDisplay).length > 0 && (
                 <div style={{ fontSize: '10px', color: '#8b8d9e', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                  {JSON.stringify(artifacts, null, 2)}
+                  {JSON.stringify(artifactDisplay, null, 2)}
                 </div>
               )}
-              {!attempt.reason && !artifacts && (
+              {!attempt.reason && (!artifactDisplay || Object.keys(artifactDisplay).length === 0) && !stepHistory.length && (
                 <div style={{ fontSize: '10px', color: '#666' }}>
                   No detailed trace captured yet.
                 </div>
@@ -610,7 +738,9 @@ const AttemptRow = ({ attempt, index, totalAttempts, taskUpdatedAt, defaultExpan
 const TaskCard = memo(TaskCardComponent, (prev, next) => (
   prev.task === next.task &&
   prev.isNested === next.isNested &&
-  prev.nowMs === next.nowMs
+  prev.nowMs === next.nowMs &&
+  prev.laneDetail === next.laneDetail &&
+  prev.detailLevel === next.detailLevel
 ));
 
 export default TaskCard;

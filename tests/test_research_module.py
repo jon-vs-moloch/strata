@@ -1,10 +1,17 @@
 from strata.orchestrator.research import (
     DEFAULT_RESEARCH_ITERATION_POLICY,
+    TaskBoundaryViolationError,
     _build_iteration_limit_autopsy,
     _build_research_system_prompt,
     _should_return_raw_file,
     load_research_iteration_policy,
+    ResearchModule,
 )
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from strata.storage.models import Base
+from strata.storage.services.main import StorageManager
 
 
 def test_research_prompt_includes_local_exploration_guidance_for_codebase_tasks():
@@ -109,3 +116,44 @@ def test_iteration_limit_autopsy_keeps_warm_history_and_archive_pointer():
     assert len(autopsy["warm_history"]) == 3
     assert autopsy["warm_history"][0]["role"] == "tool"
     assert autopsy["warm_history"][-1]["role"] == "user"
+
+
+def _make_runtime_storage():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+    return StorageManager(session=session)
+
+
+class _SingleTurnModel:
+    def __init__(self, response):
+        self.response = response
+
+    async def chat(self, *_args, **_kwargs):
+        return self.response
+
+
+def test_research_single_tool_turn_raises_task_boundary_violation(monkeypatch):
+    storage = _make_runtime_storage()
+    model = _SingleTurnModel(
+        {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {"name": "list_directory", "arguments": '{"path":"."}'},
+                }
+            ],
+        }
+    )
+    module = ResearchModule(model, storage)
+    monkeypatch.setattr("strata.orchestrator.research.record_tool_execution", lambda *args, **kwargs: None)
+    monkeypatch.setattr("strata.orchestrator.research.should_throttle_tool", lambda *args, **kwargs: {"throttle": False})
+
+    try:
+        __import__("asyncio").run(module.conduct_research("Inspect the repo root", repo_path="."))
+        assert False, "expected TaskBoundaryViolationError"
+    except TaskBoundaryViolationError as exc:
+        assert exc.failure_kind == "task_boundary_violation"
+        assert exc.autopsy["tool_call"]["name"] == "list_directory"
+        assert "oneshottable" in exc.public_message.lower() or "variance-bearing" in exc.public_message.lower()

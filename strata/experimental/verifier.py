@@ -8,15 +8,23 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from threading import Lock
+from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple
 
 from strata.core.lanes import infer_lane_from_task
 from strata.experimental.trace_review import build_task_trace_summary
 from strata.feedback.signals import register_feedback_signal
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.storage.models import AttemptModel, AttemptOutcome, TaskModel
 
 
 VERIFIER_REGISTRY_KEY = "output_verifier_registry"
+_VERIFIER_REGISTRY_LOCK = Lock()
+_VERIFIER_REGISTRY_STATE: Dict[str, Any] | None = None
+_VERIFIER_REGISTRY_DIRTY = False
+_VERIFIER_REGISTRY_LAST_PERSISTED_AT = 0.0
+_VERIFIER_REGISTRY_MIN_PERSIST_INTERVAL_S = 30.0
 
 
 def _utcnow_iso() -> str:
@@ -71,9 +79,66 @@ def _default_registry() -> Dict[str, Any]:
     }
 
 
+def _clone_registry(registry: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "by_mode": {
+            str(mode): dict(bucket or {})
+            for mode, bucket in dict(registry.get("by_mode") or {}).items()
+        },
+        "overall": dict(registry.get("overall") or {}),
+    }
+
+
+def _get_registry(storage=None) -> Dict[str, Any]:
+    global _VERIFIER_REGISTRY_STATE
+    with _VERIFIER_REGISTRY_LOCK:
+        if _VERIFIER_REGISTRY_STATE is not None:
+            return _clone_registry(_VERIFIER_REGISTRY_STATE)
+    loaded = {}
+    if storage is not None:
+        try:
+            loaded = storage.parameters.peek_parameter(VERIFIER_REGISTRY_KEY, default_value=_default_registry()) or _default_registry()
+        except Exception:
+            loaded = _default_registry()
+    registry = _clone_registry(loaded or _default_registry())
+    with _VERIFIER_REGISTRY_LOCK:
+        if _VERIFIER_REGISTRY_STATE is None:
+            _VERIFIER_REGISTRY_STATE = _clone_registry(registry)
+        return _clone_registry(_VERIFIER_REGISTRY_STATE)
+
+
+def _persist_registry_if_due() -> None:
+    global _VERIFIER_REGISTRY_DIRTY, _VERIFIER_REGISTRY_LAST_PERSISTED_AT
+    now = monotonic()
+    with _VERIFIER_REGISTRY_LOCK:
+        if not _VERIFIER_REGISTRY_DIRTY:
+            return
+        if (now - _VERIFIER_REGISTRY_LAST_PERSISTED_AT) < _VERIFIER_REGISTRY_MIN_PERSIST_INTERVAL_S:
+            return
+        payload = _clone_registry(_VERIFIER_REGISTRY_STATE or _default_registry())
+    try:
+        from strata.storage.services.main import StorageManager
+
+        storage = StorageManager()
+        try:
+            storage.parameters.set_parameter(
+                VERIFIER_REGISTRY_KEY,
+                payload,
+                description="Rolling verifier outcomes used to anneal lightweight post-output verification.",
+            )
+            storage.commit()
+        finally:
+            storage.close()
+    except Exception:
+        return
+    with _VERIFIER_REGISTRY_LOCK:
+        _VERIFIER_REGISTRY_DIRTY = False
+        _VERIFIER_REGISTRY_LAST_PERSISTED_AT = now
+
+
 def _record_registry_result(storage, *, mode: str, artifact: Dict[str, Any]) -> Dict[str, Any]:
-    registry = storage.parameters.peek_parameter(VERIFIER_REGISTRY_KEY, default_value=_default_registry()) or _default_registry()
-    registry = dict(registry)
+    global _VERIFIER_REGISTRY_STATE, _VERIFIER_REGISTRY_DIRTY
+    registry = _get_registry(storage)
     registry.setdefault("by_mode", {})
     registry.setdefault("overall", {})
     mode_bucket = dict(registry["by_mode"].get(mode) or {})
@@ -94,11 +159,9 @@ def _record_registry_result(storage, *, mode: str, artifact: Dict[str, Any]) -> 
 
     registry["by_mode"][mode] = _apply(mode_bucket)
     registry["overall"] = _apply(overall_bucket)
-    storage.parameters.set_parameter(
-        VERIFIER_REGISTRY_KEY,
-        registry,
-        description="Rolling verifier outcomes used to anneal lightweight post-output verification.",
-    )
+    with _VERIFIER_REGISTRY_LOCK:
+        _VERIFIER_REGISTRY_STATE = _clone_registry(registry)
+        _VERIFIER_REGISTRY_DIRTY = True
     return registry
 
 
@@ -119,7 +182,7 @@ def select_verification_policy(storage, *, mode: str, window: int = 24) -> Dict[
     failed_count = sum(1 for attempt in relevant if attempt.outcome == AttemptOutcome.FAILED)
     recent_error_rate = failed_count / sample_count if sample_count else 1.0
 
-    registry = storage.parameters.peek_parameter(VERIFIER_REGISTRY_KEY, default_value=_default_registry()) or _default_registry()
+    registry = _get_registry(storage)
     mode_bucket = dict((registry.get("by_mode") or {}).get(mode) or {})
     flawed_count = int(mode_bucket.get("flawed_count", 0) or 0)
     uncertain_count = int(mode_bucket.get("uncertain_count", 0) or 0)
@@ -338,28 +401,27 @@ Verification summary:
     artifact["deterministic_contradictions"] = contradictions
 
     if attempt is not None:
-        attempt_artifacts = dict(attempt.artifacts or {})
-        attempt_artifacts["verifier"] = artifact
-        attempt.artifacts = attempt_artifacts
-
-    if task is not None:
-        constraints = dict(task.constraints or {})
-        reviews = list(constraints.get("verifier_reviews") or [])
-        reviews.append(
+        should_flush = enqueue_attempt_observability_artifact(
             {
-                "recorded_at": artifact.get("recorded_at"),
-                "mode": normalized_mode,
-                "artifact_kind": artifact.get("artifact_kind"),
-                "verification_kind": artifact.get("verification_kind"),
-                "verdict": artifact.get("verdict"),
-                "confidence": artifact.get("confidence"),
-                "recommended_action": artifact.get("recommended_action"),
-                "failure_modes": artifact.get("failure_modes") or [],
-                "deterministic_contradictions": contradictions,
+                "task_id": getattr(task, "task_id", None) or getattr(attempt, "task_id", None),
+                "attempt_id": getattr(attempt, "attempt_id", None),
+                "session_id": getattr(task, "session_id", None),
+                "artifact_kind": "verifier_review",
+                "payload": {
+                    "recorded_at": artifact.get("recorded_at"),
+                    "mode": normalized_mode,
+                    "artifact_kind": artifact.get("artifact_kind"),
+                    "verification_kind": artifact.get("verification_kind"),
+                    "verdict": artifact.get("verdict"),
+                    "confidence": artifact.get("confidence"),
+                    "recommended_action": artifact.get("recommended_action"),
+                    "failure_modes": artifact.get("failure_modes") or [],
+                    "deterministic_contradictions": contradictions,
+                },
             }
         )
-        constraints["verifier_reviews"] = reviews[-12:]
-        task.constraints = constraints
+        if should_flush:
+            flush_observability_writes()
     _record_registry_result(storage, mode=normalized_mode, artifact=artifact)
     return artifact
 

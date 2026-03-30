@@ -1,6 +1,5 @@
 import os
 from typing import Optional
-from threading import Lock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import event
@@ -8,6 +7,7 @@ from strata.storage.repositories.tasks import TaskRepository
 from strata.storage.repositories.messages import MessageRepository
 from strata.storage.repositories.parameters import ParameterRepository
 from strata.storage.repositories.attempts import AttemptRepository
+from strata.storage.sqlite_write import commit_with_write_lock
 
 # ── Module level shared resources ──────────────────────────────────────────────
 _DB_URL = os.getenv("DATABASE_URL", "sqlite:///strata/runtime/strata.db")
@@ -18,7 +18,7 @@ if _DB_URL.startswith("sqlite"):
         "check_same_thread": False,
     }
 _engine = create_engine(_DB_URL, **_engine_kwargs)
-_sqlite_commit_lock = Lock() if _DB_URL.startswith("sqlite") else None
+_sqlite_write_enabled = _DB_URL.startswith("sqlite")
 
 # SQLite-specific performance tuning: Enable Write-Ahead Logging (WAL)
 if _DB_URL.startswith("sqlite"):
@@ -70,11 +70,7 @@ class StorageManager:
         @summary Permanently persist current session changes.
         @inputs none
         """
-        if _sqlite_commit_lock is not None:
-            with _sqlite_commit_lock:
-                self.session.commit()
-            return
-        self.session.commit()
+        commit_with_write_lock(self.session, enabled=_sqlite_write_enabled)
 
     def rollback(self):
         """

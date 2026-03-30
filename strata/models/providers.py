@@ -15,7 +15,23 @@ import time
 from pydantic import BaseModel, Field
 
 from strata.observability.writer import enqueue_provider_observability_snapshot, flush_observability_writes
+from strata.observability.host import get_host_telemetry_snapshot
 from strata.storage.models import ProviderTelemetrySnapshotModel
+
+
+DEFAULT_RUNTIME_POLICY: Dict[str, Any] = {
+    "throttle_mode": "hard",
+    "operator_comfort": {
+        "profile": "quiet",
+        "ambiguity_bias": "prefer_quiet",
+        "allow_annoying_if_explicit": False,
+        "context": {
+            "machine_in_use": True,
+            "room_occupied": True,
+            "ambient_noise_masking": False,
+        },
+    },
+}
 
 class ModelResponse(BaseModel):
     """
@@ -87,6 +103,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
     _telemetry_revision: int = 0
     _last_persisted_revision: int = 0
     _last_persisted_at: float = 0.0
+    _runtime_policy: Dict[str, Any] = dict(DEFAULT_RUNTIME_POLICY)
 
     def _throttle_key(self) -> str:
         return ":".join([
@@ -121,6 +138,25 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             base._telemetry_dirty = True
             base._telemetry_revision += 1
 
+    @classmethod
+    def set_runtime_policy(cls, policy: Optional[Dict[str, Any]] = None):
+        base = GenericOpenAICompatibleProvider
+        merged = dict(DEFAULT_RUNTIME_POLICY)
+        if isinstance(policy, dict):
+            merged.update({k: v for k, v in policy.items() if k != "operator_comfort"})
+            comfort = dict(DEFAULT_RUNTIME_POLICY.get("operator_comfort") or {})
+            comfort.update(dict(policy.get("operator_comfort") or {}))
+            comfort_context = dict((DEFAULT_RUNTIME_POLICY.get("operator_comfort") or {}).get("context") or {})
+            comfort_context.update(dict((policy.get("operator_comfort") or {}).get("context") or {}))
+            comfort["context"] = comfort_context
+            merged["operator_comfort"] = comfort
+        base._runtime_policy = merged
+
+    @classmethod
+    def get_runtime_policy(cls) -> Dict[str, Any]:
+        base = GenericOpenAICompatibleProvider
+        return dict(base._runtime_policy or DEFAULT_RUNTIME_POLICY)
+
     def _is_local_transport(self) -> bool:
         return self.__class__.__name__ == "LocalProvider"
 
@@ -139,13 +175,79 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             adaptive_ms = max(adaptive_ms, min(20000.0, 1500.0 + (avg_latency_ms * 0.2)))
         return adaptive_ms
 
+    def _comfort_multiplier(self) -> float:
+        policy = self.get_runtime_policy()
+        comfort = dict(policy.get("operator_comfort") or {})
+        profile = str(comfort.get("profile") or "quiet").strip().lower()
+        context = dict(comfort.get("context") or {})
+        machine_in_use = bool(context.get("machine_in_use", True))
+        room_occupied = bool(context.get("room_occupied", True))
+        ambient_noise_masking = bool(context.get("ambient_noise_masking", False))
+
+        multiplier = {
+            "quiet": 1.5,
+            "balanced": 1.0,
+            "aggressive": 0.75,
+        }.get(profile, 1.0)
+        if not machine_in_use:
+            multiplier *= 0.8
+        if not room_occupied:
+            multiplier *= 0.75
+        if ambient_noise_masking:
+            multiplier *= 0.85
+        host = get_host_telemetry_snapshot()
+        thermal = dict(host.get("thermal") or {})
+        memory = dict(host.get("memory") or {})
+        cpu = dict(host.get("cpu") or {})
+        if str(thermal.get("warning_level") or "nominal").strip().lower() not in {"nominal", "unknown"}:
+            multiplier *= 1.35
+        if bool(thermal.get("performance_limited")) or bool(thermal.get("cpu_power_limited")):
+            multiplier *= 1.25
+        if str(memory.get("pressure") or "nominal").strip().lower() == "high":
+            multiplier *= 1.4
+        elif str(memory.get("pressure") or "nominal").strip().lower() == "moderate":
+            multiplier *= 1.15
+        if float(cpu.get("normalized_percent") or 0.0) >= 85.0:
+            multiplier *= 1.2
+        return max(0.5, min(multiplier, 2.5))
+
+    def _cloud_greedy_probe_multiplier(self, telemetry: ProviderTelemetryState) -> float:
+        policy = self.get_runtime_policy()
+        if str(policy.get("throttle_mode") or "hard").strip().lower() != "greedy":
+            return 1.0
+        request_count = max(1, telemetry.request_count)
+        if telemetry.rate_limit_hits > 0 or telemetry.error_count / request_count >= 0.1:
+            return 1.0
+        if request_count < 5:
+            return 1.0
+        if request_count < 20:
+            return 0.9
+        return 0.8
+
+    def _local_greedy_probe_multiplier(self, telemetry: ProviderTelemetryState) -> float:
+        policy = self.get_runtime_policy()
+        if str(policy.get("throttle_mode") or "hard").strip().lower() != "greedy":
+            return 1.0
+        request_count = max(1, telemetry.request_count)
+        if telemetry.error_count / request_count >= 0.1:
+            return 1.0
+        if request_count < 5:
+            return 1.0
+        if telemetry.success_count >= 10:
+            return 0.9
+        return 0.95
+
     def _effective_min_interval_ms(self, telemetry: Optional[ProviderTelemetryState] = None) -> float:
         min_interval = float(self.min_interval_ms or 0)
         if self.requests_per_minute and self.requests_per_minute > 0:
             rpm_interval = 60000.0 / float(self.requests_per_minute)
             min_interval = max(min_interval, rpm_interval)
         if telemetry is not None:
-            min_interval = max(min_interval, self._adaptive_min_interval_ms(telemetry))
+            if self._is_local_transport():
+                min_interval = max(min_interval, self._adaptive_min_interval_ms(telemetry))
+                min_interval = min_interval * self._comfort_multiplier() * self._local_greedy_probe_multiplier(telemetry)
+            else:
+                min_interval = min_interval * self._cloud_greedy_probe_multiplier(telemetry)
         return min_interval
 
     async def _wait_for_turn(self, state: ThrottleState, telemetry: ProviderTelemetryState):
@@ -330,17 +432,45 @@ class CloudProvider(GenericOpenAICompatibleProvider):
 
 def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
     snapshot: Dict[str, Dict[str, object]] = {}
+    runtime_policy = GenericOpenAICompatibleProvider.get_runtime_policy()
+    host_snapshot = get_host_telemetry_snapshot()
+    comfort = dict(runtime_policy.get("operator_comfort") or {})
+    comfort_profile = str(comfort.get("profile") or "quiet").strip().lower()
+    comfort_context = dict(comfort.get("context") or {})
+    comfort_multiplier = {
+        "quiet": 1.5,
+        "balanced": 1.0,
+        "aggressive": 0.75,
+    }.get(comfort_profile, 1.0)
+    if not bool(comfort_context.get("machine_in_use", True)):
+        comfort_multiplier *= 0.8
+    if not bool(comfort_context.get("room_occupied", True)):
+        comfort_multiplier *= 0.75
+    if bool(comfort_context.get("ambient_noise_masking", False)):
+        comfort_multiplier *= 0.85
+    comfort_multiplier = max(0.5, min(comfort_multiplier, 2.5))
     for key, state in GenericOpenAICompatibleProvider._telemetry_states.items():
         avg_wait_ms = (state.total_wait_s / state.throttled_count * 1000.0) if state.throttled_count else 0.0
         avg_latency_ms = (state.total_latency_s / state.request_count * 1000.0) if state.request_count else 0.0
         request_count = max(1, state.request_count)
         adaptive_min_interval_ms = 0.0
-        if request_count >= 3 and "127.0.0.1" in key:
+        is_local = "127.0.0.1" in key
+        if request_count >= 3 and is_local:
             if avg_latency_ms >= 2500.0:
                 adaptive_min_interval_ms = max(adaptive_min_interval_ms, min(15000.0, avg_latency_ms * 0.25))
             error_rate = state.error_count / request_count
             if error_rate >= 0.15:
                 adaptive_min_interval_ms = max(adaptive_min_interval_ms, min(20000.0, 1500.0 + (avg_latency_ms * 0.2)))
+        effective_min_interval_ms = adaptive_min_interval_ms
+        throttle_mode = str(runtime_policy.get("throttle_mode") or "hard").strip().lower()
+        if is_local:
+            effective_min_interval_ms = effective_min_interval_ms * comfort_multiplier
+            if throttle_mode == "greedy":
+                if state.error_count / request_count < 0.1:
+                    effective_min_interval_ms *= 0.95 if request_count < 10 else 0.9
+        else:
+            if throttle_mode == "greedy" and state.rate_limit_hits == 0 and state.error_count / request_count < 0.1:
+                effective_min_interval_ms *= 0.9 if request_count < 20 else 0.8
         snapshot[key] = {
             "request_count": state.request_count,
             "success_count": state.success_count,
@@ -352,6 +482,10 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
             "avg_wait_ms": round(avg_wait_ms, 2),
             "avg_latency_ms": round(avg_latency_ms, 2),
             "adaptive_min_interval_ms": round(adaptive_min_interval_ms, 2),
+            "effective_min_interval_ms": round(effective_min_interval_ms, 2),
+            "throttle_mode": runtime_policy.get("throttle_mode"),
+            "operator_comfort": runtime_policy.get("operator_comfort") or {},
+            "host_telemetry": host_snapshot if is_local else {},
             "last_status_code": state.last_status_code,
             "last_error": state.last_error,
             "last_request_at": state.last_request_at,

@@ -5,6 +5,7 @@ This file stores persistent, cross-project instructions and preferences for Stra
 Canonical location: `.knowledge/specs/constitution.md`
 
 Current durable guidance:
+- architecture terms that name first-class system artifacts or subsystems should be written as proper nouns; generic English uses stay lowercase. For example: `Procedure` != procedure, `Verifier` != verifier, `Audit` != audit
 - prefer explicit evaluation over vague hope; if we want an outcome, we should measure it
 - respect disclosure and permission boundaries for knowledge and memory
 - prefer modest resource use and gentle local-hardware defaults unless the operator asks otherwise
@@ -21,12 +22,18 @@ Current durable guidance:
 - choose task boundaries so one variance-bearing invocation can plausibly complete the task; if work requires multiple progressive stages, decompose it explicitly instead of normalizing multi-stage retry loops
 - omission is not evidence of absence; when repo state is unverified, say it is unverified or verify it, but do not assert absence from an incomplete snapshot
 - treat user feedback, reactions, audits, and research artifacts as raw evidence that should eventually cash out into durable state changes: user knowledge, agent knowledge, project specs, constitution updates, or other reviewable promoted improvements
+- treat partial progress as durable evidence; successful decompositions, clarified subgoals, and reusable recovery structure should be captured into Procedures, policy, or knowledge wherever practical
+- treat failures as metabolizable experience; repeated failure modes, blocked branches, verifier findings, and dead-end recoveries should inform durable changes to Procedures, policy, tool health, or knowledge rather than remaining isolated runtime incidents
+- trainer notification is advisory, not a terminal success condition; when a branch fails to decompose or plan, the system should keep attempting bounded autonomous recovery unless the work is genuinely blocked on required external input or permission
+- failure must always lead to a next-step determination; every failed branch should resolve into a concrete continuation such as decomposition, replanning, remediation, escalation, or another bounded recovery action rather than simply stopping without a structural decision
 - treat surprise as a first-class signal: when observed outcomes differ from expected outcomes without a good explanation, the mismatch should receive attention because it indicates the system's current model may be wrong
-- treat audit as the general protocol for reviewing any sequence or artifact, whether internal or external; reflection is not a separate subsystem, but an audit of the system's own internal processes, traces, signals, expectations, or prior audits
-- verification should be callable at any step on any artifact, including task drafts, chat turns, tool outputs, verifier outputs, and audit outputs; audit remains the broader end-to-end review protocol
+- treat `Audit` as the general system protocol for reviewing sequences or artifacts; reflection is not a separate subsystem, but an Audit of the system's own internal processes, traces, signals, expectations, or prior audits. Lowercase `audit` still refers to the generic act of auditing something
+- `Verifier` should be callable at any step on any artifact, including task drafts, chat turns, tool outputs, verifier outputs, and audit outputs; lowercase `verification` remains the generic activity, while `Verifier` names the system capability
 - let surprise itself be audited; if the system is surprised, that surprise should remain reviewable evidence rather than a terminal judgment, because even the act of noticing something can be miscalibrated
 - prefer extending or unifying existing systems over creating parallel ones; introduce a new subsystem only when it is a reusable primitive that can serve multiple parts of Strata rather than a one-off special case
 - when verifier findings repeatedly say an output is flawed or uncertain, supervision should escalate into a corrective intervention quickly; do not allow the system to normalize repeated verifier warnings into passive retry loops
 - if a reviewer or verifier cannot produce perfect structured output, preserve the strongest grounded fallback judgment available instead of discarding the review entirely
 - use tool-execution telemetry as a control surface: if a tool repeatedly fails for a specific lane/task context, degrade or circuit-break it until there is evidence of tool-focused remediation
 - long-running work must remain interpretable; deterministic and non-deterministic processes alike should publish progress signals so the system never appears idle while useful work is actually advancing
+- operator comfort is a real optimization target, not an afterthought; local inference and background activity should prefer miss-safe behavior that stays below the operator's annoyance threshold unless the operator has explicitly opted into more aggressive hardware use
+- durable preferences should include not only explicit user facts, but also the classes of constraints the system ought to remember and optimize for, such as noise tolerance, memory pressure tolerance, thermal comfort, and similar operating-envelope limits

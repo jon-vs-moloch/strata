@@ -1,13 +1,48 @@
-use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri_plugin_updater::UpdaterExt;
+use url::Url;
 
 struct BackendChild(Mutex<Option<Child>>);
+struct DesktopUpdateRuntime(Mutex<Option<String>>);
+
+#[derive(Clone, Debug)]
+struct DesktopUpdateConfig {
+    channel: String,
+    endpoint: Option<String>,
+    pubkey: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DesktopUpdateStatus {
+    desktop: bool,
+    configured: bool,
+    channel: String,
+    endpoint: Option<String>,
+    current_version: String,
+    update_available: bool,
+    latest_version: Option<String>,
+    installed_version: Option<String>,
+    restart_required: bool,
+    notes: Option<String>,
+    published_at: Option<String>,
+    download_url: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DesktopInstallResult {
+    installed: bool,
+    version: Option<String>,
+}
 
 fn resolve_project_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir()
@@ -160,12 +195,227 @@ fn setup_backend(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
+fn desktop_update_config() -> DesktopUpdateConfig {
+    let channel = std::env::var("STRATA_DESKTOP_UPDATE_CHANNEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "alpha".to_string());
+
+    let endpoint = std::env::var("STRATA_DESKTOP_UPDATE_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().replace("{channel}", &channel))
+        .filter(|value| !value.is_empty());
+
+    let pubkey = std::env::var("STRATA_DESKTOP_UPDATE_PUBKEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    DesktopUpdateConfig {
+        channel,
+        endpoint,
+        pubkey,
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn configured_updater(
+    app: &AppHandle,
+    config: &DesktopUpdateConfig,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoint = config
+        .endpoint
+        .as_ref()
+        .ok_or_else(|| "Desktop updater endpoint is not configured.".to_string())?;
+    let pubkey = config
+        .pubkey
+        .as_ref()
+        .ok_or_else(|| "Desktop updater public key is not configured.".to_string())?;
+
+    let endpoint_url = Url::parse(endpoint).map_err(|err| format!("Invalid desktop updater endpoint: {err}"))?;
+    app.updater_builder()
+        .pubkey(pubkey.clone())
+        .endpoints(vec![endpoint_url])
+        .map_err(|err| format!("Failed to configure desktop updater endpoint: {err}"))?
+        .build()
+        .map_err(|err| format!("Failed to build desktop updater: {err}"))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn desktop_builder() -> tauri::Builder<tauri::Wry> {
+    tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn desktop_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
+}
+
+#[tauri::command]
+async fn desktop_update_status(app: AppHandle) -> Result<DesktopUpdateStatus, String> {
+    let config = desktop_update_config();
+    let current_version = app.package_info().version.to_string();
+    let installed_version = app
+        .try_state::<DesktopUpdateRuntime>()
+        .and_then(|state| state.0.lock().ok().and_then(|pending| pending.clone()));
+    let restart_required = installed_version.is_some();
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        return Ok(DesktopUpdateStatus {
+            desktop: false,
+            configured: false,
+            channel: config.channel,
+            endpoint: config.endpoint,
+            current_version,
+            update_available: false,
+            latest_version: None,
+            installed_version,
+            restart_required,
+            notes: None,
+            published_at: None,
+            download_url: None,
+            error: Some("Desktop updater is not supported on this target.".to_string()),
+        });
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let configured = config.endpoint.is_some() && config.pubkey.is_some();
+        if !configured {
+            return Ok(DesktopUpdateStatus {
+                desktop: true,
+                configured: false,
+                channel: config.channel,
+                endpoint: config.endpoint,
+                current_version,
+                update_available: false,
+                latest_version: None,
+                installed_version,
+                restart_required,
+                notes: None,
+                published_at: None,
+                download_url: None,
+                error: Some("Desktop updater is not configured yet. Set STRATA_DESKTOP_UPDATE_ENDPOINT and STRATA_DESKTOP_UPDATE_PUBKEY.".to_string()),
+            });
+        }
+
+        let updater = configured_updater(&app, &config)?;
+        let update = updater
+            .check()
+            .await
+            .map_err(|err| format!("Failed to check for desktop updates: {err}"))?;
+
+        if let Some(update) = update {
+            return Ok(DesktopUpdateStatus {
+                desktop: true,
+                configured: true,
+                channel: config.channel,
+                endpoint: config.endpoint,
+                current_version,
+                update_available: true,
+                latest_version: Some(update.version.clone()),
+                installed_version,
+                restart_required,
+                notes: update.body.clone(),
+                published_at: update.date.map(|date| date.to_string()),
+                download_url: Some(update.download_url.to_string()),
+                error: None,
+            });
+        }
+
+        Ok(DesktopUpdateStatus {
+            desktop: true,
+            configured: true,
+            channel: config.channel,
+            endpoint: config.endpoint,
+            current_version,
+            update_available: false,
+            latest_version: None,
+            installed_version,
+            restart_required,
+            notes: None,
+            published_at: None,
+            download_url: None,
+            error: None,
+        })
+    }
+}
+
+#[tauri::command]
+async fn desktop_install_update(app: AppHandle) -> Result<DesktopInstallResult, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = app;
+        return Ok(DesktopInstallResult {
+            installed: false,
+            version: None,
+        });
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let config = desktop_update_config();
+        let updater = configured_updater(&app, &config)?;
+        let update = updater
+            .check()
+            .await
+            .map_err(|err| format!("Failed to check for desktop updates: {err}"))?;
+
+        let Some(update) = update else {
+            return Ok(DesktopInstallResult {
+                installed: false,
+                version: None,
+            });
+        };
+
+        let version = update.version.clone();
+        update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|err| format!("Failed to install desktop update: {err}"))?;
+
+        if let Some(state) = app.try_state::<DesktopUpdateRuntime>() {
+            if let Ok(mut pending) = state.0.lock() {
+                *pending = Some(version.clone());
+            }
+        }
+
+        Ok(DesktopInstallResult {
+            installed: true,
+            version: Some(version),
+        })
+    }
+}
+
+#[tauri::command]
+async fn desktop_restart(app: AppHandle) -> Result<(), String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = app;
+        return Err("Desktop restart is not supported on this target.".to_string());
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        app.request_restart();
+        Ok(())
+    }
+}
+
+fn main() {
+    desktop_builder()
+        .manage(DesktopUpdateRuntime(Mutex::new(None)))
         .setup(|app| {
             setup_backend(&app.handle())?;
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            desktop_update_status,
+            desktop_install_update,
+            desktop_restart
+        ])
         .build(tauri::generate_context!())
         .expect("error while building Strata desktop shell")
         .run(|app_handle, event| {

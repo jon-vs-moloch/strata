@@ -8,6 +8,38 @@ Can a modest local model become genuinely useful if the system around it supplie
 
 The project assumes the answer is yes, but only if intelligence is treated as a systems problem rather than a single-model problem.
 
+## Naming Convention
+
+Strata uses proper nouns for first-class architectural artifacts and subsystems.
+
+This means:
+
+- `Procedure` names the durable reusable workflow artifact
+- `Verifier` names the system capability that performs verification
+- `Audit` names the system review protocol or subsystem
+
+Lowercase language still means the ordinary generic activity:
+
+- "a procedure" means a process in the general English sense
+- "verify this" means perform verification as an activity
+- "audit this" means conduct an audit in the generic sense
+
+Capitalized language means "use or refer to the named system object."
+
+This convention is not cosmetic. It helps keep architecture discussions precise when the system both talks about work in general and also contains reusable artifacts that embody that work.
+
+## Durable Learning
+
+Strata should not discard meaningful experience.
+
+- partial success should accumulate into durable artifacts such as Procedures, knowledge, and policy
+- successful decomposition and reusable recovery structure should be preserved rather than rediscovered
+- failures should also metabolize into durable improvements, including tool health, policy updates, and Procedure refinement
+- escalation is not equivalent to recovery; notifying the trainer or another subsystem may be useful evidence, but the system should not treat that notification as “problem solved” while autonomous recovery paths still exist
+- failure should always imply a next step; a failed branch is not done until the system has chosen a concrete continuation such as decomposition, replanning, remediation, escalation, or another bounded recovery move
+
+The system should aim to convert both progress and failure into reusable structure instead of leaving them as isolated runtime incidents.
+
 ## Core Thesis
 
 Strata is designed around two goals at once:
@@ -80,8 +112,16 @@ That applies to outcomes like:
 - disclosure restraint
 - latency or token efficiency
 - self-improvement success
+- operator comfort, including whether the system becomes annoying to share a room with
 
 The project should prefer explicit evals, benchmarks, and telemetry for these properties over informal confidence that the prompt or architecture "probably" handles them.
+
+This matters for inference throttling too. A throttle is not only a rate-limit guard; it is also a policy for staying inside a chosen operating envelope. Strata should support both:
+
+- `hard` throttles: explicit ceilings the system must not exceed
+- `greedy` throttles: best-effort operation up to the currently believed safe or provider-friendly limit, with careful probing to refine that belief over time
+
+For local inference, the default objective should be operator comfort rather than maximum throughput. In practice, that means the system should try to run as hard as it can while staying below the operator's annoyance threshold, and when the signal is ambiguous it should miss on the side of "not annoying" unless the operator has clearly opted into a more aggressive posture.
 
 ### 4. Validation must come from outside the model
 
