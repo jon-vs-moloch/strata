@@ -87,6 +87,18 @@ _worker = BackgroundWorker(
     memory=_memory,
     settings_provider=lambda: GLOBAL_SETTINGS,
 )
+_worker_start_task: Optional[asyncio.Task] = None
+
+
+def _log_worker_start_result(task: asyncio.Task) -> None:
+    try:
+        task.result()
+        logger.info("Background worker startup task completed.")
+    except asyncio.CancelledError:
+        logger.info("Background worker startup task cancelled.")
+    except Exception as exc:
+        logger.error("Background worker startup failed after API boot: %s", exc)
+
 class EventBroadcaster:
     """Fan out runtime events to active SSE subscribers without retaining an unbounded backlog."""
 
@@ -198,6 +210,7 @@ async def _generate_tool_candidate_from_tier(
 # ── App lifecycle ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _worker_start_task
     from strata.storage.models import Base
     from strata.storage.services.main import _engine
     Base.metadata.create_all(_engine)
@@ -227,9 +240,17 @@ async def lifespan(app: FastAPI):
             storage.rollback()
     finally:
         storage.close()
-    await _worker.start()
-    logger.info("Strata API started")
+    _worker_start_task = asyncio.create_task(_worker.start(), name="background-worker-startup")
+    _worker_start_task.add_done_callback(_log_worker_start_result)
+    logger.info("Strata API started; background worker booting asynchronously")
     yield
+    if _worker_start_task and not _worker_start_task.done():
+        _worker_start_task.cancel()
+        try:
+            await _worker_start_task
+        except asyncio.CancelledError:
+            pass
+    _worker_start_task = None
     await _worker.stop()
     logger.info("Strata API stopped")
 

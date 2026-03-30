@@ -11,10 +11,10 @@ if [ -f .env.local ]; then
 fi
 
 mkdir -p strata/runtime
-HEALTH_URL="http://127.0.0.1:8000/admin/health"
+HEALTH_URL="http://127.0.0.1:8000/admin/test"
 START_BOOTSTRAP_SUPERVISOR="${START_BOOTSTRAP_SUPERVISOR:-1}"
 SUPERVISOR_MODE="${SUPERVISOR_MODE:-continuous}"
-API_PATTERN="uvicorn strata.api.main:app --host 0.0.0.0 --port 8000"
+API_PATTERN="uvicorn strata.api.main:app --host 127.0.0.1 --port 8000"
 
 cleanup_stale_api_processes() {
   local api_pids=()
@@ -37,7 +37,7 @@ start_api() {
     return
   fi
   echo "Starting API..."
-  nohup ./venv/bin/python -m uvicorn strata.api.main:app --host 0.0.0.0 --port 8000 \
+  nohup ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000 \
     > strata/runtime/api.log 2>&1 &
 }
 
