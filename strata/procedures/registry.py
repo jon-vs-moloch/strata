@@ -15,8 +15,49 @@ from strata.storage.models import TaskModel, TaskState, TaskType
 
 PROCEDURE_REGISTRY_KEY = "procedure_registry"
 DEFAULT_PROCEDURE_LANE = "agent"
+STARTUP_SMOKE_PROCEDURE_ID = "startup_sanity_check"
 ONBOARDING_PROCEDURE_ID = "operator_onboarding"
 DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
+    STARTUP_SMOKE_PROCEDURE_ID: {
+        "procedure_id": STARTUP_SMOKE_PROCEDURE_ID,
+        "title": "Startup Sanity Check",
+        "summary": "Resolve a small, source-grounded startup checklist to prove the harness can complete bounded Procedure work.",
+        "repeatable": True,
+        "target_lane": DEFAULT_PROCEDURE_LANE,
+        "task_type": "RESEARCH",
+        "instructions": (
+            "Run this startup sanity checklist before rich onboarding. Treat each item as a small, source-grounded verification task. "
+            "Prefer direct evidence from the hinted sources, and cash out each item explicitly."
+        ),
+        "checklist": [
+            {
+                "id": "spec_presence",
+                "title": "Confirm the core spec files are present",
+                "verification": "The canonical constitution and project spec locations exist and are readable.",
+            },
+            {
+                "id": "runtime_wiring",
+                "title": "Confirm the split runtime wiring is present",
+                "verification": "The system can identify separate API and worker launch surfaces in the codebase.",
+            },
+            {
+                "id": "desktop_surface",
+                "title": "Confirm the desktop shell exposes runtime status",
+                "verification": "The desktop codebase includes visible runtime status/update surfaces for the operator.",
+            },
+        ],
+        "success_criteria": {
+            "required_checklist_ids": [
+                "spec_presence",
+                "runtime_wiring",
+                "desktop_surface",
+            ],
+            "deliverables": [
+                "A concise startup sanity summary",
+                "Durable evidence that the startup smoke Procedure completed",
+            ],
+        },
+    },
     ONBOARDING_PROCEDURE_ID: {
         "procedure_id": ONBOARDING_PROCEDURE_ID,
         "title": "Operator Onboarding",
@@ -241,6 +282,23 @@ def get_procedure_status(storage, procedure_id: str) -> Dict[str, Any]:
 
 def get_onboarding_status(storage) -> Dict[str, Any]:
     return get_procedure_status(storage, ONBOARDING_PROCEDURE_ID)
+
+
+def get_startup_smoke_status(storage) -> Dict[str, Any]:
+    return get_procedure_status(storage, STARTUP_SMOKE_PROCEDURE_ID)
+
+
+def ensure_startup_smoke_task(storage, worker, *, session_id: Optional[str] = None, lane: Optional[str] = None):
+    status = get_startup_smoke_status(storage)
+    if not status.get("needs_queue"):
+        return None
+    return queue_procedure(
+        storage,
+        worker,
+        procedure_id=STARTUP_SMOKE_PROCEDURE_ID,
+        session_id=session_id,
+        lane=lane,
+    )
 
 
 def ensure_onboarding_task(storage, worker, *, session_id: Optional[str] = None, lane: Optional[str] = None):

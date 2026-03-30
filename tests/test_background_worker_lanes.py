@@ -389,7 +389,7 @@ def test_runtime_defaults_replay_pending_tasks_on_startup():
     assert GLOBAL_SETTINGS["replay_pending_tasks_on_startup"] is True
 
 
-def test_run_idle_tasks_seeds_onboarding_before_alignment(monkeypatch):
+def test_run_idle_tasks_seeds_startup_smoke_before_onboarding(monkeypatch):
     storage_factory = make_storage_factory()
     queue = asyncio.Queue()
 
@@ -403,8 +403,8 @@ def test_run_idle_tasks_seeds_onboarding_before_alignment(monkeypatch):
         queued_task = storage.tasks.get_by_id(queued_task_id)
         all_tasks = storage.session.query(TaskModel).all()
         assert queued_task is not None
-        assert queued_task.title == "Procedure: Operator Onboarding"
-        assert queued_task.constraints["procedure_id"] == "operator_onboarding"
+        assert queued_task.title == "Procedure: Startup Sanity Check"
+        assert queued_task.constraints["procedure_id"] == "startup_sanity_check"
         assert not any(str(task.title).startswith("Alignment:") for task in all_tasks)
     finally:
         storage.close()
@@ -413,6 +413,8 @@ def test_run_idle_tasks_seeds_onboarding_before_alignment(monkeypatch):
 def test_run_idle_tasks_allows_alignment_after_onboarding_completes(monkeypatch):
     storage_factory = make_storage_factory()
     storage = storage_factory()
+    smoke = queue_procedure(storage, None, procedure_id="startup_sanity_check", lane="agent")
+    smoke.state = TaskState.COMPLETE
     onboarding = queue_procedure(storage, None, procedure_id="operator_onboarding", lane="agent")
     onboarding.state = TaskState.COMPLETE
     storage.commit()

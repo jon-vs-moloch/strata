@@ -29,6 +29,32 @@ async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> Non
 def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
     normalized = str(item_id or "").strip().lower()
     hints = {
+        "spec_presence": {
+            "preferred_paths": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/system-substrates.md",
+            ],
+            "guidance": "Verify the canonical spec files directly from their durable locations.",
+        },
+        "runtime_wiring": {
+            "preferred_paths": [
+                "scripts/start_api.sh",
+                "scripts/worker_daemon.py",
+                "strata/api/main.py",
+                "strata/orchestrator/worker/runtime_ipc.py",
+            ],
+            "guidance": "Inspect the split API/worker launch and runtime IPC surfaces directly.",
+        },
+        "desktop_surface": {
+            "preferred_paths": [
+                "src-tauri/src/main.rs",
+                "strata_ui/src/App.jsx",
+                "strata_ui/src/views/SettingsView.jsx",
+                "docs/spec/desktop-distribution.md",
+            ],
+            "guidance": "Inspect the desktop shell and update/status surfaces directly rather than scanning the repo root.",
+        },
         "agent_name": {
             "preferred_paths": [
                 ".knowledge/user-profile.md",

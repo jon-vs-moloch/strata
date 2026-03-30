@@ -8,7 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from strata.communication.primitives import deliver_communication
 from strata.experimental.verifier import repo_fact_contradictions, verify_artifact
-from strata.procedures.registry import ensure_onboarding_task, get_onboarding_status
+from strata.procedures.registry import (
+    ensure_onboarding_task,
+    ensure_startup_smoke_task,
+    get_onboarding_status,
+    get_startup_smoke_status,
+)
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.specs.bootstrap import load_specs, spec_is_bootstrap_placeholder
 
@@ -70,6 +75,17 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
     logger.info("System is idle. Triggering Constitutional Alignment Task.")
     storage = storage_factory()
     try:
+        startup_smoke_status = get_startup_smoke_status(storage)
+        if startup_smoke_status.get("needs_queue"):
+            seeded = ensure_startup_smoke_task(storage, None)
+            if seeded is not None:
+                await queue.put(seeded.task_id)
+                logger.info("Idle alignment skipped; seeded startup smoke task %s instead.", seeded.task_id)
+            return
+        if not startup_smoke_status.get("has_completed"):
+            logger.info("Idle alignment skipped because startup smoke is still active or incomplete.")
+            return
+
         onboarding_status = get_onboarding_status(storage)
         if onboarding_status.get("needs_queue"):
             seeded = ensure_onboarding_task(storage, None)
