@@ -15,7 +15,9 @@ HEALTH_URL="http://127.0.0.1:8000/admin/test"
 START_BOOTSTRAP_SUPERVISOR="${START_BOOTSTRAP_SUPERVISOR:-1}"
 SUPERVISOR_MODE="${SUPERVISOR_MODE:-continuous}"
 API_PATTERN="uvicorn strata.api.main:app --host 127.0.0.1 --port 8000"
-API_CMD=(env PYTHONUNBUFFERED=1 ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000)
+WORKER_PATTERN="scripts/worker_daemon.py"
+API_CMD=(env PYTHONUNBUFFERED=1 STRATA_API_EMBED_WORKER=0 ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000)
+WORKER_CMD=(env PYTHONUNBUFFERED=1 PYTHONPATH=. ./venv/bin/python scripts/worker_daemon.py)
 SUPERVISOR_CMD=(env PYTHONUNBUFFERED=1 PYTHONPATH=. SUPERVISOR_MODE="$SUPERVISOR_MODE" ./venv/bin/python scripts/bootstrap_supervisor.py)
 
 cleanup_stale_api_processes() {
@@ -30,6 +32,20 @@ cleanup_stale_api_processes() {
   kill "${api_pids[@]}" >/dev/null 2>&1 || true
   sleep 1
   kill -9 "${api_pids[@]}" >/dev/null 2>&1 || true
+}
+
+cleanup_stale_worker_processes() {
+  local worker_pids=()
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && worker_pids+=("$pid")
+  done < <(pgrep -f "$WORKER_PATTERN" || true)
+  if [ "${#worker_pids[@]}" -eq 0 ]; then
+    return
+  fi
+  echo "Stopping worker processes: ${worker_pids[*]}"
+  kill "${worker_pids[@]}" >/dev/null 2>&1 || true
+  sleep 1
+  kill -9 "${worker_pids[@]}" >/dev/null 2>&1 || true
 }
 
 launch_detached() {
@@ -50,6 +66,12 @@ start_api() {
   fi
   echo "Starting API..."
   launch_detached strata/runtime/api.log "${API_CMD[@]}"
+}
+
+start_worker() {
+  cleanup_stale_worker_processes
+  echo "Starting worker daemon..."
+  launch_detached strata/runtime/worker.log "${WORKER_CMD[@]}"
 }
 
 wait_for_api() {
@@ -76,6 +98,7 @@ start_supervisor() {
 
 start_api
 wait_for_api
+start_worker
 
 if [ "$START_BOOTSTRAP_SUPERVISOR" = "1" ]; then
   start_supervisor
@@ -85,6 +108,7 @@ fi
 
 echo "System launch requested. Logs:"
 echo "  API: strata/runtime/api.log"
+echo "  Worker: strata/runtime/worker.log"
 if [ "$START_BOOTSTRAP_SUPERVISOR" = "1" ]; then
   echo "  Supervisor: strata/runtime/bootstrap_supervisor.log"
 fi

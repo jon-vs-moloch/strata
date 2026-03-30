@@ -25,6 +25,7 @@ from strata.storage.retention import get_retention_policy, get_retention_runtime
 from strata.models.adapter import ModelAdapter
 from strata.models.providers import GenericOpenAICompatibleProvider
 from strata.orchestrator.background import BackgroundWorker
+from strata.orchestrator.worker.handle import ExternalWorkerHandle
 from strata.api.hotreload import HotReloader
 from strata.api.chat_tools import load_dynamic_tools
 from strata.api.eval_admin import register_eval_admin_routes
@@ -57,6 +58,12 @@ from strata.specs.bootstrap import (
     resubmit_spec_proposal_with_clarification,
 )
 from strata.procedures.registry import ensure_onboarding_task
+from strata.runtime_config import (
+    GLOBAL_SETTINGS,
+    SETTINGS_PARAMETER_DESCRIPTION,
+    SETTINGS_PARAMETER_KEY,
+    normalized_settings as _normalized_settings,
+)
 from strata.orchestrator.user_questions import (
     enqueue_user_question,
     get_active_question,
@@ -68,39 +75,20 @@ from strata.orchestrator.user_questions import (
 logger = logging.getLogger(__name__)
 
 # ── Module-level singletons ────────────────────────────────────────────────────
-GLOBAL_SETTINGS = {
-    "max_sync_tool_iterations": 3,
-    "automatic_task_generation": True,
-    "testing_mode": False,
-    "replay_pending_tasks_on_startup": True,
-    "heavy_reflection_mode": False,
-    "inference_throttle_policy": {
-        "throttle_mode": "hard",
-        "operator_comfort": {
-            "profile": "quiet",
-            "ambiguity_bias": "prefer_quiet",
-            "allow_annoying_if_explicit": False,
-            "context": {
-                "machine_in_use": True,
-                "room_occupied": True,
-                "ambient_noise_masking": False,
-            },
-        },
-    },
-}
-SETTINGS_PARAMETER_KEY = "orchestrator_global_settings"
-SETTINGS_PARAMETER_DESCRIPTION = (
-    "Persisted API/orchestrator settings shared between the UI and the worker startup path."
-)
 _model = ModelAdapter()
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _hotreloader = HotReloader(_BASE_DIR)
 _memory = SemanticMemory()
-_worker = BackgroundWorker(
-    storage_factory=StorageManager,   # each task gets a fresh session
-    model_adapter=_model,
-    memory=_memory,
-    settings_provider=lambda: GLOBAL_SETTINGS,
+_embed_worker = str(os.environ.get("STRATA_API_EMBED_WORKER", "")).strip().lower() in {"1", "true", "yes", "on"}
+_worker = (
+    BackgroundWorker(
+        storage_factory=StorageManager,   # each task gets a fresh session
+        model_adapter=_model,
+        memory=_memory,
+        settings_provider=lambda: GLOBAL_SETTINGS,
+    )
+    if _embed_worker
+    else ExternalWorkerHandle()
 )
 _worker_start_task: Optional[asyncio.Task] = None
 
@@ -155,27 +143,6 @@ async def _broadcast_event(data: Dict[str, Any]):
 
 # Register worker update listener
 _worker.set_on_update(lambda tid, state: asyncio.create_task(_broadcast_event({"type": "task_update", "task_id": tid, "state": state})))
-
-def _normalized_settings(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    normalized = dict(GLOBAL_SETTINGS)
-    if payload:
-        normalized.update(payload)
-        current_policy = dict(GLOBAL_SETTINGS.get("inference_throttle_policy") or {})
-        incoming_policy = dict(payload.get("inference_throttle_policy") or {})
-        merged_policy = dict(current_policy)
-        merged_policy.update({k: v for k, v in incoming_policy.items() if k != "operator_comfort"})
-        current_comfort = dict(current_policy.get("operator_comfort") or {})
-        incoming_comfort = dict(incoming_policy.get("operator_comfort") or {})
-        merged_comfort = dict(current_comfort)
-        merged_comfort.update({k: v for k, v in incoming_comfort.items() if k != "context"})
-        current_context = dict(current_comfort.get("context") or {})
-        incoming_context = dict(incoming_comfort.get("context") or {})
-        merged_context = dict(current_context)
-        merged_context.update(incoming_context)
-        merged_comfort["context"] = merged_context
-        merged_policy["operator_comfort"] = merged_comfort
-        normalized["inference_throttle_policy"] = merged_policy
-    return normalized
 
 
 def _build_dashboard_snapshot(storage: StorageManager, limit: int = 10) -> Dict[str, Any]:
@@ -276,18 +243,23 @@ async def lifespan(app: FastAPI):
             logger.info("Seeded onboarding task %s during API startup.", getattr(seeded_onboarding, "task_id", "unknown"))
     finally:
         storage.close()
-    _worker_start_task = asyncio.create_task(_worker.start(), name="background-worker-startup")
-    _worker_start_task.add_done_callback(_log_worker_start_result)
-    logger.info("Strata API started; background worker booting asynchronously")
+    if _embed_worker:
+        _worker_start_task = asyncio.create_task(_worker.start(), name="background-worker-startup")
+        _worker_start_task.add_done_callback(_log_worker_start_result)
+        logger.info("Strata API started; embedded background worker booting asynchronously")
+    else:
+        _worker_start_task = None
+        logger.info("Strata API started; external worker mode enabled")
     yield
-    if _worker_start_task and not _worker_start_task.done():
+    if _embed_worker and _worker_start_task and not _worker_start_task.done():
         _worker_start_task.cancel()
         try:
             await _worker_start_task
         except asyncio.CancelledError:
             pass
     _worker_start_task = None
-    await _worker.stop()
+    if _embed_worker:
+        await _worker.stop()
     logger.info("Strata API stopped")
 
 app = FastAPI(title="Strata API", lifespan=lifespan)

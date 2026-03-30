@@ -126,7 +126,8 @@ def register_runtime_admin_routes(
         try:
             db = storage.session
             db.execute(text("SELECT 1"))
-            worker_alive = worker._running_task is not None and not worker._running_task.done()
+            worker_status = dict(getattr(worker, "status", {}) or {})
+            worker_alive = str(worker_status.get("worker") or "").upper() in {"RUNNING", "PAUSED"}
             return {
                 "status": "ok",
                 "database": "connected",

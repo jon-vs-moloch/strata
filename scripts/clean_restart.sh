@@ -14,7 +14,8 @@ mkdir -p strata/runtime strata/runtime/archive
 
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/admin/test}"
 RESTART_PROFILE="${RESTART_PROFILE:-onboarding_stress}"
-API_CMD=(./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000)
+API_CMD=(env STRATA_API_EMBED_WORKER=0 ./venv/bin/python -m uvicorn strata.api.main:app --host 127.0.0.1 --port 8000)
+WORKER_CMD=(env PYTHONPATH=. ./venv/bin/python scripts/worker_daemon.py)
 
 case "$RESTART_PROFILE" in
   resume)
@@ -147,6 +148,15 @@ start_api() {
   fi
 }
 
+start_worker() {
+  echo "Starting worker daemon..."
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "${WORKER_CMD[@]}" </dev/null > strata/runtime/worker.log 2>&1 &
+  else
+    nohup "${WORKER_CMD[@]}" </dev/null > strata/runtime/worker.log 2>&1 &
+  fi
+}
+
 wait_for_api() {
   echo "Waiting for API health..."
   for _ in $(seq 1 45); do
@@ -176,6 +186,7 @@ start_supervisor() {
 stop_matching_processes "uvicorn strata.api.main:app"
 stop_matching_processes "Python strata/api/main.py"
 stop_matching_processes "python.*strata.api.main"
+stop_matching_processes "scripts/worker_daemon.py"
 stop_matching_processes "scripts/bootstrap_supervisor.py"
 
 echo "Restart profile: ${RESTART_PROFILE}"
@@ -183,10 +194,12 @@ archive_and_reset_runtime_db
 reset_knowledge_surfaces
 start_api
 wait_for_api
+start_worker
 start_supervisor
 
 echo "Clean restart complete."
 echo "  API log: strata/runtime/api.log"
+echo "  Worker log: strata/runtime/worker.log"
 if [ "$START_BOOTSTRAP_SUPERVISOR" = "1" ]; then
   echo "  Supervisor log: strata/runtime/bootstrap_supervisor.log"
 fi
