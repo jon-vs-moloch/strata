@@ -92,6 +92,39 @@ const normalizeTierStatusMap = (raw) => {
   };
 };
 
+const defaultLaneDetail = {
+  status: 'IDLE',
+  tier_health: 'unknown',
+  activity_mode: 'IDLE',
+  activity_label: 'Idle',
+  queue_depth: 0,
+  runnable_count: 0,
+  blocked_count: 0,
+  needs_you_count: 0,
+  paused_task_count: 0,
+  current_task_id: null,
+  current_task_title: '',
+  current_task_state: null,
+  current_task_updated_at: null,
+  active_attempt_id: null,
+  active_attempt_started_at: null,
+  heartbeat_state: 'unknown',
+  heartbeat_age_s: null,
+};
+
+const normalizeLaneDetail = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return { ...defaultLaneDetail, ...source };
+};
+
+const normalizeLaneDetailMap = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    trainer: normalizeLaneDetail(source.trainer || source.strong),
+    agent: normalizeLaneDetail(source.agent || source.weak),
+  };
+};
+
 const normalizeRoutingSummary = (raw) => {
   const source = raw && typeof raw === 'object' ? raw : null;
   if (!source) return null;
@@ -152,6 +185,23 @@ const formatAbsoluteTime = (dateString) => {
 const formatAbsoluteWithRelative = (dateString) => {
   if (!dateString) return '—';
   return `${formatAbsoluteTime(dateString)} (${formatRelativeTime(dateString)})`;
+};
+
+const formatHeartbeatAge = (seconds) => {
+  const numeric = Number(seconds);
+  if (!Number.isFinite(numeric) || numeric < 0) return '—';
+  if (numeric < 60) return `${Math.round(numeric)}s`;
+  if (numeric < 3600) return `${Math.round(numeric / 60)}m`;
+  return `${Math.round(numeric / 3600)}h`;
+};
+
+const formatLaneHeartbeat = (detail) => {
+  if (!detail) return 'no signal';
+  if (detail.heartbeat_age_s == null) {
+    if (detail.activity_mode === 'GENERATING') return 'starting';
+    return 'no heartbeat';
+  }
+  return `${detail.heartbeat_state} · ${formatHeartbeatAge(detail.heartbeat_age_s)} ago`;
 };
 
 const formatMessageForDisplay = (content) => {
@@ -968,6 +1018,7 @@ function App() {
   const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
   const [laneStatuses, setLaneStatuses] = useState({ trainer: 'IDLE', agent: 'IDLE' });
+  const [laneDetails, setLaneDetails] = useState(normalizeLaneDetailMap(null));
   const [globalPaused, setGlobalPaused] = useState(false);
   const [pausedLanes, setPausedLanes] = useState([]);
   const [rebooting, setRebooting] = useState(false);
@@ -1081,8 +1132,10 @@ function App() {
         setGlobalPaused(Boolean(res.data.status.global_paused));
         setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes.map(normalizeLaneKey).filter(Boolean) : []);
         const nextLaneStatuses = normalizeLaneStatusMap(res.data.status.lanes);
+        const nextLaneDetails = normalizeLaneDetailMap(res.data.status.lane_details);
         const nextTiers = normalizeTierStatusMap(res.data.status.tiers);
         setLaneStatuses(nextLaneStatuses);
+        setLaneDetails(nextLaneDetails);
         setTiers(nextTiers);
         if (nextTiers.trainer === 'error' && !localStorage.getItem('skipCloudWarning')) {
           setShowCloudModal(true);
@@ -1956,6 +2009,13 @@ function App() {
 
   const finishedTaskTree = taskTree.filter(task => ['complete', 'abandoned', 'cancelled'].includes(task.status));
   const activeTaskTree = taskTree.filter(task => !['complete', 'abandoned', 'cancelled'].includes(task.status));
+  const laneCurrentTaskTitles = React.useMemo(() => {
+    const byId = new Map(tasks.map((task) => [task.id, stripInlineMarkdown(task.title || '')]));
+    return {
+      trainer: byId.get(laneDetails?.trainer?.current_task_id) || '',
+      agent: byId.get(laneDetails?.agent?.current_task_id) || '',
+    };
+  }, [laneDetails, tasks]);
   const scopeFilterLane = currentScope === 'home' ? null : effectiveLane;
   const scopedActiveTaskTree = scopeFilterLane
     ? activeTaskTree.filter((task) => {
@@ -1991,9 +2051,16 @@ function App() {
     return [...drafts, ...persisted];
   }, [currentScope, effectiveLane, laneDrafts, sessionList]);
   const buildLaneMeta = (lane) => {
+    const laneDetail = laneDetails?.[lane] || defaultLaneDetail;
     const route = routingSummary?.[lane] || null;
     if (route?.error) return route.error;
+    const taskTitle = laneCurrentTaskTitles?.[lane] || '';
+    const activityLabel = String(laneDetail.activity_label || laneDetail.activity_mode || 'Idle').trim();
+    const heartbeatLabel = formatLaneHeartbeat(laneDetail);
     const parts = [
+      activityLabel,
+      taskTitle || '',
+      heartbeatLabel,
       friendlyTransportLabel(route?.transport),
       friendlyProviderLabel(route?.provider),
       friendlyModelLabel(route?.selected_model || route?.model),
@@ -2056,15 +2123,16 @@ function App() {
     }
 
     const path = getFocusedTaskPath(scopeId);
+    const laneDetail = scopeId === 'home' ? null : (laneDetails?.[scopeId] || defaultLaneDetail);
     const root = path[0];
     if (!root) {
       const blocked = tasks.filter((task) => laneForTask(task) === scopeId && task.status === 'blocked').length;
       return {
         percent: 0,
         summary: buildLaneMeta(scopeId),
-        currentTitle: blocked > 0 ? `${blocked} blocked` : 'Idle',
-        label: blocked > 0 ? `${blocked} blocked` : 'Idle',
-        countLabel: blocked > 0 ? 'Needs attention' : 'No active task',
+        currentTitle: laneCurrentTaskTitles?.[scopeId] || (blocked > 0 ? `${blocked} blocked` : 'Idle'),
+        label: laneCurrentTaskTitles?.[scopeId] || (blocked > 0 ? `${blocked} blocked` : 'Idle'),
+        countLabel: blocked > 0 ? 'Needs attention' : (laneDetail?.activity_label || 'No active task'),
         pathSegments: [],
         taskActionable: blocked > 0,
       };
@@ -2100,12 +2168,17 @@ function App() {
       };
     });
 
+    const laneActivityMode = String(laneDetail?.activity_mode || '').trim().toUpperCase();
     return {
       percent: localPercent,
       summary: rootTitle,
       currentTitle: leafTitle,
       currentStateLabel: leafPaused
         ? 'paused'
+        : laneActivityMode === 'GENERATING'
+        ? 'generating'
+        : laneActivityMode === 'STALLED'
+        ? 'stalled'
         : blockedDescendants > 0
         ? 'blocked'
         : leaf.status === 'pending'
@@ -2140,7 +2213,7 @@ function App() {
   }, [activeNav, currentScope, visibleTaskTree, activeTaskTree]);
   const loopMeta = routingSummary?.supervision?.active_jobs?.length
     ? `${routingSummary.supervision.active_jobs.length} active bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
-    : 'loop idle';
+    : `trainer ${String(laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · agent ${String(laneDetails?.agent?.activity_label || 'Idle').toLowerCase()}`;
 
   return (
     <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
@@ -2221,7 +2294,7 @@ function App() {
                 accent={tab.accent}
                 active={active}
                 detail={tab.id === 'home' ? loopMeta : buildLaneMeta(tab.id)}
-                status={tab.id === 'home' ? workerStatus : (laneStatuses?.[tab.id] || 'IDLE')}
+                status={tab.id === 'home' ? workerStatus : (laneDetails?.[tab.id]?.activity_mode || laneStatuses?.[tab.id] || 'IDLE')}
                 agentEnabled={agentEnabled}
                 agentSuppressedByGlobal={agentSuppressedByGlobal}
                 apiStatus={workerApiStatus}
@@ -2510,6 +2583,8 @@ function App() {
                 finishedTasks: scopedFinishedTaskTree,
                 workerStatus,
                 laneStatuses,
+                laneDetails,
+                laneCurrentTaskTitles,
                 scopeOperationalMetrics,
                 scopeAttemptMetrics,
                 onArchiveTask: handleArchiveTask,
@@ -2753,6 +2828,8 @@ function App() {
               currentScope={currentScope}
               workerStatus={workerStatus}
               laneStatuses={laneStatuses}
+              laneDetails={laneDetails}
+              laneCurrentTaskTitles={laneCurrentTaskTitles}
               providerTelemetry={providerTelemetry}
             />
           </Suspense>
@@ -2853,10 +2930,18 @@ const TopModeTab = ({
     : (status || 'UNKNOWN');
   const statusColor = displayStatus === 'PAUSED'
     ? '#ffb84d'
-    : displayStatus === 'RUNNING'
+    : displayStatus === 'RUNNING' || displayStatus === 'GENERATING'
     ? accent === 'trainer'
       ? '#ffb18c'
       : '#9ad8cd'
+    : displayStatus === 'STALLED'
+    ? '#ffb84d'
+    : displayStatus === 'BLOCKED'
+    ? '#ff9a9a'
+    : displayStatus === 'QUEUED'
+    ? '#8fd6ff'
+    : displayStatus === 'OFFLINE'
+    ? '#ff4d4d'
     : displayStatus === 'STOPPED'
     ? '#ff4d4d'
     : displayStatus === 'READY'

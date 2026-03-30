@@ -200,6 +200,26 @@ def test_background_worker_enqueue_runnable_tasks_respects_lane_and_paused_state
     assert agent_task_id not in queued
 
 
+def test_worker_status_includes_lane_runtime_details():
+    storage_factory = make_storage_factory()
+    worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
+    worker._running = True
+    worker._tier_health["agent"] = "ok"
+    task_id = "task-123"
+    worker._current_task_ids["agent"] = task_id
+    worker._current_processes["agent"] = object()
+    worker._lane_started_at["agent"] = datetime.now(timezone.utc)
+    worker._lane_last_activity_at["agent"] = datetime.now(timezone.utc)
+
+    status = worker.status
+    agent_detail = status["lane_details"]["agent"]
+
+    assert agent_detail["activity_mode"] == "GENERATING"
+    assert agent_detail["current_task_id"] == task_id
+    assert agent_detail["current_task_started_at"] is not None
+    assert agent_detail["heartbeat_age_s"] is not None
+
+
 def test_lane_idle_policies_seed_strong_supervision_independently(monkeypatch):
     storage_factory = make_storage_factory()
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())

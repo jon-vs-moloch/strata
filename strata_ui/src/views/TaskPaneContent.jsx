@@ -26,8 +26,22 @@ export default function TaskPaneContent({
   currentScope,
   workerStatus,
   laneStatuses,
+  laneDetails,
+  laneCurrentTaskTitles,
   providerTelemetry,
 }) {
+  const scopeLaneDetail = currentScope === 'home' ? null : (laneDetails?.[currentScope] || null);
+  const scopeModeLabel = currentScope === 'home'
+    ? `trainer ${String(laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · agent ${String(laneDetails?.agent?.activity_label || 'Idle').toLowerCase()}`
+    : (scopeLaneDetail?.activity_label || laneStatuses?.[currentScope] || 'IDLE');
+  const scopeHeartbeatLabel = currentScope === 'home'
+    ? 'shared runtime'
+    : scopeLaneDetail?.heartbeat_age_s == null
+    ? (scopeLaneDetail?.activity_mode === 'GENERATING' ? 'starting' : 'no heartbeat')
+    : `${scopeLaneDetail?.heartbeat_state || 'unknown'} · ${Math.round(Number(scopeLaneDetail?.heartbeat_age_s || 0))}s ago`;
+  const scopeCurrentTaskLabel = currentScope === 'home'
+    ? `${laneCurrentTaskTitles?.agent || laneCurrentTaskTitles?.trainer || 'no active task'}`
+    : (laneCurrentTaskTitles?.[currentScope] || 'no active task');
   return (
     <>
       {activeNav !== 'dashboard' && laneFinishedTasks.length > 0 && (
@@ -106,15 +120,21 @@ export default function TaskPaneContent({
             <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>{scopeOperationalMetrics.loadedContextCount} files · {scopeOperationalMetrics.loadedContextBudget} tok</span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-            <span style={{ color: '#7f8091' }}>scope health</span>
+            <span style={{ color: '#7f8091' }}>lane mode</span>
             <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-              {currentScope === 'home' ? workerStatus : (laneStatuses?.[currentScope] || 'IDLE')}
+              {scopeModeLabel}
             </span>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-            <span style={{ color: '#7f8091' }}>transport wait</span>
+            <span style={{ color: '#7f8091' }}>heartbeat</span>
             <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace" }}>
-              {Object.values(providerTelemetry || {})[0]?.avg_wait_ms ?? '—'}ms
+              {scopeHeartbeatLabel}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: '#7f8091' }}>current task</span>
+            <span style={{ color: '#c7c8d6', fontFamily: "'JetBrains Mono', monospace", textAlign: 'right' }}>
+              {scopeCurrentTaskLabel}
             </span>
           </div>
         </div>

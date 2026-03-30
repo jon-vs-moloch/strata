@@ -367,6 +367,8 @@ class BackgroundWorker:
         self._paused_lanes: set[str] = set()
         self._current_processes: Dict[str, Optional[asyncio.Task]] = {lane: None for lane in LANE_NAMES}
         self._current_task_ids: Dict[str, Optional[str]] = {lane: None for lane in LANE_NAMES}
+        self._lane_started_at: Dict[str, Optional[datetime]] = {lane: None for lane in LANE_NAMES}
+        self._lane_last_activity_at: Dict[str, Optional[datetime]] = {lane: None for lane in LANE_NAMES}
         self._lane_models: Dict[str, object] = {lane: self._model_adapter_factory() for lane in LANE_NAMES}
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
         self._tier_health = {"trainer": "unknown", "agent": "unknown"}
@@ -476,12 +478,21 @@ class BackgroundWorker:
             except asyncio.CancelledError:
                 pass
             self._running_tasks[lane] = None
+            self._current_processes[lane] = None
+            self._current_task_ids[lane] = None
+            self._lane_started_at[lane] = None
+            self._lane_last_activity_at[lane] = None
         logger.info("BackgroundWorker stopped")
 
     def set_on_update(self, callback):
         self._on_update_callback = callback
         
     async def _notify(self, task_id: str, state: str):
+        now = datetime.now(timezone.utc)
+        for lane_name, current_task_id in self._current_task_ids.items():
+            if current_task_id == task_id:
+                self._lane_last_activity_at[lane_name] = now
+                break
         if self._on_update_callback:
             try:
                 if asyncio.iscoroutinefunction(self._on_update_callback):
@@ -695,6 +706,9 @@ class BackgroundWorker:
                     continue
 
                 self._current_task_ids[normalized_lane] = task_id
+                now = datetime.now(timezone.utc)
+                self._lane_started_at[normalized_lane] = now
+                self._lane_last_activity_at[normalized_lane] = now
                 self._current_processes[normalized_lane] = asyncio.create_task(self._run_task_cycle(task_id, lane=normalized_lane))
                 try:
                     await self._current_processes[normalized_lane]
@@ -703,6 +717,8 @@ class BackgroundWorker:
                 finally:
                     self._current_processes[normalized_lane] = None
                     self._current_task_ids[normalized_lane] = None
+                    self._lane_started_at[normalized_lane] = None
+                    self._lane_last_activity_at[normalized_lane] = datetime.now(timezone.utc)
                     await self._ensure_lane_idle_policies()
 
                 lane_queue.task_done()
@@ -1086,6 +1102,72 @@ class BackgroundWorker:
             return "RUNNING"
         return "IDLE"
 
+    def _lane_runtime_snapshot(self, lane: str) -> Dict[str, object]:
+        normalized_lane = normalize_lane(lane)
+        snapshot: Dict[str, object] = {
+            "status": self.lane_status(lane),
+            "tier_health": self._tier_health.get(normalized_lane or "", "unknown"),
+            "activity_mode": "UNKNOWN",
+            "activity_label": "Unknown",
+            "queue_depth": 0,
+            "current_task_id": None,
+            "current_task_started_at": None,
+            "last_activity_at": None,
+            "heartbeat_state": "unknown",
+            "heartbeat_age_s": None,
+        }
+        if not normalized_lane:
+            return snapshot
+
+        snapshot["queue_depth"] = self._lane_queue(normalized_lane).qsize()
+        current_task_id = self._current_task_ids.get(normalized_lane)
+        started_at = _parse_timestamp(self._lane_started_at.get(normalized_lane))
+        last_activity_at = _parse_timestamp(self._lane_last_activity_at.get(normalized_lane)) or started_at
+
+        if current_task_id:
+            snapshot["current_task_id"] = str(current_task_id)
+        if started_at is not None:
+            snapshot["current_task_started_at"] = started_at.isoformat()
+        if last_activity_at is not None:
+            snapshot["last_activity_at"] = last_activity_at.isoformat()
+
+        now = datetime.now(timezone.utc)
+        if last_activity_at is not None:
+            heartbeat_age_s = max(0.0, (now - last_activity_at).total_seconds())
+            snapshot["heartbeat_age_s"] = round(heartbeat_age_s, 2)
+            if heartbeat_age_s <= 45:
+                snapshot["heartbeat_state"] = "active"
+            elif heartbeat_age_s <= 180:
+                snapshot["heartbeat_state"] = "quiet"
+            else:
+                snapshot["heartbeat_state"] = "stalled"
+
+        status = str(snapshot["status"] or "UNKNOWN")
+        tier_health = str(snapshot["tier_health"] or "unknown").lower()
+        if status == "STOPPED":
+            snapshot["activity_mode"] = "STOPPED"
+            snapshot["activity_label"] = "Stopped"
+        elif status == "PAUSED":
+            snapshot["activity_mode"] = "PAUSED"
+            snapshot["activity_label"] = "Paused"
+        elif tier_health == "error":
+            snapshot["activity_mode"] = "OFFLINE"
+            snapshot["activity_label"] = "Offline"
+        elif current_task_id:
+            if snapshot["heartbeat_state"] == "stalled":
+                snapshot["activity_mode"] = "STALLED"
+                snapshot["activity_label"] = "Stalled"
+            else:
+                snapshot["activity_mode"] = "GENERATING"
+                snapshot["activity_label"] = "Generating"
+        elif snapshot["queue_depth"]:
+            snapshot["activity_mode"] = "QUEUED"
+            snapshot["activity_label"] = "Queued"
+        else:
+            snapshot["activity_mode"] = "IDLE"
+            snapshot["activity_label"] = "Idle"
+        return snapshot
+
     @property
     def status(self):
         return {
@@ -1096,5 +1178,9 @@ class BackgroundWorker:
             "lanes": {
                 "trainer": self.lane_status("trainer"),
                 "agent": self.lane_status("agent"),
+            },
+            "lane_details": {
+                "trainer": self._lane_runtime_snapshot("trainer"),
+                "agent": self._lane_runtime_snapshot("agent"),
             },
         }

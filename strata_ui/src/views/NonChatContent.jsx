@@ -117,6 +117,8 @@ const TasksView = ({
   finishedTasks,
   workerStatus,
   laneStatuses,
+  laneDetails,
+  laneCurrentTaskTitles,
   scopeOperationalMetrics,
   scopeAttemptMetrics,
   onArchiveTask,
@@ -124,7 +126,18 @@ const TasksView = ({
 }) => {
   const [showFinished, setShowFinished] = useState(false);
   const scopeLabel = currentScope === 'home' ? 'Global' : currentScope === 'trainer' ? 'Trainer' : 'Agent';
-  const scopeHealth = currentScope === 'home' ? workerStatus : (laneStatuses?.[currentScope] || 'IDLE');
+  const scopeLaneDetail = currentScope === 'home' ? null : (laneDetails?.[currentScope] || null);
+  const scopeHealth = currentScope === 'home'
+    ? `trainer ${String(laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · agent ${String(laneDetails?.agent?.activity_label || 'Idle').toLowerCase()}`
+    : (scopeLaneDetail?.activity_label || laneStatuses?.[currentScope] || 'IDLE');
+  const scopeHeartbeat = currentScope === 'home'
+    ? 'shared runtime'
+    : scopeLaneDetail?.heartbeat_age_s == null
+    ? (scopeLaneDetail?.activity_mode === 'GENERATING' ? 'starting' : 'no heartbeat')
+    : `${scopeLaneDetail?.heartbeat_state || 'unknown'} · ${Math.round(Number(scopeLaneDetail?.heartbeat_age_s || 0))}s ago`;
+  const scopeCurrentTask = currentScope === 'home'
+    ? (laneCurrentTaskTitles?.agent || laneCurrentTaskTitles?.trainer || 'no active task')
+    : (laneCurrentTaskTitles?.[currentScope] || 'no active task');
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
@@ -132,12 +145,13 @@ const TasksView = ({
         <DashboardPanel title="TASK QUEUE">
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
             <RoutePill label="SCOPE" value={scopeLabel} tone="neutral" />
-            <RoutePill label="HEALTH" value={scopeHealth} tone={scopeHealth === 'RUNNING' ? 'success' : scopeHealth === 'PAUSED' ? 'warning' : 'neutral'} />
+            <RoutePill label="MODE" value={scopeHealth} tone={String(scopeHealth).toUpperCase().includes('GENERATING') ? 'success' : String(scopeHealth).toUpperCase().includes('BLOCKED') || String(scopeHealth).toUpperCase().includes('STALLED') ? 'warning' : 'neutral'} />
             <RoutePill label="ACTIVE" value={String(activeTasks.length)} tone="success" />
             <RoutePill label="RECENT" value={String(finishedTasks.length)} tone="neutral" />
+            <RoutePill label="HEARTBEAT" value={scopeHeartbeat} tone="neutral" />
           </div>
           <div style={{ color: '#8d8ea1', fontSize: '13px', lineHeight: 1.7 }}>
-            This is the canonical task surface: active work stays visible here, recent completions remain easy to inspect, and the lane-specific task rail can stay focused on chat context.
+            This is the canonical task surface: active work stays visible here, recent completions remain easy to inspect, and the lane-specific task rail can stay focused on chat context. Current task: {scopeCurrentTask}.
           </div>
         </DashboardPanel>
 
