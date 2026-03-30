@@ -9,9 +9,11 @@ from strata.orchestrator.background import (
     ensure_blocked_weak_task_review,
     resolution_from_plan_review,
 )
+from strata.orchestrator.worker.idle_policy import run_idle_tasks
 from strata.orchestrator.worker.attempt_runner import _run_decomposition
+from strata.procedures.registry import queue_procedure
 from strata.schemas.core import TaskDecomposition, TaskFraming
-from strata.storage.models import Base, TaskState, TaskType
+from strata.storage.models import Base, TaskModel, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
 
@@ -77,6 +79,11 @@ class GenericRecoveryDecompModel(DummyModel):
             },
             "total_estimated_budget": 0.1,
         }
+
+
+class ExplodingModel(DummyModel):
+    async def chat(self, *_args, **_kwargs):
+        raise AssertionError("idle alignment should not call the model before onboarding exists")
 
 
 def test_background_worker_can_pause_and_resume_individual_lanes():
@@ -248,6 +255,56 @@ def test_lane_idle_policies_can_seed_weak_even_when_other_lane_is_busy(monkeypat
     asyncio.run(worker._ensure_lane_idle_policies({"automatic_task_generation": True, "testing_mode": False}))
 
     assert calls == ["agent"]
+
+
+def test_run_idle_tasks_seeds_onboarding_before_alignment(monkeypatch):
+    storage_factory = make_storage_factory()
+    queue = asyncio.Queue()
+
+    monkeypatch.setattr("strata.orchestrator.worker.idle_policy.deliver_communication", lambda *args, **kwargs: None)
+
+    asyncio.run(run_idle_tasks(storage_factory, ExplodingModel(), queue))
+
+    queued_task_id = queue.get_nowait()
+    storage = storage_factory()
+    try:
+        queued_task = storage.tasks.get_by_id(queued_task_id)
+        all_tasks = storage.session.query(TaskModel).all()
+        assert queued_task is not None
+        assert queued_task.title == "Procedure: Operator Onboarding"
+        assert queued_task.constraints["procedure_id"] == "operator_onboarding"
+        assert not any(str(task.title).startswith("Alignment:") for task in all_tasks)
+    finally:
+        storage.close()
+
+
+def test_run_idle_tasks_allows_alignment_after_onboarding_completes(monkeypatch):
+    storage_factory = make_storage_factory()
+    storage = storage_factory()
+    onboarding = queue_procedure(storage, None, procedure_id="operator_onboarding", lane="agent")
+    onboarding.state = TaskState.COMPLETE
+    storage.commit()
+    storage.close()
+
+    queue = asyncio.Queue()
+
+    async def fake_verify_artifact(*_args, **_kwargs):
+        return {"verdict": "sound", "failure_modes": []}
+
+    monkeypatch.setattr("strata.orchestrator.worker.idle_policy.deliver_communication", lambda *args, **kwargs: None)
+    monkeypatch.setattr("strata.orchestrator.worker.idle_policy.verify_artifact", fake_verify_artifact)
+
+    asyncio.run(run_idle_tasks(storage_factory, DummyModel(), queue))
+
+    queued_task_id = queue.get_nowait()
+    reloaded = storage_factory()
+    try:
+        queued_task = reloaded.tasks.get_by_id(queued_task_id)
+        assert queued_task is not None
+        assert queued_task.title.startswith("Alignment:")
+        assert queued_task.constraints["alignment_source"] == "idle_policy"
+    finally:
+        reloaded.close()
 
 
 def test_resolution_from_plan_review_honors_structural_recommendation():

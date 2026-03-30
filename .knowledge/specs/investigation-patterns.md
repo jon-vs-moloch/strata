@@ -9,6 +9,7 @@ Current durable guidance:
 - when a bad claim originates before attempt execution, investigate the generation surface itself; missing verification hooks upstream of task execution are real failures, not just missing retries downstream
 - preserve task semantics through recovery; if recovery replaces a bounded task with a generic shell like `Error Recover` or `Research manually`, treat that as a fresh failure, not progress
 - when a task is fundamentally about clarification, confirmation, or operator preference, surface explicit pending questions rather than spending autonomous iterations on broad research
+- when startup behavior is wrong, separate lane-specific obligations before adding a global gate; for example, agent onboarding may need to block agent idle alignment without freezing trainer-side supervision
 - if a question begins as non-blocking but current capabilities cannot resolve it, promote it to blocking; if new tooling or procedure unlocks autonomous progress, demote it back to non-blocking
 - supervision should cash out into intervention; a trace review that only records `review_unavailable` or vague concern without changing routing, prompting, or user communication is incomplete recovery
 - blocked-task supervision must require new evidence before rerunning; repeated reviews over unchanged evidence are telemetry churn, not learning

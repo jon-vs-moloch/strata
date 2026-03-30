@@ -14,6 +14,7 @@ Current durable guidance:
 - the agent tier should remain available for normal operations and bounded autonomous work while the trainer tier supervises and troubleshoots harness performance
 - trainer and agent execution must not starve each other; they should run on separate worker lanes and, where possible, separate inference pools so one stalled tier cannot block the other
 - trainer and agent transport boundaries should fail closed: do not silently route agent work onto cloud inference or trainer work onto local inference; cross-tier help should happen through explicit handoff seams such as queued tasks, reviews, or attention signals
+- operator-facing onboarding belongs to the agent lane; trainer supervision and bootstrap work should not be implicitly blocked on onboarding unless the operator explicitly chooses that posture
 - supervision should be deliberate rather than overwhelming; measure enough to steer the system, but do not let eval volume crowd out useful work
 - prefer cheap, deterministic preprocessing before inference whenever possible; use inference after the system has already reduced ambiguity, narrowed the search space, and assembled the best available evidence
 - if a decision can be improved by mixing deterministic checks with model judgment, run the deterministic pass first and feed its output to the model rather than asking the model to rediscover obvious structure from scratch

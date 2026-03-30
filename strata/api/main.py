@@ -55,6 +55,7 @@ from strata.specs.bootstrap import (
     resolve_spec_proposal,
     resubmit_spec_proposal_with_clarification,
 )
+from strata.procedures.registry import ensure_onboarding_task
 from strata.orchestrator.user_questions import (
     enqueue_user_question,
     get_active_question,
@@ -238,6 +239,9 @@ async def lifespan(app: FastAPI):
                 raise
             logger.warning("Skipping startup context-pressure scan due to database lock contention.")
             storage.rollback()
+        seeded_onboarding = ensure_onboarding_task(storage, _worker)
+        if seeded_onboarding is not None:
+            logger.info("Seeded onboarding task %s during API startup.", getattr(seeded_onboarding, "task_id", "unknown"))
     finally:
         storage.close()
     _worker_start_task = asyncio.create_task(_worker.start(), name="background-worker-startup")

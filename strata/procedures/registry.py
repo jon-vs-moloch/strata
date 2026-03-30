@@ -9,14 +9,15 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from strata.core.lanes import canonical_session_id_for_lane, normalize_lane
-from strata.storage.models import TaskState, TaskType
+from strata.storage.models import TaskModel, TaskState, TaskType
 
 
 PROCEDURE_REGISTRY_KEY = "procedure_registry"
 DEFAULT_PROCEDURE_LANE = "agent"
+ONBOARDING_PROCEDURE_ID = "operator_onboarding"
 DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
-    "operator_onboarding": {
-        "procedure_id": "operator_onboarding",
+    ONBOARDING_PROCEDURE_ID: {
+        "procedure_id": ONBOARDING_PROCEDURE_ID,
         "title": "Operator Onboarding",
         "summary": "Establish the agent's identity, operator defaults, and baseline trust posture.",
         "repeatable": True,
@@ -174,3 +175,53 @@ def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[
         task.type = TaskType.RESEARCH
     storage.commit()
     return task
+
+
+def list_procedure_tasks(storage, procedure_id: str) -> List[TaskModel]:
+    normalized_id = str(procedure_id or "").strip()
+    if not normalized_id:
+        return []
+    procedure = get_procedure(storage, normalized_id)
+    expected_title = f"Procedure: {procedure.get('title')}"
+    matches: List[TaskModel] = []
+    for task in storage.session.query(TaskModel).all():
+        constraints = dict(getattr(task, "constraints", {}) or {})
+        if constraints.get("procedure_id") == normalized_id or str(getattr(task, "title", "") or "").strip() == expected_title:
+            matches.append(task)
+    matches.sort(key=lambda item: getattr(item, "created_at", None) or 0)
+    return matches
+
+
+def get_procedure_status(storage, procedure_id: str) -> Dict[str, Any]:
+    tasks = list_procedure_tasks(storage, procedure_id)
+    active_states = {TaskState.PENDING, TaskState.WORKING, TaskState.BLOCKED}
+    latest = tasks[-1] if tasks else None
+    has_active = any(getattr(task, "state", None) in active_states for task in tasks)
+    has_completed = any(getattr(task, "state", None) == TaskState.COMPLETE for task in tasks)
+    return {
+        "procedure_id": procedure_id,
+        "has_any": bool(tasks),
+        "has_active": has_active,
+        "has_completed": has_completed,
+        "needs_queue": not has_active and not has_completed,
+        "task_ids": [str(task.task_id) for task in tasks],
+        "latest_task_id": str(latest.task_id) if latest is not None else None,
+        "latest_state": getattr(getattr(latest, "state", None), "value", None) if latest is not None else None,
+    }
+
+
+def get_onboarding_status(storage) -> Dict[str, Any]:
+    return get_procedure_status(storage, ONBOARDING_PROCEDURE_ID)
+
+
+def ensure_onboarding_task(storage, worker, *, session_id: Optional[str] = None, lane: Optional[str] = None):
+    status = get_onboarding_status(storage)
+    if not status.get("needs_queue"):
+        return None
+    return queue_procedure(
+        storage,
+        worker,
+        procedure_id=ONBOARDING_PROCEDURE_ID,
+        session_id=session_id,
+        lane=lane,
+    )
