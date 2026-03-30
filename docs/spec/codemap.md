@@ -146,6 +146,8 @@ Important worker submodules:
   Core project goals and systems-intelligence thesis.
 - [task-attempt-ontology.md](/Users/jon/Projects/strata/docs/spec/task-attempt-ontology.md)
   Task and attempt primitives.
+- [system-substrates.md](/Users/jon/Projects/strata/docs/spec/system-substrates.md)
+  Proper-noun architecture index for `Procedure`, `Verifier`, `Audit`, trace review, observability, desktop shell, and related first-class substrates.
 - [feedback-prioritization.md](/Users/jon/Projects/strata/docs/spec/feedback-prioritization.md)
   Surprise-first feedback and alignment risk triage.
 - [context-management.md](/Users/jon/Projects/strata/docs/spec/context-management.md)

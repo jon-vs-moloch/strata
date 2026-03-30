@@ -41,6 +41,7 @@ Canonical supporting references:
 - `README.md`
 - `docs/spec/project-philosophy.md`
 - `docs/spec/codemap.md`
+- `docs/spec/system-substrates.md`
 - `.knowledge/specs/investigation-patterns.md`
 - `docs/spec/task-attempt-ontology.md`
 
