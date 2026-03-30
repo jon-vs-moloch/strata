@@ -83,6 +83,39 @@ class GenericRecoveryDecompModel(DummyModel):
         }
 
 
+class DependentDecompModel(DummyModel):
+    def extract_structured_object(self, _raw):
+        return {
+            "framing": {
+                "repository_context": "Repo",
+                "problem_statement": "Do the thing",
+                "constraints": [],
+                "success_criteria": [],
+            },
+            "subtasks": {
+                "inspect": {
+                    "title": "Inspect current settings",
+                    "description": "Inspect the existing runtime posture configuration.",
+                    "target_files": ["strata/api/main.py"],
+                    "edit_type": "chore",
+                    "validator": "pytest",
+                    "max_diff_size": 5000,
+                    "dependencies": [],
+                },
+                "persist": {
+                    "title": "Persist runtime posture",
+                    "description": "Write the confirmed runtime posture into durable settings.",
+                    "target_files": ["strata/api/main.py"],
+                    "edit_type": "feature",
+                    "validator": "pytest",
+                    "max_diff_size": 5000,
+                    "dependencies": ["inspect"],
+                },
+            },
+            "total_estimated_budget": 0.2,
+        }
+
+
 class ExplodingModel(DummyModel):
     async def chat(self, *_args, **_kwargs):
         raise AssertionError("idle alignment should not call the model before onboarding exists")
@@ -514,6 +547,36 @@ def test_run_decomposition_falls_back_to_procedure_checklist_subtasks():
     assert all(task.type == TaskType.RESEARCH for task in created)
     assert all("procedure_checklist_item" in dict(task.constraints or {}) for task in created)
     assert len(queued) == 2
+
+
+def test_run_decomposition_persists_dependency_edges():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Recovery Plan for Runtime Posture",
+        description="Decompose runtime posture work.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        constraints={"lane": "agent"},
+    )
+    task.type = TaskType.DECOMP
+    storage.commit()
+
+    queued = []
+
+    async def enqueue_fn(task_id):
+        queued.append(task_id)
+
+    asyncio.run(_run_decomposition(task, storage, DependentDecompModel(), enqueue_fn))
+
+    created = [child for child in storage.session.query(TaskModel).all() if child.parent_task_id == task.task_id]
+    assert len(created) == 2
+    by_title = {child.title: child for child in created}
+    inspect_task = by_title["Inspect current settings"]
+    persist_task = by_title["Persist runtime posture"]
+
+    assert inspect_task.task_id in queued
+    assert persist_task.task_id in queued
+    assert inspect_task in persist_task.dependencies
 
 
 def test_blocked_weak_task_review_skips_when_no_new_evidence_after_review():

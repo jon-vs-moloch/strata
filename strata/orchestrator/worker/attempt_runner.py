@@ -298,6 +298,7 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             "Decomposition produced no actionable subtasks. Treat this as a recoverable planning failure and generate a more concrete recovery plan instead of escalating by default."
         )
     spawned_ids = []
+    spawned_by_proto_id = {}
     for tid, proto in actionable:
         sub = storage.tasks.create(
             title=proto.title,
@@ -316,6 +317,17 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
         sub.type = TaskType.IMPL
         sub.depth = task.depth + 1
         spawned_ids.append(sub.task_id)
+        spawned_by_proto_id[str(tid)] = sub
+    for tid, proto in actionable:
+        sub = spawned_by_proto_id.get(str(tid))
+        if sub is None:
+            continue
+        for dep_tid in list(getattr(proto, "dependencies", []) or []):
+            dep_task = spawned_by_proto_id.get(str(dep_tid))
+            if dep_task is None or dep_task.task_id == sub.task_id:
+                continue
+            if dep_task not in sub.dependencies:
+                sub.dependencies.append(dep_task)
     task.state = TaskState.WORKING
     storage.commit()
     for task_id in spawned_ids:
