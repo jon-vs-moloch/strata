@@ -1,8 +1,14 @@
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import asyncio
 
-from strata.orchestrator.background import BackgroundWorker, resolution_from_plan_review
+from strata.orchestrator.background import (
+    BackgroundWorker,
+    ensure_blocked_weak_task_review,
+    resolution_from_plan_review,
+)
 from strata.orchestrator.worker.attempt_runner import _run_decomposition
 from strata.schemas.core import TaskDecomposition, TaskFraming
 from strata.storage.models import Base, TaskState, TaskType
@@ -49,6 +55,30 @@ class DummyDecompModel(DummyModel):
         }
 
 
+class GenericRecoveryDecompModel(DummyModel):
+    def extract_structured_object(self, _raw):
+        return {
+            "framing": {
+                "repository_context": "Repo",
+                "problem_statement": "Do the thing",
+                "constraints": [],
+                "success_criteria": [],
+            },
+            "subtasks": {
+                "recover": {
+                    "title": "Error Recover",
+                    "description": "Initial decomposition failed. Research manually.",
+                    "target_files": [],
+                    "edit_type": "chore",
+                    "validator": "pytest",
+                    "max_diff_size": 5000,
+                    "dependencies": [],
+                }
+            },
+            "total_estimated_budget": 0.1,
+        }
+
+
 def test_background_worker_can_pause_and_resume_individual_lanes():
     worker = BackgroundWorker(storage_factory=make_storage, model_adapter=DummyModel())
     worker._running = True
@@ -74,8 +104,8 @@ def test_background_worker_stop_current_respects_lane_scope():
             self.cancelled = True
 
     process = StubProcess()
-    worker._current_process = process
-    worker._current_task_lane = "trainer"
+    worker._current_processes["trainer"] = process
+    worker._current_task_ids["trainer"] = "trainer-task"
 
     assert worker.stop_current("agent") is False
     assert process.cancelled is False
@@ -155,8 +185,9 @@ def test_background_worker_enqueue_runnable_tasks_respects_lane_and_paused_state
     assert enqueued == 1
 
     queued = []
-    while not worker._queue.empty():
-        queued.append(worker._queue.get_nowait())
+    trainer_queue = worker._lane_queue("trainer")
+    while not trainer_queue.empty():
+        queued.append(trainer_queue.get_nowait())
 
     assert trainer_task_id in queued
     assert agent_task_id not in queued
@@ -254,3 +285,64 @@ def test_run_decomposition_raises_when_no_actionable_subtasks():
         raise AssertionError("Expected empty decomposition to raise")
     except RuntimeError as exc:
         assert "no actionable subtasks" in str(exc).lower()
+
+
+def test_run_decomposition_rejects_generic_recovery_shell_subtasks():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Recovery Plan for Operator Onboarding",
+        description="Create a bounded recovery plan.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        constraints={"lane": "agent"},
+    )
+    task.type = TaskType.DECOMP
+    storage.commit()
+
+    async def enqueue_fn(_task_id):
+        raise AssertionError("Generic recovery placeholders should not be enqueued")
+
+    try:
+        asyncio.run(_run_decomposition(task, storage, GenericRecoveryDecompModel(), enqueue_fn))
+        raise AssertionError("Expected generic recovery placeholder to be rejected")
+    except RuntimeError as exc:
+        assert "generic recovery placeholders" in str(exc).lower()
+
+
+def test_blocked_weak_task_review_skips_when_no_new_evidence_after_review():
+    storage_factory = make_storage_factory()
+    storage = storage_factory()
+    task = storage.tasks.create(
+        title="Blocked task",
+        description="Need guidance.",
+        session_id="agent:default",
+        state=TaskState.BLOCKED,
+        constraints={
+            "lane": "agent",
+            "trace_reviews": [
+                {
+                    "trace_kind": "task_trace",
+                    "reviewer_tier": "trainer",
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        },
+    )
+    task.human_intervention_required = True
+    attempt = storage.attempts.create(task_id=task.task_id)
+    attempt.started_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+    attempt.ended_at = datetime.now(timezone.utc) - timedelta(minutes=14)
+    storage.commit()
+    storage.close()
+
+    async def fake_queue_system_job(*_args, **_kwargs):
+        raise AssertionError("Should not queue review without new evidence")
+
+    result = asyncio.run(
+        ensure_blocked_weak_task_review(
+            storage_factory,
+            queue_system_job=fake_queue_system_job,
+        )
+    )
+
+    assert result is None

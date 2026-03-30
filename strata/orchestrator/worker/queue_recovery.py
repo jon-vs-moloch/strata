@@ -16,6 +16,7 @@ async def recover_tasks(
     recover_orphaned_running: bool = True,
     requeue_existing_pending: bool = False,
     pending_task_max_age_minutes: int | None = None,
+    task_filter=None,
 ):
     """
     @summary Sweep for tasks stuck in WORKING and optionally reload existing PENDING tasks.
@@ -32,6 +33,8 @@ async def recover_tasks(
             return
 
         orphaned = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.WORKING).all()
+        if task_filter is not None:
+            orphaned = [task for task in orphaned if task_filter(task)]
         logger.info(f"Scanning for orphaned tasks, found {len(orphaned)}")
         recovered_orphaned = []
         for task in orphaned:
@@ -54,6 +57,8 @@ async def recover_tasks(
 
         queued_query = storage.session.query(TaskModel).filter(TaskModel.state == TaskState.PENDING)
         queued = queued_query.all()
+        if task_filter is not None:
+            queued = [task for task in queued if task_filter(task)]
         if pending_task_max_age_minutes:
             cutoff = datetime.utcnow() - timedelta(minutes=pending_task_max_age_minutes)
             queued = [task for task in queued if task.updated_at and task.updated_at >= cutoff]

@@ -11,9 +11,11 @@ small local model can benefit from.
 
 import asyncio
 import logging
-from typing import Callable, Optional
+from datetime import datetime, timezone
+from typing import Callable, Dict, Optional
 
 from strata.core.lanes import infer_lane_from_task, normalize_lane
+from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.feedback.signals import register_feedback_signal
 from strata.storage.models import TaskModel, TaskState, AttemptOutcome
 from strata.orchestrator.worker.queue_recovery import recover_tasks
@@ -28,6 +30,63 @@ from strata.eval.job_runner import run_eval_job_task
 from strata.experimental.verifier import emit_verifier_attention_signal, verify_task_output
 
 logger = logging.getLogger(__name__)
+LANE_NAMES = ("trainer", "agent")
+
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        normalized = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _latest_blocked_task_review_at(task: TaskModel) -> Optional[datetime]:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    latest = None
+    for item in constraints.get("trace_reviews") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("trace_kind") or "").strip().lower() != "task_trace":
+            continue
+        if str(item.get("reviewer_tier") or "").strip().lower() != "trainer":
+            continue
+        recorded_at = _parse_timestamp(item.get("recorded_at"))
+        if recorded_at and (latest is None or recorded_at > latest):
+            latest = recorded_at
+    return latest
+
+
+def _latest_blocked_task_evidence_at(storage, task: TaskModel) -> Optional[datetime]:
+    latest = None
+    for attempt in storage.attempts.get_by_task_id(task.task_id) or []:
+        for candidate in [getattr(attempt, "ended_at", None), getattr(attempt, "started_at", None)]:
+            parsed = _parse_timestamp(candidate)
+            if parsed and (latest is None or parsed > latest):
+                latest = parsed
+    for artifact in list_attempt_observability_artifacts(storage, task_id=task.task_id, limit=8):
+        parsed = _parse_timestamp(artifact.get("created_at"))
+        if parsed and (latest is None or parsed > latest):
+            latest = parsed
+    return latest
+
+
+def _blocked_task_has_new_evidence_since_review(storage, task: TaskModel) -> bool:
+    latest_review_at = _latest_blocked_task_review_at(task)
+    if latest_review_at is None:
+        return True
+    latest_evidence_at = _latest_blocked_task_evidence_at(storage, task)
+    if latest_evidence_at is None:
+        return False
+    return latest_evidence_at > latest_review_at
 
 
 def resolution_from_plan_review(review: Optional[dict]):
@@ -254,6 +313,8 @@ async def ensure_blocked_weak_task_review(
         for candidate in weak_blocked_tasks:
             if normalize_lane(infer_lane_from_task(candidate)) != "agent":
                 continue
+            if not _blocked_task_has_new_evidence_since_review(storage, candidate):
+                continue
             return await queue_system_job(
                 storage,
                 kind="trace_review",
@@ -285,22 +346,50 @@ class BackgroundWorker:
     @summary Managed background loop for asynchronous task execution.
     """
 
-    def __init__(self, storage_factory, model_adapter, memory=None, settings_provider: Optional[Callable[[], dict]] = None):
+    def __init__(
+        self,
+        storage_factory,
+        model_adapter,
+        memory=None,
+        settings_provider: Optional[Callable[[], dict]] = None,
+        model_adapter_factory: Optional[Callable[[], object]] = None,
+    ):
         self._storage_factory = storage_factory
         self._model = model_adapter
+        self._model_adapter_factory = model_adapter_factory or self._default_model_adapter_factory(model_adapter)
         self._memory = memory
         self._settings_provider = settings_provider or (lambda: {})
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._running_task: Optional[asyncio.Task] = None
+        self._lane_queues: Dict[str, asyncio.Queue] = {lane: asyncio.Queue() for lane in LANE_NAMES}
+        self._running_tasks: Dict[str, Optional[asyncio.Task]] = {lane: None for lane in LANE_NAMES}
         self._on_update_callback = None
         self._running = False
         self._paused = False
         self._paused_lanes: set[str] = set()
-        self._current_process: Optional[asyncio.Task] = None
-        self._current_task_lane: Optional[str] = None
-        self._current_task_id: Optional[str] = None
+        self._current_processes: Dict[str, Optional[asyncio.Task]] = {lane: None for lane in LANE_NAMES}
+        self._current_task_ids: Dict[str, Optional[str]] = {lane: None for lane in LANE_NAMES}
+        self._lane_models: Dict[str, object] = {lane: self._model_adapter_factory() for lane in LANE_NAMES}
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
         self._tier_health = {"trainer": "unknown", "agent": "unknown"}
+
+    def _default_model_adapter_factory(self, template_adapter):
+        def _factory():
+            adapter = type(template_adapter)()
+            selected_models = dict(getattr(template_adapter, "_selected_models", {}) or {})
+            if selected_models and hasattr(adapter, "_selected_models"):
+                adapter._selected_models = selected_models
+            return adapter
+
+        return _factory
+
+    def _lane_queue(self, lane: Optional[str]) -> asyncio.Queue:
+        normalized_lane = normalize_lane(lane) or "agent"
+        return self._lane_queues.setdefault(normalized_lane, asyncio.Queue())
+
+    def _lane_model(self, lane: Optional[str]):
+        normalized_lane = normalize_lane(lane) or "agent"
+        if normalized_lane not in self._lane_models:
+            self._lane_models[normalized_lane] = self._model_adapter_factory()
+        return self._lane_models[normalized_lane]
 
     def _settings(self) -> dict:
         try:
@@ -317,21 +406,21 @@ class BackgroundWorker:
         logger.info("Performing deep preflight check (trainer-agent + agent tiers)...")
         from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
         settings = self._settings()
-        allow_cloud_only_boot = bool(settings.get("allow_cloud_only_boot", False))
         
         contexts = [
             ("trainer", TrainerExecutionContext(run_id="preflight")),
             ("agent", AgentExecutionContext(run_id="preflight"))
         ]
-        
+
         for name, ctx in contexts:
             logger.info(f"Checking {name} model tier...")
-            self._model.bind_execution_context(ctx)
+            lane_model = self._lane_model(name)
+            lane_model.bind_execution_context(ctx)
             try:
                 # Ping with a simple no-op (Max 5s timeout)
                 # If it's a Cloud transport without an API key, bind_execution_context may throw
                 # or the chat call will throw.
-                await self._model.chat([{"role": "user", "content": "ping"}], timeout=5.0)
+                await lane_model.chat([{"role": "user", "content": "ping"}], timeout=5.0)
                 logger.info(f"  -> {name} tier is reachable.")
                 self._tier_health[name] = "ok"
             except Exception as e:
@@ -340,21 +429,25 @@ class BackgroundWorker:
                 # We still log it loudly so the operator knows bootstrap quality is degraded.
                 logger.error(f"  -> {name} tier FAILED check: {e}")
                 self._tier_health[name] = "error"
-                if name == "agent":
-                    if allow_cloud_only_boot and self._tier_health.get("trainer") == "ok":
-                        logger.warning("Worker proceeding in cloud-only mode because the agent tier is unavailable.")
-                    else:
-                        raise Exception(f"Worker cannot start: the local agent tier is unreachable. ({e})")
-                else:
-                    # Trainer-agent is optional but critical for high-level reasoning.
-                    logger.warning("Worker proceeding without the trainer-agent tier (unreachable or misconfigured).")
+                logger.warning("Worker proceeding with lane '%s' unavailable until its configured transport is healthy again.", name)
+
+        if all(status == "error" for status in self._tier_health.values()):
+            raise Exception("Worker cannot start: both trainer and agent lanes are unreachable.")
 
         # 2. Start Recovery Sweep
         await recover_tasks(
             self._storage_factory,
-            self._queue,
+            self._lane_queue("trainer"),
             recover_orphaned_running=not settings.get("testing_mode", False),
             requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
+            task_filter=lambda task: normalize_lane(infer_lane_from_task(task)) == "trainer",
+        )
+        await recover_tasks(
+            self._storage_factory,
+            self._lane_queue("agent"),
+            recover_orphaned_running=not settings.get("testing_mode", False),
+            requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
+            task_filter=lambda task: normalize_lane(infer_lane_from_task(task)) == "agent",
         )
         if not settings.get("testing_mode", False):
             replayed = await self.enqueue_runnable_tasks()
@@ -365,17 +458,24 @@ class BackgroundWorker:
         self._running = True
         if not settings.get("testing_mode", False):
             await self._ensure_lane_idle_policies(settings)
-        self._running_task = asyncio.create_task(self._loop(), name="background-worker")
+        for lane in LANE_NAMES:
+            self._running_tasks[lane] = asyncio.create_task(self._loop(lane), name=f"background-worker:{lane}")
         logger.info("BackgroundWorker started (Hardened Startup)")
 
     async def stop(self):
         self._running = False
-        if self._running_task:
-            self._running_task.cancel()
+        for lane, process in list(self._current_processes.items()):
+            if process:
+                process.cancel()
+        for lane, loop_task in list(self._running_tasks.items()):
+            if not loop_task:
+                continue
+            loop_task.cancel()
             try:
-                await self._running_task
+                await loop_task
             except asyncio.CancelledError:
                 pass
+            self._running_tasks[lane] = None
         logger.info("BackgroundWorker stopped")
 
     def set_on_update(self, callback):
@@ -392,27 +492,36 @@ class BackgroundWorker:
                 logger.error(f"Failed to notify update: {e}")
 
     async def enqueue(self, task_id: str):
-        await self._queue.put(task_id)
+        await self._lane_queue(self._lane_for_task_id(task_id)).put(task_id)
         logger.info(f"Enqueued task {task_id}")
 
-    async def wait_until_idle(self, timeout: float = 5.0) -> bool:
+    async def wait_until_idle(self, timeout: float = 5.0, lane: Optional[str] = None) -> bool:
+        normalized_lane = normalize_lane(lane)
         deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout))
         while asyncio.get_running_loop().time() < deadline:
-            if self._current_process is None:
+            if normalized_lane:
+                if self._current_processes.get(normalized_lane) is None:
+                    return True
+            elif all(process is None for process in self._current_processes.values()):
                 return True
             await asyncio.sleep(0.05)
-        return self._current_process is None
+        if normalized_lane:
+            return self._current_processes.get(normalized_lane) is None
+        return all(process is None for process in self._current_processes.values())
 
-    def clear_queue(self) -> int:
+    def clear_queue(self, lane: Optional[str] = None) -> int:
         cleared = 0
-        while True:
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            else:
-                self._queue.task_done()
-                cleared += 1
+        lanes = [normalize_lane(lane)] if normalize_lane(lane) else list(LANE_NAMES)
+        for lane_name in lanes:
+            queue = self._lane_queue(lane_name)
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    queue.task_done()
+                    cleared += 1
         if cleared:
             logger.info("Cleared %s queued task(s) from the worker backlog.", cleared)
         return cleared
@@ -441,7 +550,7 @@ class BackgroundWorker:
         normalized_lane = normalize_lane(lane)
         if not normalized_lane:
             return False
-        if self._current_task_lane == normalized_lane:
+        if self._current_processes.get(normalized_lane) is not None:
             return True
         storage = self._storage_factory()
         try:
@@ -478,7 +587,7 @@ class BackgroundWorker:
                     continue
                 if task.dependencies and any(dep.state != TaskState.COMPLETE for dep in task.dependencies):
                     continue
-                if task.task_id == self._current_task_id:
+                if task.task_id in {task_id for task_id in self._current_task_ids.values() if task_id}:
                     continue
                 await self.enqueue(task.task_id)
                 enqueued += 1
@@ -520,7 +629,7 @@ class BackgroundWorker:
             and "agent" not in self._paused_lanes
         ):
             if not self._lane_has_runnable_or_active_work("agent"):
-                await run_idle_tasks(self._storage_factory, self._model, self._queue)
+                await run_idle_tasks(self._storage_factory, self._lane_model("agent"), self._lane_queue("agent"))
 
     def _update_task_control_state(
         self,
@@ -555,40 +664,48 @@ class BackgroundWorker:
         finally:
             storage.session.close()
 
-    async def _loop(self):
+    async def _loop(self, lane: str):
+        normalized_lane = normalize_lane(lane) or "agent"
+        lane_queue = self._lane_queue(normalized_lane)
         idle_ticks = 0
         while self._running:
-            if self._paused:
+            if self._paused or normalized_lane in self._paused_lanes:
                 await asyncio.sleep(0.5)
                 continue
-                
+            if self._tier_health.get(normalized_lane) == "error":
+                await asyncio.sleep(1.0)
+                continue
+
             try:
-                task_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                task_id = await asyncio.wait_for(lane_queue.get(), timeout=1.0)
                 idle_ticks = 0
                 task_lane = self._lane_for_task_id(task_id)
+                if task_lane and normalize_lane(task_lane) != normalized_lane:
+                    await self._lane_queue(task_lane).put(task_id)
+                    lane_queue.task_done()
+                    await asyncio.sleep(0.05)
+                    continue
                 if task_lane and task_lane in self._paused_lanes:
-                    await self._queue.put(task_id)
-                    self._queue.task_done()
+                    await lane_queue.put(task_id)
+                    lane_queue.task_done()
                     await asyncio.sleep(0.1)
                     continue
                 if self._task_is_paused(task_id):
-                    self._queue.task_done()
+                    lane_queue.task_done()
                     continue
-                
-                self._current_task_lane = task_lane
-                self._current_task_id = task_id
-                self._current_process = asyncio.create_task(self._run_task_cycle(task_id))
+
+                self._current_task_ids[normalized_lane] = task_id
+                self._current_processes[normalized_lane] = asyncio.create_task(self._run_task_cycle(task_id, lane=normalized_lane))
                 try:
-                    await self._current_process
+                    await self._current_processes[normalized_lane]
                 except asyncio.CancelledError:
                     logger.info(f"Task process {task_id} was forced STOPPED.")
                 finally:
-                    self._current_process = None
-                    self._current_task_lane = None
-                    self._current_task_id = None
+                    self._current_processes[normalized_lane] = None
+                    self._current_task_ids[normalized_lane] = None
                     await self._ensure_lane_idle_policies()
-                    
-                self._queue.task_done()
+
+                lane_queue.task_done()
             except asyncio.TimeoutError:
                 idle_ticks += 1
                 if idle_ticks >= 30:
@@ -596,7 +713,7 @@ class BackgroundWorker:
                     if settings.get("testing_mode", False):
                         logger.info("Testing mode active; skipping autonomous idle task generation.")
                     else:
-                        replayed = await self.enqueue_runnable_tasks()
+                        replayed = await self.enqueue_runnable_tasks(normalized_lane)
                         if replayed:
                             logger.info("Worker idle with runnable backlog; re-enqueued %s task(s).", replayed)
                             idle_ticks = 0
@@ -609,7 +726,7 @@ class BackgroundWorker:
             except asyncio.CancelledError:
                 break
 
-    async def _run_task_cycle(self, task_id: str):
+    async def _run_task_cycle(self, task_id: str, *, lane: Optional[str] = None):
         """
         @summary The orchestrator cycle for a single task: Run -> Resolve -> Review.
         """
@@ -620,16 +737,13 @@ class BackgroundWorker:
                 return
             if (task.constraints or {}).get("system_job"):
                 logger.info(f"Running queued system job for task {task_id}")
-                await run_eval_job_task(task, storage, self._model)
+                await run_eval_job_task(task, storage, self._lane_model(lane))
                 await self._notify(task_id, task.state.value)
                 return
 
             # --- ROUTING ---
             from strata.orchestrator.worker.routing_policy import select_model_tier
             context = select_model_tier(task)
-            if self._tier_health.get("agent") != "ok" and self._tier_health.get("trainer") == "ok":
-                from strata.schemas.execution import TrainerExecutionContext
-                context = TrainerExecutionContext(run_id=f"run_{task_id}_cloud_only")
             
             # Application of experimental override if active
             if self._active_experiment_id:
@@ -640,7 +754,8 @@ class BackgroundWorker:
                     evaluation_run=True
                 )
             
-            self._model.bind_execution_context(context)
+            lane_model = self._lane_model(lane or context.mode)
+            lane_model.bind_execution_context(context)
             logger.info(f"Routing task {task_id} to {context.mode} execution context [Exp: {self._active_experiment_id}]")
 
             constraints = dict(task.constraints or {})
@@ -653,7 +768,7 @@ class BackgroundWorker:
             
             # --- ATTEMPT ---
             success, error, attempt = await run_attempt(
-                task, storage, self._model, self._notify, self.enqueue
+                task, storage, lane_model, self._notify, self.enqueue
             )
             
             # Determine execution context details for metrics
@@ -715,7 +830,7 @@ class BackgroundWorker:
 
                 review = None
                 try:
-                    review = await generate_plan_review(task, attempt, self._model, storage)
+                    review = await generate_plan_review(task, attempt, lane_model, storage)
                     storage.attempts.set_plan_review(attempt.attempt_id, review)
                     storage.commit()
                     should_flush = enqueue_attempt_observability_artifact(
@@ -733,7 +848,7 @@ class BackgroundWorker:
                     logger.error(f"Failed to generate failure-time plan review for attempt {attempt.attempt_id}: {review_err}")
 
                 # --- RESOLUTION ---
-                resolution_data = resolution_from_plan_review(review) or await determine_resolution(task, error, self._model, storage)
+                resolution_data = resolution_from_plan_review(review) or await determine_resolution(task, error, lane_model, storage)
                 
                 # Map string resolution to Enum
                 from strata.storage.models import AttemptResolution
@@ -810,7 +925,7 @@ class BackgroundWorker:
                     storage,
                     task=task,
                     attempt=attempt,
-                    model_adapter=self._model,
+                    model_adapter=lane_model,
                     context=context,
                 )
                 if verification:
@@ -840,7 +955,7 @@ class BackgroundWorker:
                 existing_review = dict(getattr(attempt, "plan_review", {}) or {})
                 review = existing_review
                 if not review or not str(review.get("recommendation") or "").strip():
-                    review = await generate_plan_review(task, attempt, self._model, storage)
+                    review = await generate_plan_review(task, attempt, lane_model, storage)
                     storage.attempts.set_plan_review(attempt.attempt_id, review)
                     should_flush = enqueue_attempt_observability_artifact(
                         {
@@ -898,25 +1013,32 @@ class BackgroundWorker:
 
     def stop_current(self, lane: Optional[str] = None):
         normalized_lane = normalize_lane(lane)
-        if normalized_lane and self._current_task_lane != normalized_lane:
+        if normalized_lane:
+            process = self._current_processes.get(normalized_lane)
+            if process:
+                process.cancel()
+                return True
             return False
-        if self._current_process:
-            self._current_process.cancel()
-            return True
-        return False
+        cancelled = False
+        for process in self._current_processes.values():
+            if process:
+                process.cancel()
+                cancelled = True
+        return cancelled
 
     def pause_task(self, task_id: str) -> bool:
         updated = self._update_task_control_state(
             task_id,
             paused=True,
             state=TaskState.PENDING,
-            attempt_outcome=AttemptOutcome.CANCELLED if self._current_task_id == task_id else None,
+            attempt_outcome=AttemptOutcome.CANCELLED if task_id in {item for item in self._current_task_ids.values() if item} else None,
             reason="Paused by operator.",
         )
         if not updated:
             return False
-        if self._current_task_id == task_id and self._current_process:
-            self._current_process.cancel()
+        for lane_name, current_task_id in self._current_task_ids.items():
+            if current_task_id == task_id and self._current_processes.get(lane_name):
+                self._current_processes[lane_name].cancel()
         return True
 
     async def resume_task(self, task_id: str) -> bool:
@@ -935,13 +1057,14 @@ class BackgroundWorker:
             task_id,
             paused=False,
             state=TaskState.CANCELLED,
-            attempt_outcome=AttemptOutcome.CANCELLED if self._current_task_id == task_id else None,
+            attempt_outcome=AttemptOutcome.CANCELLED if task_id in {item for item in self._current_task_ids.values() if item} else None,
             reason="Cancelled by operator.",
         )
         if not updated:
             return False
-        if self._current_task_id == task_id and self._current_process:
-            self._current_process.cancel()
+        for lane_name, current_task_id in self._current_task_ids.items():
+            if current_task_id == task_id and self._current_processes.get(lane_name):
+                self._current_processes[lane_name].cancel()
         storage = self._storage_factory()
         try:
             cascades = storage.apply_dependency_cascade()
@@ -959,7 +1082,7 @@ class BackgroundWorker:
             return "STOPPED"
         if self._paused or normalized_lane in self._paused_lanes:
             return "PAUSED"
-        if self._current_task_lane == normalized_lane:
+        if self._current_processes.get(normalized_lane) is not None:
             return "RUNNING"
         return "IDLE"
 

@@ -165,3 +165,38 @@ def record_self_audit_request(task: TaskModel, *, focus: str = "", actor: str = 
     task.constraints = constraints
     event = _append_control_event(task, kind="request_self_audit", payload=request)
     return {"self_audit_request": request, "event": event}
+
+
+def update_question_escalation_mode(
+    storage,
+    *,
+    question_id: str,
+    escalation_mode: str,
+    rationale: str,
+    actor: str = "trainer",
+    question_update=None,
+) -> Dict[str, Any]:
+    if question_update is None:
+        from strata.orchestrator.user_questions import set_question_escalation_mode as question_update
+
+    updated = question_update(
+        storage,
+        question_id,
+        escalation_mode=escalation_mode,
+        rationale=rationale,
+    )
+    source_id = str((updated or {}).get("source_id") or "").strip()
+    task = storage.tasks.get_by_id(source_id) if source_id else None
+    if task:
+        event = _append_control_event(
+            task,
+            kind="update_question_escalation_mode",
+            payload={
+                "question_id": question_id,
+                "escalation_mode": str(updated.get("escalation_mode") or escalation_mode).strip(),
+                "rationale": str(rationale or "").strip(),
+                "actor": actor,
+            },
+        )
+        return {"question": updated, "event": event}
+    return {"question": updated}

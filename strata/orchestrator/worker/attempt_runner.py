@@ -39,6 +39,24 @@ def _emit_task_communication(storage, task, *, content: str, source_kind: str) -
     )
     deliver_communication_decision(storage, decision)
 
+
+def _is_non_actionable_recovery_subtask(proto) -> bool:
+    title = str(getattr(proto, "title", "") or "").strip().lower()
+    description = str(getattr(proto, "description", "") or "").strip().lower()
+    target_files = list(getattr(proto, "target_files", []) or [])
+    generic_markers = [
+        title == "error recover",
+        "research manually" in description,
+        "initial decomposition failed" in description,
+        "manual recovery" in description,
+        "generic recovery" in description,
+    ]
+    if any(generic_markers):
+        return True
+    if not target_files and (title.startswith("recovery") or "recover" in title) and "clarif" not in description:
+        return True
+    return False
+
 async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueue_fn):
     """
     @summary Execute a single task attempt.
@@ -159,7 +177,21 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
         raise RuntimeError(
             "Decomposition produced no actionable subtasks. Escalate for trainer intervention instead of spawning generic recovery work."
         )
+    actionable = []
     for tid, proto in decomp.subtasks.items():
+        if _is_non_actionable_recovery_subtask(proto):
+            logger.warning(
+                "Rejected non-actionable recovery subtask from decomposition for task %s: %s",
+                task.task_id,
+                getattr(proto, "title", tid),
+            )
+            continue
+        actionable.append((tid, proto))
+    if not actionable:
+        raise RuntimeError(
+            "Decomposition produced only generic recovery placeholders. Escalate for trainer intervention instead of spawning semantic-free retry work."
+        )
+    for tid, proto in actionable:
         sub = storage.tasks.create(
             title=proto.title,
             description=proto.description,

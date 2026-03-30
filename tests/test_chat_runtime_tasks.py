@@ -154,6 +154,55 @@ def test_list_tasks_payload_includes_pending_question_metadata():
     assert tasks[0]["pending_question"]["question"] == queued["question"]
 
 
+def test_list_tasks_payload_includes_non_blocking_task_question_without_blocking_flag():
+    storage = make_storage()
+    runtime = ChatRuntime(
+        task_model_cls=TaskModel,
+        task_type_cls=TaskType,
+        task_state_cls=TaskState,
+        model_adapter=None,
+        semantic_memory=None,
+        worker=None,
+        broadcast_event=None,
+        global_settings={},
+        knowledge_page_store_cls=lambda storage: None,
+        slugify_page_title=lambda value: value,
+        load_dynamic_tools=lambda: [],
+        load_specs=lambda: {},
+        create_spec_proposal=None,
+        resubmit_spec_proposal_with_clarification=None,
+        find_pending_spec_clarification=lambda storage, session_id: None,
+        get_active_question=get_active_question,
+        get_question_for_source=get_question_for_source,
+        mark_question_asked=lambda storage, question_id: None,
+        resolve_question=lambda storage, question_id, resolution, response=None: None,
+    )
+    task = storage.tasks.create(
+        title="Investigate document location",
+        description="Search for the missing document while asking the user if they know where it is.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="Do you know where this document is?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="non_blocking",
+    )
+    storage.commit()
+
+    tasks = runtime.list_tasks_payload(storage, lane="agent")
+
+    assert tasks[0]["human_intervention_required"] is False
+    assert tasks[0]["pending_question"]["question_id"] == queued["question_id"]
+    assert tasks[0]["pending_question"]["escalation_mode"] == "non_blocking"
+
+
 def test_list_tasks_payload_can_limit_attempts_and_omit_evidence():
     storage = make_storage()
     runtime = make_runtime()
@@ -319,6 +368,75 @@ def test_explicit_question_answer_resolves_and_requeues_task():
     assert updated_task.state == TaskState.PENDING
     assert "User clarification" in updated_task.description
     assert worker.enqueued == [task.task_id]
+    assert resolved_rows[0][0] == queued["question_id"]
+
+
+def test_explicit_non_blocking_question_answer_attaches_without_requeue():
+    storage = make_storage()
+    worker = DummyWorker()
+    resolved_rows = []
+
+    async def _broadcast_event(*_args, **_kwargs):
+        return None
+
+    def _resolve_question(storage, question_id, resolution, response=None):
+        resolved_rows.append((question_id, resolution, response))
+
+    runtime = ChatRuntime(
+        task_model_cls=TaskModel,
+        task_type_cls=TaskType,
+        task_state_cls=TaskState,
+        model_adapter=None,
+        semantic_memory=None,
+        worker=worker,
+        broadcast_event=_broadcast_event,
+        global_settings={},
+        knowledge_page_store_cls=lambda storage: None,
+        slugify_page_title=lambda value: value,
+        load_dynamic_tools=lambda: [],
+        load_specs=lambda: {},
+        create_spec_proposal=None,
+        resubmit_spec_proposal_with_clarification=None,
+        find_pending_spec_clarification=lambda storage, session_id: None,
+        get_active_question=get_active_question,
+        get_question_for_source=lambda storage, source_type, source_id: {},
+        mark_question_asked=lambda storage, question_id: None,
+        resolve_question=_resolve_question,
+    )
+    task = storage.tasks.create(
+        title="Investigate document location",
+        description="Search while asking the user for a shortcut.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="Do you know where this document is?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="non_blocking",
+    )
+    storage.commit()
+
+    result = asyncio.run(
+        runtime.handle_explicit_question_answer(
+            storage,
+            {"role": "user", "answer_question_id": queued["question_id"]},
+            queued["session_id"],
+            "It should be under docs/archive.",
+        )
+    )
+
+    storage.session.expire_all()
+    updated_task = storage.tasks.get_by_id(task.task_id)
+    assert result["status"] == "ok"
+    assert updated_task.state == TaskState.WORKING
+    assert "User clarification" in updated_task.description
+    assert worker.enqueued == []
     assert resolved_rows[0][0] == queued["question_id"]
 
 

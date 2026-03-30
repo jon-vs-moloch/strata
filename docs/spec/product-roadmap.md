@@ -139,6 +139,7 @@ Follow-up work remains and should stay on the roadmap:
 - add lineage-level rollups/materialized summaries so the UI and agents can read branch pressure cheaply
 - make trainer/self-review jobs consume observability artifacts and attempt intelligence more explicitly
 - continue shaping raw observability into ergonomic summary surfaces that weak models can use without reconstructing state by hand
+- treat mutable config fields as a first-class evolutionary search surface so bootstrap can explore deterministic config mutations before falling back to prompt or code mutation
 
 ### Phase 2. Managed Engine Supervision
 

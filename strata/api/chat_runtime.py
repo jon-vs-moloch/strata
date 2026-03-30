@@ -85,11 +85,7 @@ class ChatRuntime:
         payload = []
         for task in tasks:
             task_lane = (task.constraints or {}).get("lane") or infer_lane_from_session_id(getattr(task, "session_id", None))
-            task_pending_question = (
-                get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id)
-                if task.human_intervention_required
-                else {}
-            )
+            task_pending_question = get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id)
             if normalized_lane and str(task_lane or "").strip().lower() != normalized_lane:
                 continue
             sorted_attempts = sorted(
@@ -124,6 +120,7 @@ class ChatRuntime:
                             "session_id": task_pending_question.get("session_id"),
                             "status": task_pending_question.get("status"),
                             "source_type": task_pending_question.get("source_type"),
+                            "escalation_mode": task_pending_question.get("escalation_mode"),
                             "question": task_pending_question.get("question"),
                             "brief_question": task_pending_question.get("brief_question"),
                         }
@@ -253,15 +250,22 @@ class ChatRuntime:
             return None
 
         task.description = (task.description or "") + f"\n\nUser clarification:\n{content.strip()}"
-        task.human_intervention_required = False
-        task.state = self.deps["task_state_cls"].PENDING
-        storage.commit()
-        await self.deps["worker"].enqueue(task.task_id)
+        if str(pending_question.get("escalation_mode") or "blocking").strip().lower() != "non_blocking":
+            task.human_intervention_required = False
+            task.state = self.deps["task_state_cls"].PENDING
+            storage.commit()
+            await self.deps["worker"].enqueue(task.task_id)
+        else:
+            storage.commit()
         self.deps["resolve_question"](storage, pending_question["question_id"], resolution="resolved", response=content)
         await self.emit_chat_communication(
             storage,
             session_id=session_id,
-            content=f"I’ve attached your clarification to task {task.task_id} and re-queued it.",
+            content=(
+                f"I’ve attached your clarification to task {task.task_id} and re-queued it."
+                if str(pending_question.get("escalation_mode") or "blocking").strip().lower() != "non_blocking"
+                else f"I’ve attached your clarification to task {task.task_id} so it can keep using it while work continues."
+            ),
             communicative_act="response",
             response_kind="acknowledgement",
             source_kind="task_clarification_reply",
@@ -336,17 +340,25 @@ Available Tools:
         ]
         if pending_question and pending_question.get("status") == "pending":
             brief_question = pending_question.get("brief_question") or pending_question.get("question")
+            escalation_mode = str(pending_question.get("escalation_mode") or "blocking").strip().lower()
             messages.append(
                 {
                     "role": "system",
                     "content": (
                         "Internal pending user question:\n"
                         f"- source_type: {pending_question.get('source_type')}\n"
+                        f"- escalation_mode: {escalation_mode}\n"
                         f"- question: {pending_question.get('question')}\n"
                         f"- concise_delivery: {brief_question}\n\n"
-                        "Before doing anything else, ask exactly one concise question in no more than two short sentences. "
-                        "Do not use numbered lists, bullet lists, long background explanations, or internal implementation details. "
-                        "Do not answer the question yourself. Do not call tools before asking it."
+                        + (
+                            "Before doing anything else, ask exactly one concise question in no more than two short sentences. "
+                            "Do not use numbered lists, bullet lists, long background explanations, or internal implementation details. "
+                            "Do not answer the question yourself. Do not call tools before asking it."
+                            if escalation_mode != "non_blocking"
+                            else
+                            "Ask exactly one concise question in no more than two short sentences, but you may continue making progress afterward. "
+                            "Do not stall waiting for the answer if there are useful tool calls or analysis you can still do."
+                        )
                     ),
                 }
             )
@@ -360,6 +372,7 @@ Available Tools:
                         "There is still an unresolved user question attached to this session.\n"
                         f"- question_id: {pending_question.get('question_id')}\n"
                         f"- source_type: {pending_question.get('source_type')}\n"
+                        f"- escalation_mode: {pending_question.get('escalation_mode')}\n"
                         f"- open_question: {pending_question.get('question')}\n\n"
                         "Treat the user's next messages as normal conversation unless they actually answer this question. "
                         "If the user has answered it, call `resolve_user_question` with your interpreted answer. "

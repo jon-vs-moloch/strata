@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 import sys
 
+from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.orchestrator.worker.resolution_policy import apply_resolution, determine_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
 from strata.orchestrator.research import ResearchIterationLimitError
@@ -56,8 +57,11 @@ class DummyStorage:
     def __init__(self, attempts_by_task=None, policy=None):
         self.tasks = DummyTaskRepo()
         self.attempts = DummyAttemptsRepo(attempts_by_task)
+        values = {}
         self.parameters = SimpleNamespace(
-            get_parameter=lambda key, default_value, description="": policy or default_value
+            get_parameter=lambda key, default_value, description="": policy or default_value,
+            peek_parameter=lambda key, default_value=None: values.get(key, default_value),
+            set_parameter=lambda key, value, description="": values.__setitem__(key, value),
         )
         self.commits = 0
 
@@ -167,6 +171,57 @@ def test_blocked_weak_task_queues_strong_escalation_review(monkeypatch):
     assert payload["payload"]["reviewer_tier"] == "trainer"
 
 
+def test_blocked_resolution_promotes_existing_non_blocking_question():
+    storage = DummyStorage()
+    task = DummyTask(session_id="agent:default")
+    enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="Do you know where the file lives?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="non_blocking",
+    )
+    resolution = AttemptResolutionSchema(
+        reasoning="The file cannot be obtained with current capabilities.",
+        resolution="blocked",
+    )
+
+    asyncio.run(apply_resolution(task, resolution, RuntimeError("boom"), storage, lambda _task_id: None))
+
+    updated = get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id)
+    assert updated["escalation_mode"] == "blocking"
+
+
+def test_reattempt_demotes_existing_blocking_question_when_new_path_exists():
+    storage = DummyStorage(attempts_by_task={"root": []})
+    task = DummyTask(task_id="root", session_id="agent:default")
+    enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="What should I do?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="blocking",
+    )
+    resolution = AttemptResolutionSchema(
+        reasoning="Retry with the updated plan.",
+        resolution="reattempt",
+    )
+    queued = []
+
+    async def enqueue_fn(task_id):
+        queued.append(task_id)
+
+    asyncio.run(apply_resolution(task, resolution, RuntimeError("temporary timeout"), storage, enqueue_fn))
+
+    updated = get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id)
+    assert updated["escalation_mode"] == "non_blocking"
+    assert queued == ["root"]
+
+
 def test_research_iteration_limit_prefers_decompose():
     task = DummyTask()
     task.type = TaskType.RESEARCH
@@ -181,6 +236,27 @@ def test_research_iteration_limit_prefers_decompose():
     )
 
     assert resolution.resolution == "decompose"
+
+
+def test_clarification_research_iteration_limit_blocks_instead_of_decompose():
+    task = DummyTask()
+    task.type = TaskType.RESEARCH
+    task.title = "Procedure: Operator Onboarding"
+    task.description = (
+        "Confirm unresolved onboarding items. If an item cannot be completed directly, "
+        "surface it as an explicit pending question or attention item instead of silently skipping it."
+    )
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            RuntimeError("Agent iteration limit reached. Partial context saved."),
+            model_adapter=None,
+            storage=None,
+        )
+    )
+
+    assert resolution.resolution == "blocked"
 
 
 def test_failed_decomposition_prefers_abandon_to_parent():
@@ -271,6 +347,38 @@ def test_recovery_shell_iteration_limit_abandons_after_lineage_cap():
     )
 
     assert resolution.resolution == "abandon_to_parent"
+
+
+def test_internal_replan_failover_preserves_original_task_focus():
+    root = DummyTask(task_id="root-task")
+    root.title = "Procedure: Operator Onboarding"
+    root.description = "Confirm operator preferences and unresolved onboarding questions."
+    root.type = TaskType.RESEARCH
+
+    task = DummyTask(task_id="recover-3")
+    task.title = "Error Recover"
+    task.description = "Initial decomposition failed. Research manually."
+    task.parent_task_id = root.task_id
+
+    storage = DummyStorage()
+    storage.tasks.by_id[root.task_id] = root
+    resolution = AttemptResolutionSchema(
+        reasoning="This branch needs a bounded replacement plan.",
+        resolution="internal_replan",
+        new_subtasks=[],
+    )
+    queued = []
+
+    async def enqueue_fn(task_id):
+        queued.append(task_id)
+
+    asyncio.run(apply_resolution(task, resolution, RuntimeError("boom"), storage, enqueue_fn))
+
+    created = storage.tasks.created[0]
+    assert created.title == "Recovery Plan for Procedure: Operator Onboarding"
+    assert "Do not produce generic 'Error Recover' shells" in created.description
+    assert created.constraints["recovery_focus_task_id"] == root.task_id
+    assert queued == ["repair-1"]
 
 
 def test_abandon_to_parent_agent_task_queues_trainer_intervention():

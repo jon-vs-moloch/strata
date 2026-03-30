@@ -33,20 +33,29 @@ def _text_fragments(summary: Dict[str, Any]) -> List[str]:
     ]
 
 
-def _deterministic_contradictions(summary: Dict[str, Any]) -> List[str]:
-    text_fragments = _text_fragments(summary)
+def repo_fact_contradictions(*, text_fragments: List[str], repo_fact_checks: List[Dict[str, Any]]) -> List[str]:
     contradictions: List[str] = []
-    for item in (summary.get("repo_fact_checks") or []):
+    for item in repo_fact_checks or []:
         path = str(item.get("path") or "").strip()
         if not path or not item.get("exists"):
             continue
         if any(
             path in fragment
-            and any(phrase in fragment.lower() for phrase in ("missing", "does not exist", "contains neither"))
+            and any(
+                phrase in fragment.lower()
+                for phrase in ("missing", "does not exist", "do not exist", "contains neither")
+            )
             for fragment in text_fragments
         ):
             contradictions.append(path)
     return contradictions
+
+
+def _deterministic_contradictions(summary: Dict[str, Any]) -> List[str]:
+    return repo_fact_contradictions(
+        text_fragments=_text_fragments(summary),
+        repo_fact_checks=list(summary.get("repo_fact_checks") or []),
+    )
 
 
 def _default_registry() -> Dict[str, Any]:
@@ -147,6 +156,31 @@ def _trim_summary_for_verifier(summary: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _coerce_verification_summary(
+    *,
+    artifact_kind: str,
+    summary: Optional[Dict[str, Any]] = None,
+    text_fragments: Optional[List[str]] = None,
+    repo_fact_checks: Optional[List[Dict[str, Any]]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if summary:
+        payload = dict(summary)
+    else:
+        payload = {}
+    fragments = [str(item) for item in (text_fragments or []) if str(item).strip()]
+    payload.setdefault("task", {})
+    payload["artifact_kind"] = str(artifact_kind or "step").strip() or "step"
+    payload["messages"] = [
+        {"role": "system", "content": fragment}
+        for fragment in fragments[:8]
+    ]
+    payload["repo_fact_checks"] = list(repo_fact_checks or payload.get("repo_fact_checks") or [])
+    if metadata:
+        payload["metadata"] = dict(metadata)
+    return payload
+
+
 def _normalize_verifier_result(parsed: Dict[str, Any], *, verification_kind: str) -> Dict[str, Any]:
     verdict = str(parsed.get("verdict") or "uncertain").strip().lower()
     if verdict not in {"good", "flawed", "uncertain"}:
@@ -174,9 +208,42 @@ def _normalize_verifier_result(parsed: Dict[str, Any], *, verification_kind: str
 
 async def verify_task_output(storage, *, task: TaskModel, attempt: AttemptModel, model_adapter, context) -> Optional[Dict[str, Any]]:
     mode = str(getattr(context, "mode", infer_lane_from_task(task) or "unknown") or "unknown").strip().lower()
-    policy = select_verification_policy(storage, mode=mode)
     summary = _trim_summary_for_verifier(build_task_trace_summary(storage, task_id=task.task_id, message_limit=6))
-    contradictions = _deterministic_contradictions(summary)
+    artifact = await verify_artifact(
+        storage,
+        mode=mode,
+        model_adapter=model_adapter,
+        artifact_kind="task_output",
+        summary=summary,
+        task=task,
+        attempt=attempt,
+    )
+    return artifact
+
+
+async def verify_artifact(
+    storage,
+    *,
+    mode: str,
+    model_adapter=None,
+    artifact_kind: str = "step",
+    summary: Optional[Dict[str, Any]] = None,
+    text_fragments: Optional[List[str]] = None,
+    repo_fact_checks: Optional[List[Dict[str, Any]]] = None,
+    task: Optional[TaskModel] = None,
+    attempt: Optional[AttemptModel] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    normalized_mode = str(mode or "unknown").strip().lower() or "unknown"
+    policy = select_verification_policy(storage, mode=normalized_mode)
+    summary_payload = _coerce_verification_summary(
+        artifact_kind=artifact_kind,
+        summary=summary,
+        text_fragments=text_fragments,
+        repo_fact_checks=repo_fact_checks,
+        metadata=metadata,
+    )
+    contradictions = _deterministic_contradictions(summary_payload)
 
     if not policy.get("should_verify") and not contradictions:
         return None
@@ -189,19 +256,32 @@ async def verify_task_output(storage, *, task: TaskModel, attempt: AttemptModel,
             "verdict": "flawed",
             "confidence": 0.98,
             "reasons": [
-                "Deterministic repo checks contradicted the output's filesystem claim."
+                "Deterministic repo checks contradicted the artifact's filesystem claim."
             ],
             "failure_modes": ["grounding", "overclaim"],
             "recommended_action": "escalate",
-            "checks_run": ["repo_fact_checks", "attempt_note_excerpt_scan"],
+            "checks_run": ["repo_fact_checks", "artifact_fragment_scan"],
             "claims_examined": contradictions,
             "residual_risk": [],
+        }
+    elif model_adapter is None:
+        artifact = {
+            "status": "ok",
+            "verification_kind": "skipped",
+            "verdict": "uncertain",
+            "confidence": 0.1,
+            "reasons": ["No verifier model was available for non-deterministic checks."],
+            "failure_modes": ["other"],
+            "recommended_action": "verify_more",
+            "checks_run": ["deterministic_only"],
+            "claims_examined": [],
+            "residual_risk": ["The artifact was not reviewed by a verifier model."],
         }
     else:
         prompt = f"""
 You are Strata's lightweight verifier.
-Given the task context, the most recent attempt, and the attached evidence, decide whether the output is good and correct.
-Do not rewrite the output. Judge it.
+Given the artifact context and the attached evidence, decide whether the thing that just happened is good and correct.
+Do not rewrite it. Judge it.
 
 Return only JSON with this schema:
 {{
@@ -224,7 +304,7 @@ Verification policy:
 {json.dumps(policy, indent=2)}
 
 Verification summary:
-{json.dumps(summary, indent=2)}
+{json.dumps(summary_payload, indent=2)}
 """.strip()
         response = await model_adapter.chat([{"role": "user", "content": prompt}], temperature=0.0)
         raw_content = response.get("content", "")
@@ -249,34 +329,38 @@ Verification summary:
         artifact["raw_response"] = raw_content[:1600]
 
     artifact["recorded_at"] = _utcnow_iso()
-    artifact["mode"] = mode
-    artifact["task_id"] = task.task_id
-    artifact["attempt_id"] = attempt.attempt_id
+    artifact["mode"] = normalized_mode
+    artifact["artifact_kind"] = str(artifact_kind or "step").strip() or "step"
+    artifact["task_id"] = getattr(task, "task_id", None)
+    artifact["attempt_id"] = getattr(attempt, "attempt_id", None)
     artifact["policy"] = policy
-    artifact["summary"] = summary
+    artifact["summary"] = summary_payload
     artifact["deterministic_contradictions"] = contradictions
 
-    attempt_artifacts = dict(attempt.artifacts or {})
-    attempt_artifacts["verifier"] = artifact
-    attempt.artifacts = attempt_artifacts
+    if attempt is not None:
+        attempt_artifacts = dict(attempt.artifacts or {})
+        attempt_artifacts["verifier"] = artifact
+        attempt.artifacts = attempt_artifacts
 
-    constraints = dict(task.constraints or {})
-    reviews = list(constraints.get("verifier_reviews") or [])
-    reviews.append(
-        {
-            "recorded_at": artifact.get("recorded_at"),
-            "mode": mode,
-            "verification_kind": artifact.get("verification_kind"),
-            "verdict": artifact.get("verdict"),
-            "confidence": artifact.get("confidence"),
-            "recommended_action": artifact.get("recommended_action"),
-            "failure_modes": artifact.get("failure_modes") or [],
-            "deterministic_contradictions": contradictions,
-        }
-    )
-    constraints["verifier_reviews"] = reviews[-12:]
-    task.constraints = constraints
-    _record_registry_result(storage, mode=mode, artifact=artifact)
+    if task is not None:
+        constraints = dict(task.constraints or {})
+        reviews = list(constraints.get("verifier_reviews") or [])
+        reviews.append(
+            {
+                "recorded_at": artifact.get("recorded_at"),
+                "mode": normalized_mode,
+                "artifact_kind": artifact.get("artifact_kind"),
+                "verification_kind": artifact.get("verification_kind"),
+                "verdict": artifact.get("verdict"),
+                "confidence": artifact.get("confidence"),
+                "recommended_action": artifact.get("recommended_action"),
+                "failure_modes": artifact.get("failure_modes") or [],
+                "deterministic_contradictions": contradictions,
+            }
+        )
+        constraints["verifier_reviews"] = reviews[-12:]
+        task.constraints = constraints
+    _record_registry_result(storage, mode=normalized_mode, artifact=artifact)
     return artifact
 
 

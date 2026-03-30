@@ -13,7 +13,11 @@ from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, At
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
 from strata.orchestrator.research import load_research_iteration_policy
-from strata.orchestrator.user_questions import enqueue_user_question
+from strata.orchestrator.user_questions import (
+    enqueue_user_question,
+    ensure_question_escalation_for_source,
+    get_question_for_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,109 @@ def _is_recovery_shell_task(task: TaskModel) -> bool:
     title = str(getattr(task, "title", "") or "").strip().lower()
     description = str(getattr(task, "description", "") or "").strip().lower()
     return title == "error recover" or "research manually" in description
+
+
+def _looks_like_clarification_task(task: TaskModel) -> bool:
+    text = " ".join(
+        str(part or "").strip().lower()
+        for part in [getattr(task, "title", ""), getattr(task, "description", "")]
+        if str(part or "").strip()
+    )
+    if not text:
+        return False
+    hints = [
+        "pending question",
+        "attention item",
+        "clarif",
+        "confirm",
+        "choose",
+        "preference",
+        "operator",
+        "unresolved",
+        "what should i",
+        "needs your input",
+    ]
+    return any(hint in text for hint in hints)
+
+
+def _recovery_focus_task(storage, task: TaskModel) -> TaskModel:
+    if storage is None or not hasattr(storage, "tasks"):
+        return task
+    visited = set()
+    current = task
+    fallback = task
+    while current and getattr(current, "task_id", None) and current.task_id not in visited:
+        visited.add(current.task_id)
+        if not _is_recovery_shell_task(current) and current.type != TaskType.DECOMP:
+            return current
+        fallback = current
+        parent_task_id = getattr(current, "parent_task_id", None)
+        current = storage.tasks.get_by_id(parent_task_id) if parent_task_id else None
+    return fallback
+
+
+def _clip_text(value: str, limit: int = 220) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _build_blocked_question(task: TaskModel, *, storage, reasoning: str, error_text: str = "") -> tuple[str, dict]:
+    focus = _recovery_focus_task(storage, task)
+    focus_title = str(getattr(focus, "title", "") or getattr(task, "title", "") or "this task").strip()
+    focus_description = _clip_text(str(getattr(focus, "description", "") or getattr(task, "description", "") or ""))
+    root_task_id = str(getattr(focus, "task_id", "") or getattr(task, "task_id", "")).strip()
+    current_title = str(getattr(task, "title", "") or "").strip()
+    preface = (
+        f"I’m blocked on '{focus_title}' and need your guidance before continuing."
+        if focus_title
+        else "I’m blocked and need your guidance before continuing."
+    )
+    if _looks_like_clarification_task(focus):
+        question = (
+            f"{preface} This work appears to require clarification or a decision rather than more autonomous research. "
+            f"Please answer the open question or provide the missing preference/constraint so I can proceed. "
+            f"Current blockage: {reasoning}"
+        )
+    else:
+        question = (
+            f"{preface} Please tell me what to change or clarify so I can proceed. "
+            f"Current blockage: {reasoning}"
+        )
+    context = {
+        "reasoning": reasoning,
+        "error": error_text,
+        "title": current_title or focus_title,
+        "focus_task_id": root_task_id,
+        "focus_title": focus_title,
+        "focus_description": focus_description,
+        "lane": infer_lane_from_task(task),
+    }
+    return question, context
+
+
+def _enqueue_blocked_question_once(storage, task: TaskModel, *, reasoning: str, error_text: str = "") -> None:
+    existing = get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id)
+    if existing:
+        ensure_question_escalation_for_source(
+            storage,
+            source_type="task_blocked",
+            source_id=task.task_id,
+            escalation_mode="blocking",
+            rationale=reasoning or error_text or "The branch is now blocked on required external input.",
+        )
+        return
+    question, context = _build_blocked_question(task, storage=storage, reasoning=reasoning, error_text=error_text)
+    enqueue_user_question(
+        storage,
+        session_id=task.session_id or "default",
+        question=question,
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane=infer_lane_from_task(task),
+        context=context,
+    )
 
 
 def _count_iteration_limit_failures_in_lineage(storage, task: TaskModel) -> int:
@@ -118,6 +225,15 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
                 new_subtasks=[],
             )
         if task.type == TaskType.RESEARCH:
+            if _looks_like_clarification_task(task):
+                return AttemptResolutionSchema(
+                    reasoning=(
+                        "The research task exhausted its iteration budget while gathering clarifications or decisions. "
+                        "Stop autonomous looping and escalate for explicit guidance instead of decomposing into generic recovery work."
+                    ),
+                    resolution="blocked",
+                    new_subtasks=[],
+                )
             return AttemptResolutionSchema(
                 reasoning=(
                     "The task exhausted its autonomous iteration budget during research. "
@@ -227,6 +343,15 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
     res = resolution_data.resolution
     task_lane = infer_lane_from_task(task)
     logger.info(f"Applying Resolution: {res.upper()} for task {task.task_id} ({resolution_data.reasoning})")
+
+    def _demote_existing_blocking_question(rationale: str) -> None:
+        ensure_question_escalation_for_source(
+            storage,
+            source_type="task_blocked",
+            source_id=task.task_id,
+            escalation_mode="non_blocking",
+            rationale=rationale,
+        )
     
     if res == "reattempt":
         attempts = storage.attempts.get_by_task_id(task.task_id)
@@ -245,28 +370,19 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         ):
             task.state = TaskState.BLOCKED
             task.human_intervention_required = True
-            enqueue_user_question(
+            _enqueue_blocked_question_once(
                 storage,
-                session_id=task.session_id or "default",
-                question=(
-                    f"Task '{task.title}' hit repeated autonomous iteration limits after "
-                    f"{len(failed_attempts)} failed attempts on this branch and {lineage_iteration_failures} across its lineage. "
-                    "What should I change or clarify before retrying?"
+                task,
+                reasoning=(
+                    f"Task hit repeated autonomous iteration limits after {len(failed_attempts)} failed attempts on "
+                    f"this branch and {lineage_iteration_failures} across its lineage."
                 ),
-                source_type="task_blocked",
-                source_id=task.task_id,
-                lane=task_lane,
-                context={
-                    "reasoning": str(error),
-                    "title": task.title,
-                    "lane": task_lane,
-                    "lineage_iteration_failures": lineage_iteration_failures,
-                    "branch_iteration_failures": len(failed_attempts),
-                },
+                error_text=str(error),
             )
             storage.commit()
             return
         task.state = TaskState.PENDING
+        _demote_existing_blocking_question("A new autonomous retry path is available, so user input is no longer the only route forward.")
         await enqueue_fn(task.task_id)
         
     elif res == "decompose" or res == "internal_replan":
@@ -290,19 +406,36 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 await enqueue_fn(sub.task_id)
             task.state = TaskState.WORKING
         else:
-            # Fallback to generic decomposition task
+            focus = _recovery_focus_task(storage, task)
+            focus_title = str(getattr(focus, "title", "") or task.title or "task").strip()
+            focus_description = _clip_text(str(getattr(focus, "description", "") or task.description or ""))
             failover = storage.tasks.create(
-                title=f"Recovery Plan for {task.title}",
-                description=f"Automated recovery from failover analysis: {resolution_data.reasoning}. Original error: {error}",
+                title=f"Recovery Plan for {focus_title}",
+                description=(
+                    f"Rebuild a bounded recovery plan for the original task '{focus_title}'. "
+                    f"Original task context: {focus_description}. "
+                    f"Current failing task: '{task.title}'. "
+                    f"Failure analysis: {resolution_data.reasoning}. "
+                    f"Original error: {error}. "
+                    "Do not produce generic 'Error Recover' shells, manual-research placeholders, or empty file-list work. "
+                    "If the branch actually needs human clarification or an external decision, surface that explicitly instead of inventing implementation subtasks."
+                ),
                 parent_task_id=task.task_id,
                 type=TaskType.DECOMP,
                 state=TaskState.PENDING,
                 depth=task.depth + 1,
-                constraints={"lane": task_lane} if task_lane else None,
+                constraints={
+                    **({"lane": task_lane} if task_lane else {}),
+                    "recovery_focus_task_id": getattr(focus, "task_id", None),
+                    "recovery_focus_title": focus_title,
+                    "recovery_focus_description": focus_description,
+                    "avoid_generic_recovery_shell": True,
+                } if task_lane or focus_title else None,
             )
             storage.commit()
             await enqueue_fn(failover.task_id)
             task.state = TaskState.WORKING
+            _demote_existing_blocking_question("The branch has a fresh autonomous recovery plan, so guidance can remain advisory while work continues.")
             
     elif res == "abandon_to_parent":
         task.state = TaskState.ABANDONED
@@ -365,6 +498,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         storage.commit()
         storage.tasks.add_dependency(task.task_id, repair_task.task_id)
         storage.commit()
+        _demote_existing_blocking_question("Tooling remediation is now queued, so the prior user escalation can become non-blocking while recovery continues.")
         await enqueue_fn(repair_task.task_id)
 
     elif res == "blocked":
@@ -405,21 +539,10 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
             except Exception as exc:
                 logger.warning("Unable to queue trainer escalation review for blocked agent task %s: %s", task.task_id, exc)
         if not queued_trainer_review:
-            enqueue_user_question(
+            _enqueue_blocked_question_once(
                 storage,
-                session_id=task.session_id or "default",
-                question=(
-                    f"I’m blocked on task '{task.title}'. "
-                    f"What should I know or change to proceed? Reason: {resolution_data.reasoning}"
-                ),
-                source_type="task_blocked",
-                source_id=task.task_id,
-                context={
-                    "reasoning": resolution_data.reasoning,
-                    "title": task.title,
-                    "task_id": task.task_id,
-                    "lane": task_lane,
-                },
-                lane=task_lane,
+                task,
+                reasoning=resolution_data.reasoning,
+                error_text=str(error),
             )
         storage.commit()

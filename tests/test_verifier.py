@@ -3,7 +3,13 @@ import asyncio
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from strata.experimental.verifier import emit_verifier_attention_signal, select_verification_policy, verify_task_output
+from strata.experimental.verifier import (
+    emit_verifier_attention_signal,
+    repo_fact_contradictions,
+    select_verification_policy,
+    verify_artifact,
+    verify_task_output,
+)
 from strata.schemas.execution import AgentExecutionContext, TrainerExecutionContext
 from strata.storage.models import AttemptOutcome, Base, TaskState, TaskType
 from strata.storage.services.main import StorageManager
@@ -107,6 +113,43 @@ def test_verify_task_output_uses_deterministic_contradiction_without_model_call(
     assert ".knowledge/specs/project_spec.md" in artifact["deterministic_contradictions"]
     assert reloaded_attempt.artifacts["verifier"]["verdict"] == "flawed"
     assert reloaded_task.constraints["verifier_reviews"][0]["verification_kind"] == "deterministic"
+
+
+def test_repo_fact_contradictions_can_be_used_before_attempt_execution():
+    contradictions = repo_fact_contradictions(
+        text_fragments=[
+            "The `.knowledge/` directory and `.knowledge/specs/project_spec.md` do not exist in the repository."
+        ],
+        repo_fact_checks=[
+            {"path": ".knowledge/specs/constitution.md", "exists": True, "is_file": True},
+            {"path": ".knowledge/specs/project_spec.md", "exists": True, "is_file": True},
+        ],
+    )
+
+    assert ".knowledge/specs/project_spec.md" in contradictions
+
+
+def test_verify_artifact_supports_general_step_level_verification():
+    storage = make_storage()
+    artifact = asyncio.run(
+        verify_artifact(
+            storage,
+            mode="agent",
+            model_adapter=FailingIfCalledModelAdapter(),
+            artifact_kind="task_creation",
+            text_fragments=[
+                "The `.knowledge/specs/project_spec.md` file does not exist in the repository."
+            ],
+            repo_fact_checks=[
+                {"path": ".knowledge/specs/project_spec.md", "exists": True, "is_file": True},
+            ],
+            metadata={"phase": "idle_generation"},
+        )
+    )
+
+    assert artifact["artifact_kind"] == "task_creation"
+    assert artifact["verification_kind"] == "deterministic"
+    assert artifact["verdict"] == "flawed"
 
 
 def test_verify_task_output_can_use_model_judgment_when_no_contradiction_exists():

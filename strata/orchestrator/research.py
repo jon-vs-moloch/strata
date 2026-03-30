@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import json
 from strata.knowledge.pages import KnowledgePageStore
+from strata.core.lanes import infer_lane_from_session_id
 from strata.feedback.signals import register_feedback_signal
+from strata.orchestrator.tool_health import record_tool_execution, should_throttle_tool
 from strata.schemas.core import ResearchReport
 
 
@@ -277,6 +279,30 @@ class ResearchModule:
         context_hints = context_hints or {}
         repo_snapshot = str(context_hints.get("repo_snapshot") or "").strip()
         spec_paths = context_hints.get("spec_paths") or []
+        research_lane = infer_lane_from_session_id((task_context or {}).get("session_id"))
+        research_task_type = str((task_context or {}).get("type") or "").strip() or "RESEARCH"
+        research_task_id = str((task_context or {}).get("task_id") or "").strip() or None
+
+        def _record_tool_event(
+            tool_name: str,
+            *,
+            outcome: str,
+            failure_kind: Optional[str] = None,
+            details: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            record_tool_execution(
+                self.storage,
+                tool_name=tool_name,
+                outcome=outcome,
+                lane=research_lane,
+                task_type=research_task_type,
+                task_id=research_task_id,
+                session_id=str((task_context or {}).get("session_id") or "").strip() or None,
+                source="research_module",
+                failure_kind=failure_kind,
+                details=details or {},
+            )
+            self.storage.commit()
         
         RESEARCH_TOOLS = [
             {
@@ -509,6 +535,26 @@ class ResearchModule:
                     args = json.loads(call.get("function", {}).get("arguments", "{}"))
                 except:
                     args = {}
+                throttle = should_throttle_tool(
+                    self.storage,
+                    tool_name=func_name,
+                    lane=research_lane,
+                    task_type=research_task_type,
+                )
+                if throttle.get("throttle") and func_name != "finalize_research":
+                    tool_result = (
+                        f"Tool '{func_name}' is currently {throttle.get('status')} for this exact scope and has been circuit-broken. "
+                        f"Reason: {throttle.get('reason')}. Choose another tool, replan, or trigger tooling repair instead of retrying it unchanged."
+                    )
+                    _record_tool_event(
+                        func_name,
+                        outcome="blocked",
+                        failure_kind="circuit_breaker",
+                        details={"health": throttle.get("health") or {}},
+                    )
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+                    messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    continue
                     
                 if func_name == "finalize_research":
                     final_report_data = args
@@ -517,6 +563,8 @@ class ResearchModule:
                 elif func_name == "list_directory":
                     rel_path = args.get("path", ".") or "."
                     print(f"  -> Research Agent listing directory: {rel_path}")
+                    tool_outcome = "success"
+                    failure_kind = None
                     try:
                         directory = (Path(root) / rel_path).resolve()
                         repo_root = Path(root).resolve()
@@ -536,13 +584,23 @@ class ResearchModule:
                             tool_result = "\n".join(preview) + suffix if preview else "(empty directory)"
                     except Exception as e:
                         tool_result = f"Directory listing failed: {e}"
+                        tool_outcome = "broken"
+                        failure_kind = "directory_listing_failed"
 
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(
+                        func_name,
+                        outcome=tool_outcome,
+                        failure_kind=failure_kind,
+                        details={"path": rel_path, "tool_result": tool_result[:500]},
+                    )
 
                 elif func_name == "search_web":
                     query = args.get("query", "python")
                     print(f"  -> Research Agent searching web for: {query}")
+                    tool_outcome = "success"
+                    failure_kind = None
                     try:
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(
@@ -557,14 +615,24 @@ class ResearchModule:
                             tool_result = "\\n".join(f"- {r}" for r in results) if results else "No snippets found."
                     except Exception as e:
                         tool_result = f"Search failed: {e}"
+                        tool_outcome = "broken"
+                        failure_kind = "search_failed"
                         
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(
+                        func_name,
+                        outcome=tool_outcome,
+                        failure_kind=failure_kind,
+                        details={"query": query, "tool_result": tool_result[:500]},
+                    )
                     
                 elif func_name == "read_file":
                     filepath = args.get("filepath", "")
                     print(f"  -> Research Agent reading file: {filepath}")
                     full_path = os.path.join(root, filepath)
+                    tool_outcome = "success"
+                    failure_kind = None
 
                     async def fetch_raw_content():
                         with open(full_path, "r", encoding="utf-8") as f:
@@ -590,15 +658,25 @@ class ResearchModule:
                             )
                     except Exception as e:
                         tool_result = f"File read failed: {e}"
+                        tool_outcome = "broken"
+                        failure_kind = "file_read_failed"
 
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(
+                        func_name,
+                        outcome=tool_outcome,
+                        failure_kind=failure_kind,
+                        details={"filepath": filepath, "tool_result": tool_result[:500]},
+                    )
 
                 elif func_name == "write_library_file":
                     fname = args.get("filename", "untitled.md")
                     content = args.get("content", "")
                     kb_dir = os.path.join(root, ".knowledge")
                     os.makedirs(kb_dir, exist_ok=True)
+                    tool_outcome = "success"
+                    failure_kind = None
                     try:
                         with open(os.path.join(kb_dir, fname), "w", encoding="utf-8") as f:
                             f.write(content)
@@ -606,9 +684,17 @@ class ResearchModule:
                         print(f"  -> Research Agent saved atomic note: {fname}")
                     except Exception as e:
                         tool_result = f"Failed to write file: {e}"
+                        tool_outcome = "broken"
+                        failure_kind = "library_write_failed"
                         
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(
+                        func_name,
+                        outcome=tool_outcome,
+                        failure_kind=failure_kind,
+                        details={"filename": fname, "tool_result": tool_result[:500]},
+                    )
                 elif func_name == "list_knowledge_pages":
                     pages = knowledge_pages.list_pages(
                         query=args.get("query"),
@@ -628,6 +714,7 @@ class ResearchModule:
                         )
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success", details={"query": args.get("query")})
                 elif func_name == "read_knowledge_page":
                     slug = str(args.get("slug") or "")
                     heading = str(args.get("heading") or "").strip()
@@ -639,11 +726,13 @@ class ResearchModule:
                         tool_result = page.get("body") or f"No synthesized knowledge page found for '{slug}'."
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success", details={"slug": slug, "heading": heading})
                 elif func_name == "inspect_knowledge_maintenance":
                     report = knowledge_pages.get_maintenance_report()
                     tool_result = json.dumps(report, indent=2) if report else "No knowledge maintenance report is available yet."
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success")
                 elif func_name == "submit_feedback_signal":
                     signal = register_feedback_signal(
                         self.storage,
@@ -663,6 +752,7 @@ class ResearchModule:
                     tool_result = json.dumps(signal, indent=2)
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success", details={"signal_id": signal.get("signal_id")})
                 elif func_name == "propose_knowledge_merge":
                     canonical_slug = str(args.get("canonical_slug") or "")
                     duplicate_slug = str(args.get("duplicate_slug") or "")
@@ -684,6 +774,7 @@ class ResearchModule:
                     )
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success", details={"canonical_slug": canonical_slug, "duplicate_slug": duplicate_slug})
                 elif func_name == "propose_knowledge_correction":
                     slug = str(args.get("slug") or "")
                     reason = str(args.get("reason") or "possible knowledge correction needed")
@@ -701,6 +792,7 @@ class ResearchModule:
                     tool_result = f"Queued knowledge correction task {task.task_id} for '{slug}'."
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success", details={"slug": slug})
                 elif func_name == "queue_knowledge_refresh":
                     slug = str(args.get("slug") or "")
                     reason = str(args.get("reason") or "page may be stale")
@@ -717,6 +809,7 @@ class ResearchModule:
                     tool_result = f"Queued knowledge refresh task {task.task_id} for '{slug}'."
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
                     messages.append({"role": "tool", "content": tool_result, "tool_call_id": call.get("id", "call_1")})
+                    _record_tool_event(func_name, outcome="success", details={"slug": slug})
             else:
                 # LLM failed to call a tool, force it
                 messages.append({"role": "assistant", "content": response.get("content", "")})

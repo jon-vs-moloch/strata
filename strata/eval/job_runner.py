@@ -35,6 +35,7 @@ from strata.experimental.trace_review import (
 )
 from strata.knowledge.pages import KnowledgePageStore
 from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
+from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import AttemptOutcome, TaskState
 
@@ -68,6 +69,55 @@ def _trim_result(payload: Dict[str, Any]) -> Dict[str, Any]:
         trimmed["variant_count"] = len(trimmed["variants"])
         trimmed.pop("variants", None)
     return trimmed
+
+
+def _review_needs_user_clarification(review: Dict[str, Any]) -> bool:
+    assessment = str(review.get("overall_assessment") or "").strip().lower()
+    primary_failure_mode = str(review.get("primary_failure_mode") or "").strip().lower()
+    if assessment == "review_unavailable":
+        return True
+    if primary_failure_mode in {"uncorrected_verifier_failures", "trainer_supervision_gap"}:
+        return True
+    text_bits = [
+        str(review.get("summary") or ""),
+        " ".join(str((item or {}).get("description") or "") for item in review.get("targeted_interventions") or []),
+    ]
+    haystack = " ".join(bit.strip().lower() for bit in text_bits if bit.strip())
+    return "user-facing clarification" in haystack or "needs user input" in haystack or "clarification" in haystack
+
+
+def _maybe_enqueue_blocked_task_question_from_review(storage, *, task_id: str, review: Dict[str, Any]) -> None:
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return
+    task = storage.tasks.get_by_id(normalized_task_id)
+    if not task:
+        return
+    if task.state != TaskState.BLOCKED or not bool(task.human_intervention_required):
+        return
+    if get_question_for_source(storage, source_type="task_blocked", source_id=task.task_id):
+        return
+    if not _review_needs_user_clarification(review):
+        return
+    summary = str(review.get("summary") or "Trainer supervision could not fully resolve the blocked branch.").strip()
+    question = (
+        f"I’m still blocked on '{task.title}' and need your guidance before proceeding. "
+        f"Trainer review summary: {summary}"
+    )
+    enqueue_user_question(
+        storage,
+        session_id=task.session_id or "default",
+        question=question,
+        source_type="task_blocked",
+        source_id=task.task_id,
+        context={
+            "task_id": task.task_id,
+            "title": task.title,
+            "reasoning": summary,
+            "trace_review_failure_mode": review.get("primary_failure_mode"),
+            "trace_review_assessment": review.get("overall_assessment"),
+        },
+    )
 
 
 async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
@@ -399,6 +449,7 @@ async def run_eval_job_task(task, storage, model_adapter) -> Dict[str, Any]:
                         target_task_ids.append(task_id)
                 for task_id in target_task_ids:
                     append_trace_review_to_task(storage, task_id=task_id, review=review)
+                    _maybe_enqueue_blocked_task_question_from_review(storage, task_id=task_id, review=review)
             session_review = None
             session_id = str(payload.get("session_id") or "").strip()
             derived_session_id = session_id or str((trace_summary.get("task") or {}).get("session_id") or "").strip()

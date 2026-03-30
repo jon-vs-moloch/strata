@@ -289,6 +289,29 @@ class AttemptObservabilityArtifactModel(Base):
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
+class ToolExecutionEventModel(Base):
+    """
+    @summary Append-only record of tool executions and derived health signals.
+    """
+    __tablename__ = "tool_execution_events"
+    __table_args__ = (
+        Index("ix_tool_execution_tool_created", "tool_name", "created_at"),
+        Index("ix_tool_execution_scope_created", "tool_name", "lane", "task_type", "created_at"),
+        Index("ix_tool_execution_outcome_created", "outcome", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tool_name: Mapped[str] = mapped_column(String, index=True)
+    outcome: Mapped[str] = mapped_column(String, index=True)  # success, degraded, broken, blocked
+    lane: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    task_type: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    source: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    failure_kind: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
 class MetricModel(Base):
     """
     @summary Structured measurement record for optimization loops.

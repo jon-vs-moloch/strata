@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from strata.communication.primitives import deliver_communication
+from strata.experimental.verifier import repo_fact_contradictions, verify_artifact
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.specs.bootstrap import load_specs, spec_is_bootstrap_placeholder
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 def _build_repo_snapshot() -> str:
     root = Path(__file__).resolve().parents[3]
     interesting = [
+        ".knowledge/specs",
         "README.md",
         "docs/spec/project-philosophy.md",
         "docs/spec/codemap.md",
@@ -39,6 +41,26 @@ def _build_repo_snapshot() -> str:
             preview += ", ..."
         parts.append(f"DIR {rel}: {preview}")
     return "\n".join(parts)
+
+
+def _canonical_spec_fact_checks() -> list[dict]:
+    root = Path(__file__).resolve().parents[3]
+    checks = []
+    for rel in [".knowledge/specs/constitution.md", ".knowledge/specs/project_spec.md"]:
+        path = root / rel
+        checks.append({"path": rel, "exists": path.exists(), "is_file": path.is_file()})
+    return checks
+
+
+def _contradicts_spec_fact_checks(task_desc: str, checks: list[dict]) -> bool:
+    text = str(task_desc or "").strip()
+    contradictions = repo_fact_contradictions(text_fragments=[text], repo_fact_checks=checks)
+    if contradictions:
+        return True
+    lowered = text.lower()
+    return all(item.get("exists") for item in checks) and ".knowledge/" in lowered and any(
+        phrase in lowered for phrase in ("missing", "does not exist", "absent", "not exist")
+    )
 
 async def run_idle_tasks(storage_factory, model_adapter, queue):
     """
@@ -102,6 +124,7 @@ async def run_idle_tasks(storage_factory, model_adapter, queue):
             "docs/spec/codemap.md",
         ]
         repo_snapshot = _build_repo_snapshot()
+        spec_fact_checks = _canonical_spec_fact_checks()
         project_spec_is_thin = spec_is_bootstrap_placeholder(project_spec)
         constitution_is_thin = spec_is_bootstrap_placeholder(constitution)
 
@@ -139,6 +162,8 @@ Current project spec:
 Rules:
 - Do not claim the vision or current state is unknown; the spec paths above are the source of truth.
 - Use the repository snapshot above as concrete codebase state.
+- If a path is not shown in the snapshot, treat it as unverified rather than absent.
+- Do not claim that a canonical spec file or `.knowledge/` path is missing unless the observed snapshot or deterministic checks above show that absence directly.
 - If the spec is still thin, propose a spec-hardening or alignment-review task rather than giving up.
 - Prefer a task that is specific, bounded, and checkable.
 - Reply with ONLY a single sentence describing the task.
@@ -148,6 +173,27 @@ Rules:
             task_desc = response.get("content", "").strip()
             if not task_desc:
                 task_desc = "Review the project spec and philosophy docs, then propose one bounded alignment task for the current codebase."
+            verification = await verify_artifact(
+                storage,
+                mode="agent",
+                model_adapter=model_adapter,
+                artifact_kind="idle_alignment_task_draft",
+                text_fragments=[task_desc],
+                repo_fact_checks=spec_fact_checks,
+                metadata={
+                    "source": "idle_policy",
+                    "spec_paths": spec_paths,
+                },
+            )
+            if _contradicts_spec_fact_checks(task_desc, spec_fact_checks) or (
+                verification
+                and str(verification.get("verdict") or "").strip().lower() == "flawed"
+                and "grounding" in [str(item).strip().lower() for item in verification.get("failure_modes") or []]
+            ):
+                task_desc = (
+                    "Review why the alignment module is making stale or unsupported repo-fact claims about canonical "
+                    "spec paths, then add deterministic fact checks so future alignment tasks stay grounded."
+                )
             
         task = storage.tasks.create(
             title=f"Alignment: {task_desc[:40]}...",
@@ -159,6 +205,7 @@ Rules:
                 "target_scope": "codebase",
                 "spec_paths": spec_paths,
                 "repo_snapshot": repo_snapshot,
+                "repo_fact_checks": spec_fact_checks,
                 "alignment_source": "idle_policy",
                 "spec_bootstrap_fallback": project_spec_is_thin and constitution_is_thin,
             }

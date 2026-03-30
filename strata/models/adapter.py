@@ -27,6 +27,19 @@ class ModelAdapter:
         """
         self.context = context
 
+    def _validate_lane_transport(self, provider) -> None:
+        provider_name = provider.__class__.__name__
+        is_local = provider_name == "LocalProvider"
+        is_cloud = provider_name == "CloudProvider"
+        if self.context.mode == "agent" and not is_local:
+            raise RuntimeError(
+                "Agent lane transport violation: agent execution attempted to use a non-local provider."
+            )
+        if self.context.mode == "trainer" and not is_cloud:
+            raise RuntimeError(
+                "Trainer lane transport violation: trainer execution attempted to use a non-cloud provider."
+            )
+
     def _resolve_endpoint(self):
         preferred_model = self._selected_models.get(self.context.mode)
         return self.registry.resolve_endpoint_for_context(
@@ -67,6 +80,7 @@ class ModelAdapter:
                 self.context,
                 preferred_model=self._selected_models.get(self.context.mode),
             )
+            self._validate_lane_transport(provider)
             
             # Log for auditability
             print(f"DEBUG [Context: {self.context.mode}] Routing to {provider.provider_id}/{provider.model_id} (Transport: {'local' if provider.__class__.__name__ == 'LocalProvider' else 'cloud'})")

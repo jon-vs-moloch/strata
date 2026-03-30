@@ -71,7 +71,6 @@ GLOBAL_SETTINGS = {
     "automatic_task_generation": True,
     "testing_mode": False,
     "replay_pending_tasks_on_startup": False,
-    "allow_cloud_only_boot": False,
     "heavy_reflection_mode": False,
 }
 SETTINGS_PARAMETER_KEY = "orchestrator_global_settings"

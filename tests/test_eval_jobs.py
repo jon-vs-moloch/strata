@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from strata.api import main as api_main
 from strata.sessions.metadata import set_session_metadata
 from strata.eval.job_runner import run_eval_job_task
+from strata.orchestrator.user_questions import get_question_for_source
 from strata.storage.models import Base, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
@@ -201,6 +202,67 @@ def test_run_eval_job_task_records_full_eval_source_task(monkeypatch):
 
     assert result["recommendation"] == "promote"
     assert reloaded_task.constraints["system_job_result"]["status"] == "completed"
+
+
+def test_trace_review_job_enqueues_blocked_task_question_when_review_stays_unavailable(monkeypatch):
+    storage = make_storage()
+    blocked = storage.tasks.create(
+        title="Procedure: Operator Onboarding",
+        description="Need operator clarification.",
+        session_id="agent:default",
+        state=TaskState.BLOCKED,
+        type=TaskType.RESEARCH,
+    )
+    blocked.human_intervention_required = True
+    review_task = storage.tasks.create(
+        title="Agent Supervision Review: Procedure: Operator Onboarding",
+        description="review blocked branch",
+        state=TaskState.PENDING,
+        type=TaskType.JUDGE,
+        constraints={
+            "system_job": {
+                "kind": "trace_review",
+                "payload": {
+                    "trace_kind": "task_trace",
+                    "task_id": blocked.task_id,
+                    "reviewer_tier": "trainer",
+                    "persist_to_task": True,
+                    "emit_followups": False,
+                },
+            }
+        },
+    )
+    storage.commit()
+
+    async def fake_review_trace(*_args, **_kwargs):
+        return {
+            "status": "unavailable",
+            "trace_kind": "task_trace",
+            "reviewer_tier": "trainer",
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "summary": "Trace review model did not return usable structured output.",
+            "overall_assessment": "review_unavailable",
+            "failure_family": "review_unavailable",
+            "primary_failure_mode": "review_unavailable",
+            "targeted_interventions": [],
+            "telemetry_to_watch": [],
+            "confidence": 0.0,
+        }
+
+    monkeypatch.setattr("strata.eval.job_runner.review_trace", fake_review_trace)
+    monkeypatch.setattr(
+        "strata.eval.job_runner.persist_trace_review_artifacts",
+        lambda *args, **kwargs: {
+            "timeline_artifact": {"artifact_id": "timeline-1"},
+            "audit_artifact": {"artifact_id": "audit-1"},
+        },
+    )
+
+    asyncio.run(run_eval_job_task(review_task, storage, model_adapter=None))
+
+    queued = get_question_for_source(storage, source_type="task_blocked", source_id=blocked.task_id)
+    assert queued["status"] in {"pending", "asked"}
+    assert "Trainer review summary" in queued["question"]
 
 
 def test_eval_jobs_endpoint_lists_queued_jobs():

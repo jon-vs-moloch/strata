@@ -221,7 +221,7 @@ class ModelRegistry:
 DEFAULT_CONFIG = {
     "trainer": {
         "allow_cloud": True,
-        "allow_local": True,
+        "allow_local": False,
         "preferred_transport": "cloud",
         "endpoints": [
             {
@@ -237,7 +237,7 @@ DEFAULT_CONFIG = {
         ],
     },
     "agent": {
-        "allow_cloud": True,
+        "allow_cloud": False,
         "allow_local": True,
         "preferred_transport": "local",
         "endpoints": [

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, List
+from strata.core.lanes import infer_lane_from_session_id
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.feedback.signals import register_feedback_signal
+from strata.orchestrator.tool_health import record_tool_execution, should_throttle_tool
 from strata.orchestrator.trainer_controls import (
     build_branch_state_summary,
     invalidate_task_premise,
@@ -40,9 +42,45 @@ class ChatToolExecutor:
         except Exception:
             args = {}
         reason = str(args.get("reason") or "").strip()
+        lane = infer_lane_from_session_id(session_id)
+        referenced_task_id = str(args.get("task_id") or args.get("source_id") or "").strip()
+        referenced_task = storage.tasks.get_by_id(referenced_task_id) if referenced_task_id else None
+        task_type = getattr(getattr(referenced_task, "type", None), "value", None) if referenced_task else None
 
         tool_outputs_generated = False
         async_task_id = None
+
+        throttle = should_throttle_tool(
+            storage,
+            tool_name=func_name,
+            lane=lane,
+            task_type=task_type,
+        )
+        if throttle.get("throttle"):
+            tool_content = (
+                f"Tool '{func_name}' is currently {throttle.get('status')} for this scope and has been circuit-broken. "
+                f"Reason: {throttle.get('reason')}. Route to a different tool or queue tooling repair before retrying."
+            )
+            record_tool_execution(
+                storage,
+                tool_name=func_name,
+                outcome="blocked",
+                lane=lane,
+                task_type=task_type,
+                task_id=getattr(referenced_task, "task_id", None),
+                session_id=session_id,
+                source="chat_tool_executor",
+                failure_kind="circuit_breaker",
+                details={"health": throttle.get("health") or {}},
+            )
+            storage.commit()
+            return {
+                "tool_message": {"role": "tool", "tool_call_id": tool_call_id, "name": func_name, "content": tool_content},
+                "tool_outputs_generated": False,
+                "async_task_id": None,
+                "tool_reason": reason,
+                "tool_name": func_name,
+            }
 
         if func_name == "inspect_branch_state":
             task_id = str(args.get("task_id") or "").strip()
@@ -160,10 +198,13 @@ class ChatToolExecutor:
                     task = storage.tasks.get_by_id(task_id) if task_id else None
                     if task:
                         task.description = (task.description or "") + f"\n\nUser clarification:\n{answer}"
-                        task.human_intervention_required = False
-                        task.state = task_state_cls.PENDING
-                        storage.commit()
-                        await self.deps["worker"].enqueue(task.task_id)
+                        if str(pending_question.get("escalation_mode") or "blocking").strip().lower() != "non_blocking":
+                            task.human_intervention_required = False
+                            task.state = task_state_cls.PENDING
+                            storage.commit()
+                            await self.deps["worker"].enqueue(task.task_id)
+                        else:
+                            storage.commit()
                 if resolve_question:
                     resolve_question(storage, question_id, resolution=resolution, response=answer)
                 storage.commit()
@@ -499,6 +540,21 @@ class ChatToolExecutor:
             )
         else:
             tool_content = f"Error: Tool '{func_name}' not implemented."
+
+        outcome = "broken" if str(tool_content).startswith("Error: Tool '") else "success"
+        record_tool_execution(
+            storage,
+            tool_name=func_name,
+            outcome=outcome,
+            lane=lane,
+            task_type=task_type,
+            task_id=getattr(referenced_task, "task_id", None),
+            session_id=session_id,
+            source="chat_tool_executor",
+            failure_kind="not_implemented" if outcome == "broken" else None,
+            details={"tool_outputs_generated": tool_outputs_generated, "async_task_id": async_task_id},
+        )
+        storage.commit()
 
         return {
             "tool_message": {"role": "tool", "tool_call_id": tool_call_id, "name": func_name, "content": tool_content},

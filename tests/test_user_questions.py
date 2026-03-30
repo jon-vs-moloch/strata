@@ -4,12 +4,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.orchestrator.user_questions import (
+    ensure_question_escalation_for_source,
     enqueue_user_question,
     get_active_question,
     mark_question_asked,
     resolve_question,
+    set_question_escalation_mode,
 )
-from strata.storage.models import Base
+from strata.storage.models import Base, TaskState
 from strata.storage.services.main import StorageManager
 
 
@@ -59,6 +61,130 @@ def test_question_queue_lifecycle():
     assert resolved["response"] == "Use the smaller model."
 
     assert get_active_question(storage, queued["session_id"]) == {}
+
+
+def test_non_blocking_question_persists_escalation_mode():
+    storage = DummyStorage()
+    queued = enqueue_user_question(
+        storage,
+        session_id="demo",
+        question="Do you know where this document lives?",
+        source_type="task_blocked",
+        source_id="task-123",
+        escalation_mode="non_blocking",
+    )
+
+    assert queued["escalation_mode"] == "non_blocking"
+
+
+def test_question_can_promote_from_non_blocking_to_blocking_and_block_task():
+    storage = make_real_storage()
+    task = storage.tasks.create(
+        title="Investigate document location",
+        description="Search while asking the user for a shortcut.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="Do you know where this document is?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="non_blocking",
+    )
+
+    updated = set_question_escalation_mode(
+        storage,
+        queued["question_id"],
+        escalation_mode="blocking",
+        rationale="Current capabilities cannot obtain the information autonomously.",
+    )
+    storage.commit()
+    storage.session.expire_all()
+    reloaded_task = storage.tasks.get_by_id(task.task_id)
+
+    assert updated["escalation_mode"] == "blocking"
+    assert updated["escalation_history"][-1]["to_mode"] == "blocking"
+    assert reloaded_task.human_intervention_required is True
+    assert reloaded_task.state == TaskState.BLOCKED
+
+
+def test_question_can_demote_from_blocking_to_non_blocking_and_resume_task():
+    storage = make_real_storage()
+    task = storage.tasks.create(
+        title="Need operator clarification",
+        description="Currently blocked.",
+        session_id="agent:default",
+        state=TaskState.BLOCKED,
+        constraints={"lane": "agent"},
+    )
+    task.human_intervention_required = True
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="What should I change before retrying?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="blocking",
+    )
+
+    updated = set_question_escalation_mode(
+        storage,
+        queued["question_id"],
+        escalation_mode="non_blocking",
+        rationale="New tooling makes continued investigation possible.",
+    )
+    storage.commit()
+    storage.session.expire_all()
+    reloaded_task = storage.tasks.get_by_id(task.task_id)
+
+    assert updated["escalation_mode"] == "non_blocking"
+    assert updated["escalation_history"][-1]["to_mode"] == "non_blocking"
+    assert reloaded_task.human_intervention_required is False
+    assert reloaded_task.state == TaskState.PENDING
+
+
+def test_question_escalation_can_be_updated_by_source_lookup():
+    storage = make_real_storage()
+    task = storage.tasks.create(
+        title="Need operator clarification",
+        description="Currently blocked.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    queued = enqueue_user_question(
+        storage,
+        session_id="agent:default",
+        question="Where is the missing document?",
+        source_type="task_blocked",
+        source_id=task.task_id,
+        lane="agent",
+        escalation_mode="non_blocking",
+    )
+
+    updated = ensure_question_escalation_for_source(
+        storage,
+        source_type="task_blocked",
+        source_id=task.task_id,
+        escalation_mode="blocking",
+        rationale="Autonomous search exhausted current capabilities.",
+    )
+    storage.commit()
+    storage.session.expire_all()
+    reloaded_task = storage.tasks.get_by_id(task.task_id)
+
+    assert updated["question_id"] == queued["question_id"]
+    assert updated["escalation_mode"] == "blocking"
+    assert reloaded_task.human_intervention_required is True
+    assert reloaded_task.state == TaskState.BLOCKED
 
 
 def test_terminal_question_history_is_bounded(monkeypatch):
