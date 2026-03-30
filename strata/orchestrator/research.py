@@ -237,14 +237,37 @@ def _should_return_raw_file(
     )
 
 
+def _best_hint_directory(preferred_start_paths: Optional[list[str]]) -> str:
+    for raw_path in preferred_start_paths or []:
+        normalized = str(raw_path or "").strip()
+        if not normalized:
+            continue
+        path_obj = Path(normalized)
+        candidate = str(path_obj.parent).strip() if path_obj.suffix else normalized
+        candidate = candidate or "."
+        if candidate != ".":
+            return candidate
+    return "."
+
+
 def _build_research_system_prompt(
     target_scope: str,
     task_description: str,
     repo_snapshot: str = "",
     spec_paths: Optional[list[str]] = None,
+    preferred_start_paths: Optional[list[str]] = None,
+    focused_guidance: str = "",
+    disallow_broad_repo_scan: bool = False,
 ) -> str:
     spec_lines = "\n".join(f"- {path}" for path in (spec_paths or [])) or "- None provided"
     repo_hint_block = f"\nObserved repository snapshot:\n{repo_snapshot}\n" if repo_snapshot else ""
+    cleaned_preferred_paths = [str(path).strip() for path in (preferred_start_paths or []) if str(path).strip()]
+    preferred_lines = "\n".join(f"- {path}" for path in cleaned_preferred_paths) or "- None provided"
+    focused_hint_block = (
+        f"\nFocused starting points for this task:\n{preferred_lines}\nGuidance: {focused_guidance}\n"
+        if (preferred_start_paths or focused_guidance)
+        else ""
+    )
     codebase_nudge = ""
     lower_desc = (task_description or "").lower()
     if target_scope.lower() == "codebase" or any(
@@ -260,6 +283,13 @@ def _build_research_system_prompt(
 {anchors}
 - Do not say you need "access to the codebase" when the task already provides repo paths or a snapshot. Inspect the files instead.
 - If the snapshot or anchor files seem incomplete, say what you inspected and what is still missing.
+"""
+    if disallow_broad_repo_scan and preferred_lines != "- None provided":
+        codebase_nudge += f"""
+- This task is intentionally narrow. Do NOT start with `list_directory(\".\")` or a broad repo-root survey.
+- Begin with one of these focused starting points instead:
+{preferred_lines}
+- Only broaden beyond those hints if you can explain why the hinted surfaces were insufficient.
 """
 
     return f"""You are an Expert Research Agent building a persistent knowledge library.
@@ -283,7 +313,7 @@ Your current tools: list_directory, read_file, search_web, write_library_file, l
 [LOCAL CONTEXT]
 - Repository paths are relative to the repo root.
 - Canonical spec paths for this task:
-{spec_lines}{repo_hint_block}{codebase_nudge}
+{spec_lines}{repo_hint_block}{focused_hint_block}{codebase_nudge}
 
 When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
 Focus area: {target_scope.upper()} scope."""
@@ -330,6 +360,18 @@ class ResearchModule:
         context_hints = context_hints or {}
         repo_snapshot = str(context_hints.get("repo_snapshot") or "").strip()
         spec_paths = context_hints.get("spec_paths") or []
+        source_hints = dict(context_hints.get("source_hints") or {})
+        preferred_start_paths = list(
+            context_hints.get("preferred_start_paths")
+            or source_hints.get("preferred_paths")
+            or []
+        )
+        focused_guidance = str(
+            context_hints.get("focused_guidance")
+            or source_hints.get("guidance")
+            or ""
+        ).strip()
+        disallow_broad_repo_scan = bool(context_hints.get("disallow_broad_repo_scan"))
         research_lane = infer_lane_from_session_id((task_context or {}).get("session_id"))
         research_task_type = str((task_context or {}).get("type") or "").strip() or "RESEARCH"
         research_task_id = str((task_context or {}).get("task_id") or "").strip() or None
@@ -555,6 +597,9 @@ class ResearchModule:
                     task_description=task_description,
                     repo_snapshot=repo_snapshot,
                     spec_paths=spec_paths,
+                    preferred_start_paths=preferred_start_paths,
+                    focused_guidance=focused_guidance,
+                    disallow_broad_repo_scan=disallow_broad_repo_scan,
                 ),
             },
             {
@@ -655,6 +700,8 @@ class ResearchModule:
                 failure_kind = None
                 if func_name == "list_directory":
                     rel_path = args.get("path", ".") or "."
+                    if disallow_broad_repo_scan and str(rel_path).strip() == "." and preferred_start_paths:
+                        rel_path = _best_hint_directory(preferred_start_paths)
                     print(f"  -> Research Agent listing directory: {rel_path}")
                     try:
                         directory = (Path(root) / rel_path).resolve()

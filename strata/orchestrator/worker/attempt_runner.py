@@ -19,6 +19,62 @@ from strata.eval.job_runner import run_eval_job_task
 logger = logging.getLogger(__name__)
 
 
+def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
+    normalized = str(item_id or "").strip().lower()
+    hints = {
+        "agent_name": {
+            "preferred_paths": [
+                ".knowledge/user-profile.md",
+                ".knowledge/specs/project_spec.md",
+                "strata/api/chat_task_admin.py",
+                "strata/api/chat_runtime.py",
+            ],
+            "guidance": "Look for durable naming/profile metadata before inspecting broader runtime surfaces.",
+        },
+        "identity_language": {
+            "preferred_paths": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/system-substrates.md",
+                "strata/procedures/registry.py",
+            ],
+            "guidance": "Inspect the durable specs and Procedure definitions that describe operator, agent, trainer, and system roles.",
+        },
+        "verification_posture": {
+            "preferred_paths": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/task-attempt-ontology.md",
+                "strata/experimental/verifier.py",
+                "strata/orchestrator/worker/resolution_policy.py",
+            ],
+            "guidance": "Inspect verification policy and trust-annealing guidance, not the repo root.",
+        },
+        "runtime_posture": {
+            "preferred_paths": [
+                ".knowledge/specs/project_spec.md",
+                "strata/api/main.py",
+                "strata/models/providers.py",
+                "strata/observability/host.py",
+            ],
+            "guidance": "Inspect runtime settings and comfort-throttle codepaths before asking for clarification.",
+        },
+        "open_questions": {
+            "preferred_paths": [
+                ".knowledge/specs/investigation-patterns.md",
+                "strata/orchestrator/user_questions.py",
+                "strata/experimental/trace_review.py",
+                "strata/orchestrator/background.py",
+            ],
+            "guidance": "Inspect question, attention, and review surfaces directly instead of broadly surveying the repository.",
+        },
+    }
+    selected = dict(hints.get(normalized) or {})
+    selected.setdefault("preferred_paths", [])
+    selected.setdefault("guidance", "")
+    return selected
+
+
 def _emit_task_communication(storage, task, *, content: str, source_kind: str) -> None:
     task_type = str(getattr(task.type, "value", "") or "").lower()
     summary = str(getattr(task, "title", "") or "").strip() or str(getattr(task, "description", "") or "").strip()[:160]
@@ -87,6 +143,7 @@ def _procedure_checklist_subtasks(storage, task):
         verification = str(item.get("verification") or "").strip()
         if not item_title:
             continue
+        source_hints = _procedure_checklist_item_source_hints(item_id)
         created.append(
             {
                 "title": f"Procedure Step: {item_title}",
@@ -103,6 +160,7 @@ def _procedure_checklist_subtasks(storage, task):
                     "procedure_id": constraints.get("procedure_id"),
                     "procedure_title": procedure_title,
                     "procedure_parent_task_id": getattr(focus, "task_id", None),
+                    "source_hints": source_hints,
                     "procedure_checklist_item": {
                         "id": item_id,
                         "title": item_title,
@@ -113,6 +171,84 @@ def _procedure_checklist_subtasks(storage, task):
             }
         )
     return created
+
+
+def _procedure_item_recovery_subtasks(storage, task):
+    focus = _recoverable_focus_task(storage, task)
+    constraints = dict(getattr(focus, "constraints", {}) or {})
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    item_id = str(checklist_item.get("id") or "").strip()
+    item_title = str(checklist_item.get("title") or getattr(focus, "title", "") or "Procedure item").strip()
+    verification = str(checklist_item.get("verification") or "").strip()
+    if not item_id or not item_title:
+        return []
+    source_hints = dict(constraints.get("source_hints") or _procedure_checklist_item_source_hints(item_id))
+    preferred_paths = list(source_hints.get("preferred_paths") or [])
+    guidance = str(source_hints.get("guidance") or "").strip()
+    base_constraints = {
+        "lane": constraints.get("lane") or dict(getattr(task, "constraints", {}) or {}).get("lane"),
+        "procedure_id": constraints.get("procedure_id"),
+        "procedure_title": constraints.get("procedure_title"),
+        "procedure_parent_task_id": constraints.get("procedure_parent_task_id") or getattr(focus, "parent_task_id", None),
+        "procedure_checklist_item": checklist_item,
+        "source_hints": source_hints,
+        "recovered_from_decomposition_failure": True,
+    }
+    return [
+        {
+            "proto_id": "inspect_sources",
+            "title": f"Inspect sources for {item_title}",
+            "description": (
+                f"Inspect only the most relevant sources for checklist item [{item_id}] {item_title}. "
+                f"Verification target: {verification}. "
+                f"{guidance}".strip()
+            ),
+            "task_type": TaskType.RESEARCH,
+            "constraints": {
+                **base_constraints,
+                "target_files": preferred_paths,
+                "preferred_start_paths": preferred_paths,
+                "disallow_broad_repo_scan": True,
+                "recovery_phase": "inspect",
+            },
+            "dependencies": [],
+        },
+        {
+            "proto_id": "decide_status",
+            "title": f"Decide status for {item_title}",
+            "description": (
+                f"Use the inspected evidence for [{item_id}] {item_title} to decide one of two outcomes only: "
+                "either the checklist item is satisfied from current evidence, or it still needs clarification/attention. "
+                "Do not broaden scope."
+            ),
+            "task_type": TaskType.RESEARCH,
+            "constraints": {
+                **base_constraints,
+                "target_files": preferred_paths,
+                "preferred_start_paths": preferred_paths,
+                "disallow_broad_repo_scan": True,
+                "recovery_phase": "decide",
+            },
+            "dependencies": ["inspect_sources"],
+        },
+        {
+            "proto_id": "cash_out",
+            "title": f"Cash out {item_title}",
+            "description": (
+                f"Take the status decision for [{item_id}] {item_title} and cash it out into durable progress: "
+                "persist the confirmed setting/knowledge if satisfied, or create an explicit pending question or durable attention item if unresolved."
+            ),
+            "task_type": TaskType.RESEARCH,
+            "constraints": {
+                **base_constraints,
+                "target_files": preferred_paths,
+                "preferred_start_paths": preferred_paths,
+                "disallow_broad_repo_scan": True,
+                "recovery_phase": "cash_out",
+            },
+            "dependencies": ["decide_status"],
+        },
+    ]
 
 async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueue_fn, progress_fn=None):
     """
@@ -273,6 +409,39 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             continue
         actionable.append((tid, proto))
     if not actionable:
+        item_fallback = _procedure_item_recovery_subtasks(storage, task)
+        if item_fallback:
+            spawned_by_proto_id = {}
+            spawned_ids = []
+            for item in item_fallback:
+                sub = storage.tasks.create(
+                    title=item["title"],
+                    description=item["description"],
+                    session_id=task.session_id,
+                    parent_task_id=task.task_id,
+                    state=TaskState.PENDING,
+                    constraints=item["constraints"],
+                    flush=False,
+                )
+                sub.type = item["task_type"]
+                sub.depth = task.depth + 1
+                spawned_ids.append(sub.task_id)
+                spawned_by_proto_id[str(item["proto_id"])] = sub
+            for item in item_fallback:
+                sub = spawned_by_proto_id.get(str(item["proto_id"]))
+                if sub is None:
+                    continue
+                for dep_tid in list(item.get("dependencies") or []):
+                    dep_task = spawned_by_proto_id.get(str(dep_tid))
+                    if dep_task is None or dep_task.task_id == sub.task_id:
+                        continue
+                    if dep_task not in sub.dependencies:
+                        sub.dependencies.append(dep_task)
+            task.state = TaskState.WORKING
+            storage.commit()
+            for task_id in spawned_ids:
+                await enqueue_fn(task_id)
+            return
         procedure_fallback = _procedure_checklist_subtasks(storage, task)
         if procedure_fallback:
             spawned_ids = []

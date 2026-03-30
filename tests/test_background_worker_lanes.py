@@ -546,6 +546,10 @@ def test_run_decomposition_falls_back_to_procedure_checklist_subtasks():
     assert len(created) == 2
     assert all(task.type == TaskType.RESEARCH for task in created)
     assert all("procedure_checklist_item" in dict(task.constraints or {}) for task in created)
+    runtime_posture_task = next(task for task in created if "runtime posture" in task.title.lower())
+    runtime_hints = dict((runtime_posture_task.constraints or {}).get("source_hints") or {})
+    assert "strata/api/main.py" in list(runtime_hints.get("preferred_paths") or [])
+    assert runtime_posture_task.constraints.get("disallow_broad_repo_scan") is None
     assert len(queued) == 2
 
 
@@ -577,6 +581,65 @@ def test_run_decomposition_persists_dependency_edges():
     assert inspect_task.task_id in queued
     assert persist_task.task_id in queued
     assert inspect_task in persist_task.dependencies
+
+
+def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
+    storage = make_storage()
+    focus = storage.tasks.create(
+        title="Procedure Step: Confirm runtime posture",
+        description="Advance the runtime posture item.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={
+            "lane": "agent",
+            "procedure_id": "operator_onboarding",
+            "procedure_title": "Operator Onboarding",
+            "procedure_parent_task_id": "root-procedure",
+            "procedure_checklist_item": {
+                "id": "runtime_posture",
+                "title": "Confirm local/cloud and quiet-hardware preferences",
+                "verification": "Comfort constraints are durably recorded or turned into clarification.",
+            },
+            "source_hints": {
+                "preferred_paths": [
+                    ".knowledge/specs/project_spec.md",
+                    "strata/api/main.py",
+                    "strata/models/providers.py",
+                ],
+                "guidance": "Inspect runtime settings and comfort-throttle codepaths before asking for clarification.",
+            },
+        },
+    )
+    decomp_task = storage.tasks.create(
+        title="Recovery Plan for Procedure Step: Confirm local/cloud and quiet-hardware preferences",
+        description="Create a bounded recovery plan.",
+        session_id="agent:default",
+        parent_task_id=focus.task_id,
+        state=TaskState.PENDING,
+        constraints={"lane": "agent", "recovery_focus_task_id": focus.task_id},
+    )
+    decomp_task.type = TaskType.DECOMP
+    storage.commit()
+
+    queued = []
+
+    async def enqueue_fn(task_id):
+        queued.append(task_id)
+
+    asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
+
+    created = [child for child in storage.session.query(TaskModel).all() if child.parent_task_id == decomp_task.task_id]
+    assert len(created) == 3
+    by_title = {child.title: child for child in created}
+    inspect_task = by_title["Inspect sources for Confirm local/cloud and quiet-hardware preferences"]
+    decide_task = by_title["Decide status for Confirm local/cloud and quiet-hardware preferences"]
+    cash_out_task = by_title["Cash out Confirm local/cloud and quiet-hardware preferences"]
+
+    assert all(child.task_id in queued for child in created)
+    assert inspect_task in decide_task.dependencies
+    assert decide_task in cash_out_task.dependencies
+    assert decide_task.constraints.get("disallow_broad_repo_scan") is True
+    assert "strata/api/main.py" in list(decide_task.constraints.get("preferred_start_paths") or [])
 
 
 def test_blocked_weak_task_review_skips_when_no_new_evidence_after_review():
