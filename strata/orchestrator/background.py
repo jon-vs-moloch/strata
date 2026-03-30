@@ -571,8 +571,60 @@ class BackgroundWorker:
         self._lane_activity_details[normalized_lane] = details
 
     async def enqueue(self, task_id: str):
-        await self._lane_queue(self._lane_for_task_id(task_id)).put(task_id)
+        await self.enqueue_with_priority(task_id, front=False)
+        
+    async def enqueue_with_priority(self, task_id: str, *, front: bool = False):
+        queue = self._lane_queue(self._lane_for_task_id(task_id))
+        if front:
+            queue._queue.appendleft(task_id)
+        else:
+            await queue.put(task_id)
         logger.info(f"Enqueued task {task_id}")
+
+    def _task_has_live_children(self, task: TaskModel, storage=None) -> bool:
+        child_ids = list(getattr(task, "active_child_ids", []) or [])
+        if not child_ids:
+            return False
+        owned_storage = None
+        if storage is None:
+            owned_storage = self._storage_factory()
+            storage = owned_storage
+        try:
+            for child_id in child_ids:
+                child = storage.tasks.get_by_id(str(child_id))
+                if child is None:
+                    continue
+                if child.state not in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
+                    return True
+            return False
+        finally:
+            if owned_storage is not None:
+                owned_storage.session.close()
+
+    @staticmethod
+    def _task_queue_rank(task: TaskModel) -> tuple:
+        constraints = dict(getattr(task, "constraints", {}) or {})
+        phase = str(constraints.get("recovery_phase") or "").strip().lower()
+        phase_rank = {"inspect": 0, "decide": 1, "cash_out": 2}.get(phase, 9)
+        has_hints = bool(constraints.get("source_hints")) or bool(constraints.get("preferred_start_paths"))
+        has_parent = 0 if getattr(task, "parent_task_id", None) else 1
+        updated_at = getattr(task, "updated_at", None)
+        created_at = getattr(task, "created_at", None)
+        recency = updated_at or created_at
+        recency_key = 0.0
+        if recency is not None:
+            try:
+                recency_key = -float(recency.timestamp())
+            except Exception:
+                recency_key = 0.0
+        return (
+            has_parent,
+            0 if has_hints else 1,
+            phase_rank,
+            recency_key,
+            -int(getattr(task, "depth", 0) or 0),
+            str(getattr(task, "task_id", "") or ""),
+        )
 
     async def wait_until_idle(self, timeout: float = 5.0, lane: Optional[str] = None) -> bool:
         normalized_lane = normalize_lane(lane)
@@ -641,6 +693,8 @@ class BackgroundWorker:
                 constraints = dict(task.constraints or {})
                 if constraints.get("paused") or task.human_intervention_required:
                     continue
+                if self._task_has_live_children(task, storage):
+                    continue
                 return True
             return False
         finally:
@@ -652,11 +706,14 @@ class BackgroundWorker:
         try:
             query = storage.session.query(TaskModel).filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
             candidates = query.all()
+            candidates = sorted(candidates, key=self._task_queue_rank)
             enqueued = 0
             for task in candidates:
                 if task.human_intervention_required:
                     continue
                 if task.state == TaskState.BLOCKED:
+                    continue
+                if task.state == TaskState.PUSHED or self._task_has_live_children(task, storage):
                     continue
                 constraints = dict(task.constraints or {})
                 if constraints.get("paused"):
@@ -668,7 +725,7 @@ class BackgroundWorker:
                     continue
                 if task.task_id in {task_id for task_id in self._current_task_ids.values() if task_id}:
                     continue
-                await self.enqueue(task.task_id)
+                await self.enqueue_with_priority(task.task_id, front=False)
                 enqueued += 1
             return enqueued
         finally:

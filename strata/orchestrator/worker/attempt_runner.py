@@ -19,6 +19,13 @@ from strata.eval.job_runner import run_eval_job_task
 logger = logging.getLogger(__name__)
 
 
+async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> None:
+    try:
+        await enqueue_fn(task_id, front=front)
+    except TypeError:
+        await enqueue_fn(task_id)
+
+
 def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
     normalized = str(item_id or "").strip().lower()
     hints = {
@@ -38,26 +45,28 @@ def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
                 "docs/spec/system-substrates.md",
                 "strata/procedures/registry.py",
             ],
-            "guidance": "Inspect the durable specs and Procedure definitions that describe operator, agent, trainer, and system roles.",
+            "guidance": "Inspect the durable specs and Procedure definitions that describe naming, role language, and collaboration style for operator, agent, trainer, and system.",
         },
         "verification_posture": {
             "preferred_paths": [
                 ".knowledge/specs/constitution.md",
                 ".knowledge/specs/project_spec.md",
                 "docs/spec/task-attempt-ontology.md",
+                "docs/spec/project-philosophy.md",
                 "strata/experimental/verifier.py",
                 "strata/orchestrator/worker/resolution_policy.py",
             ],
-            "guidance": "Inspect verification policy and trust-annealing guidance, not the repo root.",
+            "guidance": "Inspect permissions, autonomy, verification policy, and trust-annealing guidance, not the repo root.",
         },
         "runtime_posture": {
             "preferred_paths": [
                 ".knowledge/specs/project_spec.md",
+                "docs/spec/project-philosophy.md",
                 "strata/api/main.py",
                 "strata/models/providers.py",
                 "strata/observability/host.py",
             ],
-            "guidance": "Inspect runtime settings and comfort-throttle codepaths before asking for clarification.",
+            "guidance": "Inspect runtime settings, scope posture, and comfort-throttle codepaths before asking for clarification.",
         },
         "open_questions": {
             "preferred_paths": [
@@ -457,10 +466,11 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
                         continue
                     if dep_task not in sub.dependencies:
                         sub.dependencies.append(dep_task)
-            task.state = TaskState.WORKING
+            task.active_child_ids = list(dict.fromkeys(spawned_ids))
+            task.state = TaskState.PUSHED
             storage.commit()
             for task_id in spawned_ids:
-                await enqueue_fn(task_id)
+                await _enqueue_task(enqueue_fn, task_id, front=True)
             return
         procedure_fallback = _procedure_checklist_subtasks(storage, task)
         if procedure_fallback:
@@ -478,10 +488,11 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
                 sub.type = item["task_type"]
                 sub.depth = task.depth + 1
                 spawned_ids.append(sub.task_id)
-            task.state = TaskState.WORKING
+            task.active_child_ids = list(dict.fromkeys(spawned_ids))
+            task.state = TaskState.PUSHED
             storage.commit()
             for task_id in spawned_ids:
-                await enqueue_fn(task_id)
+                await _enqueue_task(enqueue_fn, task_id, front=True)
             return
         raise RuntimeError(
             "Decomposition produced no actionable subtasks. Treat this as a recoverable planning failure and generate a more concrete recovery plan instead of escalating by default."
@@ -517,10 +528,11 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
                 continue
             if dep_task not in sub.dependencies:
                 sub.dependencies.append(dep_task)
-    task.state = TaskState.WORKING
+    task.active_child_ids = list(dict.fromkeys(spawned_ids))
+    task.state = TaskState.PUSHED
     storage.commit()
     for task_id in spawned_ids:
-        await enqueue_fn(task_id)
+        await _enqueue_task(enqueue_fn, task_id, front=True)
 
 async def _run_implementation(task, storage, model_adapter, *, progress_fn=None, attempt_id=None):
     research_mod = ResearchModule(model_adapter, storage)

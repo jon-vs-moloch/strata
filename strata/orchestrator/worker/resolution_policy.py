@@ -22,6 +22,13 @@ from strata.orchestrator.user_questions import (
 logger = logging.getLogger(__name__)
 
 
+async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> None:
+    try:
+        await enqueue_fn(task_id, front=front)
+    except TypeError:
+        await enqueue_fn(task_id)
+
+
 def _tool_repair_shape(improvement_reason: str) -> tuple[str, TaskType]:
     normalized = str(improvement_reason or "unknown").strip().lower()
     if normalized == "tool_broken":
@@ -434,7 +441,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
             return
         task.state = TaskState.PENDING
         _demote_existing_blocking_question("A new autonomous retry path is available, so user input is no longer the only route forward.")
-        await enqueue_fn(task.task_id)
+        await _enqueue_task(enqueue_fn, task.task_id)
         
     elif res == "decompose" or res == "internal_replan":
         spawned_child_ids = []
@@ -473,7 +480,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                         logger.warning(f"Task {sub.task_id} requires a validator per system policy.")
                 spawned_child_ids.append(sub.task_id)
                 storage.commit()
-                await enqueue_fn(sub.task_id)
+                await _enqueue_task(enqueue_fn, sub.task_id)
         else:
             focus = _recovery_focus_task(storage, task)
             focus_title = str(getattr(focus, "title", "") or task.title or "task").strip()
@@ -507,7 +514,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 )
             spawned_child_ids.append(failover.task_id)
             storage.commit()
-            await enqueue_fn(failover.task_id)
+            await _enqueue_task(enqueue_fn, failover.task_id, front=True)
             _demote_existing_blocking_question("The branch has a fresh autonomous recovery plan, so guidance can remain advisory while work continues.")
         task.active_child_ids = list(dict.fromkeys([*(task.active_child_ids or []), *spawned_child_ids]))
         task.state = TaskState.PUSHED

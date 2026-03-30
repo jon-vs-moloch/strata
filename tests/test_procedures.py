@@ -8,6 +8,7 @@ from strata.procedures.registry import (
     list_procedures,
     queue_procedure,
 )
+from strata.orchestrator.user_questions import get_question_for_source
 from strata.storage.models import Base, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
@@ -40,6 +41,13 @@ def test_queue_procedure_creates_verifiable_task():
     assert task.constraints["procedure_id"] == "operator_onboarding"
     assert task.constraints["verification_required"] is True
     assert task.success_criteria["required_checklist_ids"]
+    question = get_question_for_source(
+        storage,
+        source_type="procedure_onboarding_intro",
+        source_id="operator_onboarding",
+    )
+    assert question
+    assert question["escalation_mode"] == "non_blocking"
 
 
 def test_onboarding_status_and_ensure_task_are_idempotent():

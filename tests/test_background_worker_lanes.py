@@ -537,8 +537,8 @@ def test_run_decomposition_falls_back_to_procedure_checklist_subtasks():
 
     queued = []
 
-    async def enqueue_fn(task_id):
-        queued.append(task_id)
+    async def enqueue_fn(task_id, front=False):
+        queued.append((task_id, front))
 
     asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
 
@@ -551,6 +551,9 @@ def test_run_decomposition_falls_back_to_procedure_checklist_subtasks():
     assert "strata/api/main.py" in list(runtime_hints.get("preferred_paths") or [])
     assert runtime_posture_task.constraints.get("disallow_broad_repo_scan") is None
     assert len(queued) == 2
+    assert decomp_task.state == TaskState.PUSHED
+    assert sorted(decomp_task.active_child_ids) == sorted(task.task_id for task in created)
+    assert all(front is True for _, front in queued)
 
 
 def test_run_decomposition_persists_dependency_edges():
@@ -567,8 +570,8 @@ def test_run_decomposition_persists_dependency_edges():
 
     queued = []
 
-    async def enqueue_fn(task_id):
-        queued.append(task_id)
+    async def enqueue_fn(task_id, front=False):
+        queued.append((task_id, front))
 
     asyncio.run(_run_decomposition(task, storage, DependentDecompModel(), enqueue_fn))
 
@@ -578,9 +581,12 @@ def test_run_decomposition_persists_dependency_edges():
     inspect_task = by_title["Inspect current settings"]
     persist_task = by_title["Persist runtime posture"]
 
-    assert inspect_task.task_id in queued
-    assert persist_task.task_id in queued
+    assert inspect_task.task_id in [task_id for task_id, _ in queued]
+    assert persist_task.task_id in [task_id for task_id, _ in queued]
     assert inspect_task in persist_task.dependencies
+    assert task.state == TaskState.PUSHED
+    assert sorted(task.active_child_ids) == sorted(child.task_id for child in created)
+    assert all(front is True for _, front in queued)
 
 
 def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
@@ -623,8 +629,8 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
 
     queued = []
 
-    async def enqueue_fn(task_id):
-        queued.append(task_id)
+    async def enqueue_fn(task_id, front=False):
+        queued.append((task_id, front))
 
     asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
 
@@ -635,11 +641,14 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
     decide_task = by_title["Decide status for Confirm local/cloud and quiet-hardware preferences"]
     cash_out_task = by_title["Cash out Confirm local/cloud and quiet-hardware preferences"]
 
-    assert all(child.task_id in queued for child in created)
+    assert all(child.task_id in [task_id for task_id, _ in queued] for child in created)
     assert inspect_task in decide_task.dependencies
     assert decide_task in cash_out_task.dependencies
     assert decide_task.constraints.get("disallow_broad_repo_scan") is True
     assert "strata/api/main.py" in list(decide_task.constraints.get("preferred_start_paths") or [])
+    assert decomp_task.state == TaskState.PUSHED
+    assert sorted(decomp_task.active_child_ids) == sorted(child.task_id for child in created)
+    assert all(front is True for _, front in queued)
 
 
 def test_blocked_weak_task_review_skips_when_no_new_evidence_after_review():

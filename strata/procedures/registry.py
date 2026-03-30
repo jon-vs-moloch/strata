@@ -9,6 +9,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from strata.core.lanes import canonical_session_id_for_lane, normalize_lane
+from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.storage.models import TaskModel, TaskState, TaskType
 
 
@@ -35,18 +36,18 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
             },
             {
                 "id": "identity_language",
-                "title": "Confirm the preferred role language",
-                "verification": "The system should know it has an operator-facing agent and a trainer supervisor.",
+                "title": "Confirm personality and role language",
+                "verification": "The system should know how to refer to the operator, agent, trainer, and system, and what collaboration tone it should default to.",
             },
             {
                 "id": "verification_posture",
-                "title": "Establish the starting verification posture",
-                "verification": "The system should know whether to begin with aggressive verification while trust anneals.",
+                "title": "Establish permissions, autonomy, and verification posture",
+                "verification": "The system should know its starting autonomy and verification posture, including whether to begin with aggressive verification while trust anneals.",
             },
             {
                 "id": "runtime_posture",
-                "title": "Confirm local/cloud and quiet-hardware preferences",
-                "verification": "The operator's comfort constraints should be written into durable settings or queued as pending clarification.",
+                "title": "Confirm scope of work and runtime preferences",
+                "verification": "The operator's scope and comfort constraints should be written into durable settings or queued as pending clarification.",
             },
             {
                 "id": "open_questions",
@@ -177,6 +178,31 @@ def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[
     except Exception:
         task.type = TaskType.RESEARCH
     storage.commit()
+    if procedure["procedure_id"] == ONBOARDING_PROCEDURE_ID:
+        existing = get_question_for_source(
+            storage,
+            source_type="procedure_onboarding_intro",
+            source_id=procedure["procedure_id"],
+        )
+        if not existing:
+            enqueue_user_question(
+                storage,
+                session_id=resolved_session_id,
+                source_type="procedure_onboarding_intro",
+                source_id=procedure["procedure_id"],
+                escalation_mode="non_blocking",
+                lane=target_lane,
+                question=(
+                    "I’m starting your onboarding Procedure now. I’ll inspect the current project and settings, "
+                    "and I may ask follow-ups if anything is unclear. If you want to shortcut the process, you can "
+                    "tell me your preferred agent name, role language, verification posture, and local/cloud or quiet-hardware preferences."
+                ),
+                context={
+                    "procedure_id": procedure["procedure_id"],
+                    "task_id": task.task_id,
+                    "lane": target_lane,
+                },
+            )
     return task
 
 

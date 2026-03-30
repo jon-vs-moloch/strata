@@ -9,6 +9,29 @@ from strata.storage.models import TaskModel, TaskState
 
 logger = logging.getLogger(__name__)
 
+
+def _task_replay_rank(task: TaskModel) -> tuple:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    phase = str(constraints.get("recovery_phase") or "").strip().lower()
+    phase_rank = {"inspect": 0, "decide": 1, "cash_out": 2}.get(phase, 9)
+    has_hints = bool(constraints.get("source_hints")) or bool(constraints.get("preferred_start_paths"))
+    has_parent = 0 if getattr(task, "parent_task_id", None) else 1
+    recency = getattr(task, "updated_at", None) or getattr(task, "created_at", None)
+    recency_key = 0.0
+    if recency is not None:
+        try:
+            recency_key = -float(recency.timestamp())
+        except Exception:
+            recency_key = 0.0
+    return (
+        has_parent,
+        0 if has_hints else 1,
+        phase_rank,
+        recency_key,
+        -int(getattr(task, "depth", 0) or 0),
+        str(getattr(task, "task_id", "") or ""),
+    )
+
 async def recover_tasks(
     storage_factory,
     queue,
@@ -48,7 +71,7 @@ async def recover_tasks(
         if orphaned and not recover_orphaned_running:
             logger.info("Testing/startup guard active; orphaned running tasks were reset to pending without requeue.")
 
-        for task in recovered_orphaned:
+        for task in sorted(recovered_orphaned, key=_task_replay_rank):
             queue.put_nowait(task.task_id)
             logger.info(f"Recovered runtime task into active queue: {task.task_id}")
 
@@ -73,7 +96,7 @@ async def recover_tasks(
             logger.info(f"Pending startup replay is enabled; found {len(queued)} tasks to reload.")
 
         recovered_ids = {task.task_id for task in recovered_orphaned}
-        for task in queued:
+        for task in sorted(queued, key=_task_replay_rank):
             if task.task_id in recovered_ids:
                 continue
             queue.put_nowait(task.task_id)
