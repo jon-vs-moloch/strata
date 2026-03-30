@@ -73,6 +73,33 @@ def _looks_like_clarification_task(task: TaskModel) -> bool:
     return any(hint in text for hint in hints)
 
 
+def _looks_like_multistage_task(task: TaskModel) -> bool:
+    text = " ".join(
+        str(part or "").strip().lower()
+        for part in [getattr(task, "title", ""), getattr(task, "description", "")]
+        if str(part or "").strip()
+    )
+    if not text:
+        return False
+    stage_pairs = [
+        ("inspect", "patch"),
+        ("analyze", "patch"),
+        ("research", "implement"),
+        ("review", "implement"),
+        ("inspect", "validate"),
+        ("patch", "validate"),
+        ("implement", "validate"),
+        ("summarize", "patch"),
+        ("find", "fix"),
+    ]
+    if any(all(word in text for word in pair) for pair in stage_pairs):
+        return True
+    separators = [" then ", " and then ", " followed by ", " before "]
+    return any(separator in text for separator in separators) and any(
+        marker in text for marker in ["inspect", "analyze", "research", "review", "patch", "implement", "validate", "test", "summarize", "fix"]
+    )
+
+
 def _recovery_focus_task(storage, task: TaskModel) -> TaskModel:
     if storage is None or not hasattr(storage, "tasks"):
         return task
@@ -212,6 +239,16 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
             resolution="reattempt"
         )
 
+    if _looks_like_multistage_task(task):
+        return AttemptResolutionSchema(
+            reasoning=(
+                "The task description itself appears to bundle multiple progressive stages into one unit of work. "
+                "Treat this as a task-boundary problem and decompose it into oneshottable subtasks."
+            ),
+            resolution="decompose",
+            new_subtasks=[],
+        )
+
     # B2. Iteration exhaustion on research-like work -> decompose
     if failure_kind == "iteration_budget_exhausted" or "iteration limit reached" in err_str:
         if lineage_iteration_failures >= int(policy.get("lineage_iteration_limit", 4) or 4):
@@ -306,6 +343,9 @@ If you choose improve_tooling, also provide:
 
 Use tool_broken when the tool is behaving incorrectly and should be treated as untrustworthy until fixed.
 Use tool_too_weak when the tool works but is insufficient for the task.
+
+If the task appears to require multiple progressive stages like inspect -> patch -> validate, choose decompose.
+Do not normalize semantically different next steps as repeated attempts of the same task.
 
 Return only one JSON object matching the requested schema.
 Do not add prose before or after the object.

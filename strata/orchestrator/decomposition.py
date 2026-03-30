@@ -34,7 +34,7 @@ class DecompositionModule:
         """
         print(f"Decomposing task: {task_title}...")
         system_prompt = f"""You are an Expert Software Architect. Your job is to decompose a high-level coding task into a series of small, atomic, parallelizable 'leaf' tasks (subtasks).
-        
+
         GOAL: {task_title}
         DESCRIPTION: {task_desc}
         
@@ -49,6 +49,12 @@ class DecompositionModule:
         - edit_type: 'refactor', 'feature', 'test', 'fix', or 'chore'.
         - validator: The specific validation engine (e.g., 'pytest', 'lint', 'sandbox').
         - max_diff_size: A character-count budget for the file change (default 50000).
+        - each leaf task must be oneshottable: one variance-bearing invocation should plausibly complete it.
+
+        ONESHOTTABLE TASK RULES:
+        - If work naturally requires progressive stages like inspect, then patch, then validate, those are separate subtasks.
+        - Do not collapse multiple progressive stages into one leaf task.
+        - If a subtask would need another semantically different model step after completion, it is still too large and should be split again.
 
         OUTPUT CONTRACT:
         - Return only one structured object matching the requested schema.

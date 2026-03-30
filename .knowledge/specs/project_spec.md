@@ -28,12 +28,14 @@ Normal operating mode:
 - trainer supervision should treat verifier findings and deterministic contradictions as first-class evidence; repeated verifier failures without correction indicate a system-level supervision gap, not merely a task that needs more retries
 - verification policy should be shared across tiers and anneal from measured error rate rather than from hardcoded role-specific trust
 - the product shell should stay minimal and trustworthy: bundled code should provide continuity and safe-mode fallback, while higher-level UI and tool surfaces should increasingly be delivered through validated runtime modules or plugins
+- task boundaries should be chosen so one variance-bearing invocation can plausibly complete the task; if work naturally requires inspect, then patch, then validate, those are separate subtasks rather than multiple progressive attempts at one task
 
 Canonical supporting references:
 - `README.md`
 - `docs/spec/project-philosophy.md`
 - `docs/spec/codemap.md`
 - `.knowledge/specs/investigation-patterns.md`
+- `docs/spec/task-attempt-ontology.md`
 
 Operational guidance:
 - when the system detects durable user intent, route it into the spec proposal workflow rather than mutating the spec casually
@@ -47,6 +49,8 @@ Operational guidance:
 - prioritization should be surprise-sensitive: expected successes and expected failures usually warrant less attention than outcomes that violate the system's current expectations, because unexpected outcomes are often the strongest evidence that the model of the user, task, or harness is incomplete
 - reflection should be implemented as self-audit rather than a parallel mechanism; the same audit pipeline should be able to inspect external task traces, internal process traces, attention signals, prior audit artifacts, and other reviewable sequences
 - verification should be a fully general callable process over arbitrary steps and artifacts, not a post-attempt-only hook; audits may invoke verification, and verification outputs should themselves remain auditable
+- one attempt should correspond to one variance-bearing invocation plus bounded deterministic fallout before the next invocation; if another semantically different invocation is needed, prefer decomposition over treating it as just another progressive retry
+- long-running work, deterministic or non-deterministic, should emit explicit progress telemetry so the operator can distinguish healthy forward motion from true idleness or wedged execution
 - tool telemetry should support scope-aware circuit breakers so the system can learn "this tool is broken for this lane doing this class of work" and stop spamming the same failing call until remediation is underway
 - surprising signals should themselves remain auditable so the system can ask not only "what happened?" but also "was it right to be surprised by this?" and recalibrate its own attention policy
 - prefer evolving existing pipelines into shared primitives instead of creating adjacent special-purpose systems; a new subsystem should justify itself by becoming reusable across multiple Strata surfaces

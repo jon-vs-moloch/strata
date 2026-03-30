@@ -1,57 +1,58 @@
+﻿# Task + Attempt Ontology
 
-Task + Attempt Ontology Spec
+Minimal recursive work model for agentic systems.
 
-Minimal recursive work model for agentic systems
-
-1. Purpose
+## 1. Purpose
 
 Define a simple, consistent model for representing work in a recursive system where:
-	•	all work units are Tasks
-	•	all execution happens through Attempts
-	•	failure is not terminal—it produces structured next actions
-	•	parent tasks can route around failing children
-	•	root tasks cannot be bypassed
 
-⸻
+- all meaningful objectives are `tasks`
+- all variance-bearing execution happens through `attempts`
+- deterministic fallout is still recorded, but is not confused with retryable learning
+- success or failure is evaluated at explicit boundaries
+- parent tasks can route around failing children
+- root tasks cannot be bypassed
 
-2. Core Model
+## 2. Core Model
 
-2.1 Two primitives only
+### 2.1 Three layers
 
 The system consists of:
 
-Task
+- `task`
+  A persistent unit of work in the task graph.
+- `attempt`
+  One variance-bearing invocation against a task.
+- `execution record`
+  A record of one concrete invocation or step, whether deterministic or non-deterministic.
 
-A persistent unit of work (node in a tree/graph)
+### 2.2 Key principles
 
-Attempt
+- Tasks persist. Attempts end.
+- A task should be oneshottable at its own abstraction level.
+- If progress requires a second semantically different non-deterministic step, the task was underspecified and should decompose.
+- Deterministic work may surround an attempt, but does not become a new attempt just by taking time.
+- Long-running work, deterministic or non-deterministic, must emit progress telemetry so the operator can see forward motion.
 
-A concrete execution of a task
+## 3. Task
 
-⸻
+### 3.1 Definition
 
-2.2 Key principle
-
-Tasks persist. Attempts succeed or fail.
-
-⸻
-
-3. Task
-
-3.1 Definition
-
-A Task represents an objective that may be pursued through multiple attempts and/or subtasks.
+A task represents one bounded objective that should plausibly be completable by one variance-bearing shot at the current model/tool capability level.
 
 Tasks are:
-	•	persistent
-	•	recursive
-	•	composable
-	•	replaceable (if they have a parent)
 
-⸻
+- persistent
+- recursive
+- composable
+- replaceable if they have a parent
+- invalid if they secretly require multiple progressive stages like inspect, then patch, then validate
 
-3.2 Task fields
+If work naturally breaks into progressive stages, those stages are not multiple attempts at one task. They are separate subtasks in a decomposition.
 
+### 3.2 Task fields
+
+```json
 {
   "task_id": "uuid",
   "parent_task_id": "uuid | null",
@@ -64,66 +65,79 @@ Tasks are:
   "created_at": "timestamp",
   "updated_at": "timestamp"
 }
+```
 
+### 3.3 Task states
 
-⸻
-
-3.3 Task states
-
-pending
+`pending`
 
 Task exists but has not yet been attempted.
 
-working
+`working`
 
 Task is actively being pursued, either directly or via children.
 
-blocked
+`blocked`
 
 Task cannot proceed until a dependency is resolved.
 
-pushed
+`pushed`
 
 Task is deprioritized in favor of higher-priority work.
 
-complete
+`complete`
 
 Task achieved its success criteria.
 
-abandoned
+`abandoned`
 
 Task will no longer be pursued.
 
-cancelled
+`cancelled`
 
 Task was invalidated before meaningful work began.
 
-⸻
+### 3.4 Parent rule
 
-3.4 Parent rule
-
-parent_task_id == null → root task
-parent_task_id != null → child task
+- `parent_task_id == null` -> root task
+- `parent_task_id != null` -> child task
 
 This is the only structural distinction that matters.
 
-⸻
+## 4. Attempt
 
-4. Attempt
+### 4.1 Definition
 
-4.1 Definition
+An attempt is one variance-bearing execution instance of a task.
 
-An Attempt is a single execution instance of a task.
+In practice, this usually means one non-deterministic model or sampler invocation, plus its immediate deterministic fallout before the next non-deterministic invocation.
 
 Attempts are:
-	•	ephemeral
-	•	repeatable
-	•	the only place where success or failure occurs
 
-⸻
+- ephemeral
+- repeatable in principle, but meaningfully comparable only when variance exists
+- the only place where stochastic success or failure occurs
 
-4.2 Attempt fields
+### 4.2 Attempt boundary rule
 
+One attempt must map to one non-deterministic invocation.
+
+If another non-deterministic invocation is needed, that is not “attempt 2 of the same progressive stage” by default. It is evidence that:
+
+- the task should decompose, or
+- the next thing to do is a different task entirely
+
+This means a task that really needs:
+
+1. inspect and summarize
+2. patch
+3. validate
+
+should decompose into three tasks rather than accumulate three progressive attempts under one task.
+
+### 4.3 Attempt fields
+
+```json
 {
   "attempt_id": "uuid",
   "task_id": "uuid",
@@ -141,27 +155,72 @@ Attempts are:
     "rationale": "string"
   }
 }
+```
 
+### 4.4 Attempt outcomes
 
-⸻
-
-4.3 Attempt outcomes
-
-succeeded
+`succeeded`
 
 The attempt achieved the task’s success criteria.
 
-failed
+`failed`
 
 The attempt did not achieve the task’s success criteria.
 
-cancelled
+`cancelled`
 
 The attempt was stopped before meaningful completion.
 
-superseded
+`superseded`
 
 The attempt was overtaken by a newer attempt or branch.
+
+## 5. Execution Record
+
+### 5.1 Definition
+
+An execution record is the broader operational trace of one concrete invocation or step.
+
+Examples:
+
+- a non-deterministic model call
+- a temperature-0 model call
+- a tool invocation
+- deterministic context assembly
+- patch application
+- validation
+- file download
+
+Not every execution record is an attempt.
+
+### 5.2 Why keep it separate
+
+This distinction lets the system:
+
+- preserve full operational traceability
+- keep deterministic and non-deterministic work visible in the UI
+- avoid treating deterministic reruns as meaningful retries
+- reason about learning over attempts rather than over all raw steps
+
+Suggested fields:
+
+```json
+{
+  "execution_record_id": "uuid",
+  "task_id": "uuid",
+  "attempt_id": "uuid | null",
+  "kind": "model_call | tool_call | validation | download | context_load | other",
+  "is_variance_bearing": true,
+  "determinism_class": "nondeterministic | deterministic | mixed",
+  "started_at": "timestamp",
+  "ended_at": "timestamp",
+  "progress": {
+    "current": 10,
+    "total": 100,
+    "unit": "files"
+  }
+}
+```
 
 ⸻
 

@@ -18,6 +18,7 @@ Current durable guidance:
 - supervision should be deliberate rather than overwhelming; measure enough to steer the system, but do not let eval volume crowd out useful work
 - prefer cheap, deterministic preprocessing before inference whenever possible; use inference after the system has already reduced ambiguity, narrowed the search space, and assembled the best available evidence
 - if a decision can be improved by mixing deterministic checks with model judgment, run the deterministic pass first and feed its output to the model rather than asking the model to rediscover obvious structure from scratch
+- choose task boundaries so one variance-bearing invocation can plausibly complete the task; if work requires multiple progressive stages, decompose it explicitly instead of normalizing multi-stage retry loops
 - omission is not evidence of absence; when repo state is unverified, say it is unverified or verify it, but do not assert absence from an incomplete snapshot
 - treat user feedback, reactions, audits, and research artifacts as raw evidence that should eventually cash out into durable state changes: user knowledge, agent knowledge, project specs, constitution updates, or other reviewable promoted improvements
 - treat surprise as a first-class signal: when observed outcomes differ from expected outcomes without a good explanation, the mismatch should receive attention because it indicates the system's current model may be wrong
@@ -28,3 +29,4 @@ Current durable guidance:
 - when verifier findings repeatedly say an output is flawed or uncertain, supervision should escalate into a corrective intervention quickly; do not allow the system to normalize repeated verifier warnings into passive retry loops
 - if a reviewer or verifier cannot produce perfect structured output, preserve the strongest grounded fallback judgment available instead of discarding the review entirely
 - use tool-execution telemetry as a control surface: if a tool repeatedly fails for a specific lane/task context, degrade or circuit-break it until there is evidence of tool-focused remediation
+- long-running work must remain interpretable; deterministic and non-deterministic processes alike should publish progress signals so the system never appears idle while useful work is actually advancing

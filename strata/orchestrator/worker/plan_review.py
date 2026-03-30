@@ -51,6 +51,8 @@ Rules:
 - 'uncertain' means progress is slower than expected or small obstacles appeared.
 - 'degraded' means significant issues occurred, but the goal is still viable.
 - 'invalid' means this branch of the plan is no longer viable.
+- If the work appears to require multiple progressive stages such as inspect -> patch -> validate, recommend 'decompose' rather than normalizing those stages as multiple attempts of the same task.
+- A task boundary is unhealthy if it cannot plausibly complete in one variance-bearing invocation.
 """
     try:
         messages = [{"role": "system", "content": prompt}]

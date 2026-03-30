@@ -130,6 +130,18 @@ def test_improve_tooling_marks_broken_tools_as_bug_fix():
     assert repair.constraints["tool_modification_target"] == "search_web"
 
 
+def test_multistage_task_deterministically_decomposes():
+    storage = DummyStorage()
+    task = DummyTask()
+    task.title = "Inspect, patch, and validate parser bug"
+    task.description = "Inspect the failure, patch the parser, then validate with tests."
+
+    resolution = asyncio.run(determine_resolution(task, RuntimeError("generic failure"), PromptCapturingModel(), storage))
+
+    assert resolution.resolution == "decompose"
+    assert "task-boundary" in resolution.reasoning.lower() or "oneshottable" in resolution.reasoning.lower()
+
+
 def test_blocked_weak_task_queues_strong_escalation_review(monkeypatch):
     storage = DummyStorage()
     task = DummyTask(session_id="agent:default")
