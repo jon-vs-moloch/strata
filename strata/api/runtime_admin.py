@@ -19,6 +19,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from strata.core.lanes import normalize_lane
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
+from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 from strata.procedures.registry import get_procedure, list_procedures, queue_procedure, save_procedure
 from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
@@ -223,6 +224,35 @@ def register_runtime_admin_routes(
     @app.get("/admin/context/telemetry")
     async def get_context_telemetry(storage=Depends(get_storage)):
         return {"status": "ok", "context": get_context_load_telemetry(storage)}
+
+    @app.get("/admin/observability/attempts")
+    async def get_attempt_observability(
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        session_id: str | None = None,
+        artifact_kind: str | None = None,
+        limit: int = 25,
+        storage=Depends(get_storage),
+    ):
+        artifacts = list_attempt_observability_artifacts(
+            storage,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            session_id=session_id,
+            artifact_kind=artifact_kind,
+            limit=limit,
+        )
+        return {
+            "status": "ok",
+            "artifacts": artifacts,
+            "filters": {
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "session_id": session_id,
+                "artifact_kind": artifact_kind,
+                "limit": max(1, min(limit, 200)),
+            },
+        }
 
     @app.get("/admin/context/loaded")
     async def get_loaded_context(storage=Depends(get_storage)):

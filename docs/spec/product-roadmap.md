@@ -123,6 +123,23 @@ Near-term implementation standard:
 - session metadata should be maintained as routing substrate, not only UI state
 - the right-rail task pane should stay an at-a-glance surface; a dedicated full `Tasks` view should eventually own deep task inspection, failure forensics, attempt history, and archive navigation
 
+## Cross-Cutting Observability and Self-Evaluation Follow-Up
+
+The recent observability hardening work established the core substrate:
+
+- append-only observability/event tables for hot telemetry paths
+- typed durable sidecar artifacts for autopsies and plan reviews
+- buffered write lanes for isolated observability writes
+- operator-facing inspection endpoints for attempt observability artifacts
+- compact attempt-intelligence summaries injected into recovery and plan-review prompts
+
+Follow-up work remains and should stay on the roadmap:
+
+- expose compact attempt-intelligence summaries to more agent-facing tools beyond recovery prompts
+- add lineage-level rollups/materialized summaries so the UI and agents can read branch pressure cheaply
+- make trainer/self-review jobs consume observability artifacts and attempt intelligence more explicitly
+- continue shaping raw observability into ergonomic summary surfaces that weak models can use without reconstructing state by hand
+
 ### Phase 2. Managed Engine Supervision
 
 Goal: let Strata launch and monitor a local inference engine itself.

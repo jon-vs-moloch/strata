@@ -8,7 +8,7 @@
 """
 
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 from strata.knowledge.pages import KnowledgePageStore
 from strata.feedback.signals import register_feedback_signal
@@ -27,6 +27,140 @@ DEFAULT_REPO_ANCHORS = [
     "strata/knowledge",
     "strata/storage",
 ]
+
+RESEARCH_ITERATION_POLICY_KEY = "research_iteration_policy"
+DEFAULT_RESEARCH_ITERATION_POLICY = {
+    "max_iterations": 6,
+    "warm_history_count": 5,
+    "research_reattempt_limit": 2,
+    "default_reattempt_limit": 3,
+    "recovery_shell_reattempt_limit": 1,
+    "lineage_iteration_limit": 4,
+}
+
+
+def _sanitize_positive_int(raw_value: Any, default: int, *, minimum: int = 1) -> int:
+    try:
+        parsed = int(raw_value)
+        if parsed < minimum:
+            return default
+        return parsed
+    except Exception:
+        return default
+
+
+def load_research_iteration_policy(storage) -> Dict[str, int]:
+    raw = storage.parameters.get_parameter(
+        key=RESEARCH_ITERATION_POLICY_KEY,
+        default_value=DEFAULT_RESEARCH_ITERATION_POLICY,
+        description=(
+            "Mutable policy for research/autopsy iteration handling, including loop budget, "
+            "warm trace retention, and retry caps across recovery lineage."
+        ),
+    )
+    policy = dict(DEFAULT_RESEARCH_ITERATION_POLICY)
+    if isinstance(raw, dict):
+        policy.update(raw)
+    return {
+        "max_iterations": _sanitize_positive_int(
+            policy.get("max_iterations"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["max_iterations"],
+        ),
+        "warm_history_count": _sanitize_positive_int(
+            policy.get("warm_history_count"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["warm_history_count"],
+        ),
+        "research_reattempt_limit": _sanitize_positive_int(
+            policy.get("research_reattempt_limit"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["research_reattempt_limit"],
+        ),
+        "default_reattempt_limit": _sanitize_positive_int(
+            policy.get("default_reattempt_limit"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["default_reattempt_limit"],
+        ),
+        "recovery_shell_reattempt_limit": _sanitize_positive_int(
+            policy.get("recovery_shell_reattempt_limit"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["recovery_shell_reattempt_limit"],
+        ),
+        "lineage_iteration_limit": _sanitize_positive_int(
+            policy.get("lineage_iteration_limit"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["lineage_iteration_limit"],
+        ),
+    }
+
+
+class ResearchIterationLimitError(Exception):
+    """
+    @summary Structured failure for exhausted research loops.
+    """
+
+    def __init__(self, *, public_message: str, autopsy: Dict[str, Any]):
+        super().__init__(public_message)
+        self.public_message = public_message
+        self.failure_kind = "iteration_budget_exhausted"
+        self.autopsy = dict(autopsy or {})
+
+
+def _clip_text(value: Any, limit: int = 500) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _serialize_research_turn(message: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        "role": str(message.get("role") or ""),
+        "content": _clip_text(message.get("content"), 1200) if message.get("content") else "",
+    }
+    tool_calls = []
+    for call in message.get("tool_calls") or []:
+        func = call.get("function") or {}
+        tool_calls.append(
+            {
+                "id": str(call.get("id") or ""),
+                "name": str(func.get("name") or ""),
+                "arguments": _clip_text(func.get("arguments"), 600),
+            }
+        )
+    if tool_calls:
+        payload["tool_calls"] = tool_calls
+    tool_call_id = str(message.get("tool_call_id") or "").strip()
+    if tool_call_id:
+        payload["tool_call_id"] = tool_call_id
+    return payload
+
+
+def _build_iteration_limit_autopsy(
+    *,
+    task_description: str,
+    target_scope: str,
+    task_context: Optional[Dict[str, Any]],
+    policy: Dict[str, int],
+    messages: List[Dict[str, Any]],
+    wip_file: str,
+) -> Dict[str, Any]:
+    warm_count = max(1, int(policy.get("warm_history_count", 5) or 5))
+    warm_history = [_serialize_research_turn(message) for message in messages[-warm_count:]]
+    return {
+        "failure_kind": "iteration_budget_exhausted",
+        "task_description": str(task_description or ""),
+        "target_scope": str(target_scope or "codebase"),
+        "policy": dict(policy or {}),
+        "iteration_count": len(messages),
+        "warm_history_count": len(warm_history),
+        "warm_history": warm_history,
+        "archived_transcript": {
+            "path": wip_file,
+            "message_count": len(messages),
+            "format": "markdown_transcript",
+        },
+        "task_context": dict(task_context or {}),
+        "resume_hint": (
+            "Consult the archived transcript for the cold path, but prefer the warm history "
+            "for quick recovery or verifier review."
+        ),
+    }
 
 
 def _should_return_raw_file(
@@ -128,6 +262,7 @@ class ResearchModule:
         repo_path: Optional[str] = None,
         target_scope: str = "codebase",
         context_hints: Optional[Dict[str, Any]] = None,
+        task_context: Optional[Dict[str, Any]] = None,
     ) -> ResearchReport:
         """
         @summary Autonomous agent loop for research. Decomposes the task, queries the web/codebase iteratively, and synthesizes.
@@ -352,11 +487,8 @@ class ResearchModule:
         ]
 
         # Use the centralized dynamic parameter telemetry module
-        max_iterations = self.storage.parameters.get_parameter(
-            key="max_research_iterations", 
-            default_value=6, 
-            description="The maximum number of recursive LLM queries a single background research agent is allowed to execute before timing out."
-        )
+        policy = load_research_iteration_policy(self.storage)
+        max_iterations = int(policy.get("max_iterations", 6) or 6)
         
         final_report_data = None
         knowledge_pages = KnowledgePageStore(self.storage)
@@ -612,11 +744,25 @@ class ResearchModule:
                     if m.get("content"):
                          f.write(f"**{m['role'].upper()}**: {m['content']}\\n\\n")
             
-            raise Exception(f"Agent iteration limit reached. Partial context saved to durable `.knowledge` library at: {wip_file}")
+            autopsy = _build_iteration_limit_autopsy(
+                task_description=task_description,
+                target_scope=target_scope,
+                task_context=task_context,
+                policy=policy,
+                messages=messages,
+                wip_file=wip_file,
+            )
+            raise ResearchIterationLimitError(
+                public_message=(
+                    "Agent iteration limit reached. Partial context saved to durable "
+                    f"`.knowledge` library at: {wip_file}"
+                ),
+                autopsy=autopsy,
+            )
 
         # Telemetry: If it successfully finalized, log a success for the parameter!
         try:
-            self.storage.parameters.record_success("max_research_iterations")
+            self.storage.parameters.record_success(RESEARCH_ITERATION_POLICY_KEY)
             self.storage.commit()
         except Exception:
             pass

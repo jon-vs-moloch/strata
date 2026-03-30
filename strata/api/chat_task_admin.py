@@ -42,6 +42,7 @@ from strata.sessions.metadata import (
     ensure_session_metadata,
     ensure_generated_session_title,
     get_session_metadata,
+    list_session_metadata,
     mark_session_read,
     resolve_session_title,
     set_session_metadata,
@@ -97,13 +98,23 @@ def register_chat_task_routes(
     )
 
     @app.get("/tasks", response_model=List[Dict[str, Any]])
-    async def list_tasks(lane: Optional[str] = None, storage=Depends(get_storage)):
+    async def list_tasks(
+        lane: Optional[str] = None,
+        attempt_limit: Optional[int] = None,
+        include_evidence: bool = True,
+        storage=Depends(get_storage),
+    ):
         normalized_lane = normalize_lane(lane)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
-        return runtime.list_tasks_payload(storage, lane=normalized_lane)
+        return runtime.list_tasks_payload(
+            storage,
+            lane=normalized_lane,
+            attempt_limit=attempt_limit,
+            include_evidence=include_evidence,
+        )
 
     @app.get("/messages")
     async def get_messages(session_id: Optional[str] = None, limit: int = 200, storage=Depends(get_storage)):
@@ -295,8 +306,9 @@ def register_chat_task_routes(
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         summaries = storage.messages.get_session_summaries(lane=normalized_lane)
+        metadata_by_session = list_session_metadata(storage, [summary["session_id"] for summary in summaries])
         for summary in summaries:
-            metadata = get_session_metadata(storage, summary["session_id"])
+            metadata = metadata_by_session.get(summary["session_id"]) or get_session_metadata(storage, summary["session_id"])
             if not str(metadata.get("opened_by") or "").strip():
                 first_role = str(summary.get("first_message_role") or summary.get("last_message_role") or "").strip().lower()
                 if first_role == "user":

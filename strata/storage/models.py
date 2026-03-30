@@ -7,7 +7,7 @@
 @side_effects none
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, Enum as SQLEnum, JSON, Float
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Table, Enum as SQLEnum, JSON, Float, Index
 from sqlalchemy.orm import relationship, Mapped, mapped_column, DeclarativeBase
 from enum import Enum as PyEnum
 from typing import List, Optional, Dict
@@ -209,6 +209,25 @@ class ParameterModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class ContextLoadEventModel(Base):
+    """
+    @summary Append-only record of artifacts loaded into model context.
+    """
+    __tablename__ = "context_load_events"
+    __table_args__ = (
+        Index("ix_context_load_events_artifact_key", "artifact_type", "identifier"),
+        Index("ix_context_load_events_artifact_loaded", "artifact_type", "identifier", "id"),
+        Index("ix_context_load_events_estimated_tokens", "estimated_tokens"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    artifact_type: Mapped[str] = mapped_column(String, index=True)
+    identifier: Mapped[str] = mapped_column(String, index=True)
+    source: Mapped[str] = mapped_column(String, index=True)
+    estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    event_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    loaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
 class MessageModel(Base):
     """
     @summary Represents a chat message in the Orchestrator Chat log.
@@ -218,6 +237,10 @@ class MessageModel(Base):
     @invariants role must be 'user', 'assistant', or 'system'.
     """
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_session_archived_created", "session_id", "is_archived", "created_at"),
+        Index("ix_messages_session_role_archived_created", "session_id", "role", "is_archived", "created_at"),
+    )
     
     message_id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
     session_id: Mapped[str] = mapped_column(String, default="default", index=True)
@@ -238,6 +261,33 @@ class ModelTelemetry(Base):
     task_type: Mapped[str] = mapped_column(String)
     score: Mapped[float] = mapped_column(Float) # 0-10.0
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class ProviderTelemetrySnapshotModel(Base):
+    """
+    @summary Durable snapshot of in-memory provider transport telemetry.
+    """
+    __tablename__ = "provider_telemetry_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+class AttemptObservabilityArtifactModel(Base):
+    """
+    @summary Queryable sidecar artifacts for attempt autopsies and reviews.
+    """
+    __tablename__ = "attempt_observability_artifacts"
+    __table_args__ = (
+        Index("ix_attempt_observability_task_attempt", "task_id", "attempt_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String, index=True)
+    attempt_id: Mapped[str] = mapped_column(String, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    artifact_kind: Mapped[str] = mapped_column(String, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 class MetricModel(Base):
     """

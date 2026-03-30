@@ -22,6 +22,7 @@ from strata.orchestrator.worker.telemetry import synthesize_model_performance
 from strata.orchestrator.worker.attempt_runner import run_attempt
 from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.orchestrator.worker.routing_policy import select_model_tier
 from strata.eval.job_runner import run_eval_job_task
 from strata.experimental.verifier import emit_verifier_attention_signal, verify_task_output
@@ -717,6 +718,17 @@ class BackgroundWorker:
                     review = await generate_plan_review(task, attempt, self._model, storage)
                     storage.attempts.set_plan_review(attempt.attempt_id, review)
                     storage.commit()
+                    should_flush = enqueue_attempt_observability_artifact(
+                        {
+                            "task_id": task.task_id,
+                            "attempt_id": attempt.attempt_id,
+                            "session_id": task.session_id,
+                            "artifact_kind": "plan_review",
+                            "payload": dict(review or {}),
+                        }
+                    )
+                    if should_flush:
+                        flush_observability_writes()
                 except Exception as review_err:
                     logger.error(f"Failed to generate failure-time plan review for attempt {attempt.attempt_id}: {review_err}")
 
@@ -830,6 +842,17 @@ class BackgroundWorker:
                 if not review or not str(review.get("recommendation") or "").strip():
                     review = await generate_plan_review(task, attempt, self._model, storage)
                     storage.attempts.set_plan_review(attempt.attempt_id, review)
+                    should_flush = enqueue_attempt_observability_artifact(
+                        {
+                            "task_id": task.task_id,
+                            "attempt_id": attempt.attempt_id,
+                            "session_id": task.session_id,
+                            "artifact_kind": "plan_review",
+                            "payload": dict(review or {}),
+                        }
+                    )
+                    if should_flush:
+                        flush_observability_writes()
                 attention_signal = emit_task_execution_attention_signal(
                     storage,
                     task=task,

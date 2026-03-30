@@ -130,6 +130,7 @@ class ToolsPromotionPipeline:
                 json.dump(manifest, f, indent=2)
                 
             record_metric(self.storage, "tool_promotion_success", 1.0, details={"tool_name": tool_name})
+            self.storage.commit()
             return PromotionResult(
                 tool_name=tool_name,
                 promoted=True,
@@ -141,6 +142,7 @@ class ToolsPromotionPipeline:
             )
         except Exception as e:
             record_metric(self.storage, "tool_promotion_success", 0.0, details={"tool_name": tool_name, "error": str(e)})
+            self.storage.commit()
             checks_failed.append(f"Promotion Execution: {e}")
             return PromotionResult(tool_name=tool_name, promoted=False, checks_passed=checks_passed, checks_failed=checks_failed, details=str(e))
 

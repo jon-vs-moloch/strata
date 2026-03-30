@@ -5,8 +5,10 @@
 
 import logging
 import time
+from typing import Any, Dict
 from strata.communication.primitives import build_communication_decision, deliver_communication_decision
 from strata.core.lanes import infer_lane_from_task
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.orchestrator.research import ResearchModule
 from strata.orchestrator.decomposition import DecompositionModule
@@ -86,18 +88,42 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         return True, None, attempt
 
     except Exception as e:
-        artifacts = {}
+        artifacts: Dict[str, Any] = {}
+        evidence: Dict[str, Any] = {}
         if hasattr(model_adapter, 'last_response') and model_adapter.last_response:
             artifacts["model"] = model_adapter.last_response.model
             artifacts["provider"] = model_adapter.last_response.provider
             artifacts["usage"] = model_adapter.last_response.usage or {}
         artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+        failure_kind = str(getattr(e, "failure_kind", "") or "").strip()
+        if failure_kind:
+            evidence["failure_kind"] = failure_kind
+        autopsy = getattr(e, "autopsy", None)
+        if isinstance(autopsy, dict) and autopsy:
+            evidence["autopsy"] = autopsy
         storage.rollback()
         failed_attempt = storage.attempts.get_by_id(attempt.attempt_id)
         if failed_attempt:
             failed_attempt.artifacts = {**dict(failed_attempt.artifacts or {}), **artifacts}
+            failed_attempt.evidence = {**dict(failed_attempt.evidence or {}), **evidence}
             storage.attempts.update_outcome(failed_attempt.attempt_id, AttemptOutcome.FAILED, reason=str(e))
             storage.commit()
+            if evidence:
+                should_flush = enqueue_attempt_observability_artifact(
+                    {
+                        "task_id": task.task_id,
+                        "attempt_id": failed_attempt.attempt_id,
+                        "session_id": task.session_id,
+                        "artifact_kind": "failure_autopsy",
+                        "payload": {
+                            "reason": str(e),
+                            "evidence": dict(evidence),
+                            "artifacts": dict(failed_attempt.artifacts or {}),
+                        },
+                    }
+                )
+                if should_flush:
+                    flush_observability_writes()
             attempt = failed_attempt
         return False, e, attempt
 
@@ -107,6 +133,14 @@ async def _run_research(task, storage, model_adapter, enqueue_fn):
         task_description=task.description,
         repo_path=task.repo_path,
         context_hints=dict(task.constraints or {}),
+        task_context={
+            "task_id": task.task_id,
+            "parent_task_id": task.parent_task_id,
+            "title": task.title,
+            "type": getattr(task.type, "value", str(task.type)),
+            "state": getattr(task.state, "value", str(task.state)),
+            "session_id": task.session_id,
+        },
     )
     # Formatter would go here, simplified for brevity
     _emit_task_communication(

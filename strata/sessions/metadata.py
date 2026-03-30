@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from strata.models.adapter import ModelAdapter
 from strata.schemas.execution import AgentExecutionContext
+from strata.storage.models import ParameterModel
 
 
 SESSION_METADATA_PREFIX = "session_metadata:"
@@ -43,27 +44,7 @@ def _session_metadata_key(session_id: str) -> str:
 
 def get_session_metadata(storage, session_id: str) -> Dict[str, Any]:
     metadata = storage.parameters.peek_parameter(_session_metadata_key(session_id), default_value={}) or {}
-    if isinstance(metadata, dict):
-        merged = dict(metadata)
-    else:
-        merged = {}
-    merged.setdefault("tags", [])
-    merged.setdefault("disclosability", DEFAULT_DISCLOSABILITY)
-    merged.setdefault("opened_by", "")
-    merged.setdefault("opened_reason", "")
-    merged.setdefault("source_kind", "")
-    merged.setdefault("topic_summary", "")
-    merged.setdefault("created_at", "")
-    merged.setdefault("last_audited_at", "")
-    merged.setdefault("last_read_at", "")
-    merged.setdefault("last_read_message_id", "")
-    merged.setdefault("last_communication_source_kind", "")
-    merged.setdefault("last_communication_actor", "")
-    merged.setdefault("last_communication_tags", [])
-    merged["participant_names"] = _normalize_participant_names(merged.get("participant_names"))
-    merged.setdefault("action_required", False)
-    merged.setdefault("action_required_reason", "")
-    return merged
+    return get_session_metadata_from_value(metadata)
 
 
 def set_session_metadata(storage, session_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -130,11 +111,48 @@ def record_session_audit(storage, *, session_id: str, audited_at: Optional[str] 
 
 
 def list_session_metadata(storage, session_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-    return {
-        str(session_id): get_session_metadata(storage, str(session_id))
-        for session_id in session_ids
-        if str(session_id or "").strip()
+    normalized_session_ids = [str(session_id).strip() for session_id in session_ids if str(session_id or "").strip()]
+    if not normalized_session_ids:
+        return {}
+    metadata_keys = [_session_metadata_key(session_id) for session_id in normalized_session_ids]
+    rows = (
+        storage.session.query(ParameterModel)
+        .filter(ParameterModel.key.in_(metadata_keys))
+        .all()
+    )
+    metadata_by_key = {
+        str(row.key): dict(row.value.get("current") or {})
+        for row in rows
+        if isinstance(row.value, dict)
     }
+    return {
+        session_id: get_session_metadata(
+            storage,
+            session_id,
+        ) if _session_metadata_key(session_id) not in metadata_by_key else get_session_metadata_from_value(metadata_by_key[_session_metadata_key(session_id)])
+        for session_id in normalized_session_ids
+    }
+
+
+def get_session_metadata_from_value(metadata: Any) -> Dict[str, Any]:
+    merged = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    merged.setdefault("tags", [])
+    merged.setdefault("disclosability", DEFAULT_DISCLOSABILITY)
+    merged.setdefault("opened_by", "")
+    merged.setdefault("opened_reason", "")
+    merged.setdefault("source_kind", "")
+    merged.setdefault("topic_summary", "")
+    merged.setdefault("created_at", "")
+    merged.setdefault("last_audited_at", "")
+    merged.setdefault("last_read_at", "")
+    merged.setdefault("last_read_message_id", "")
+    merged.setdefault("last_communication_source_kind", "")
+    merged.setdefault("last_communication_actor", "")
+    merged.setdefault("last_communication_tags", [])
+    merged["participant_names"] = _normalize_participant_names(merged.get("participant_names"))
+    merged.setdefault("action_required", False)
+    merged.setdefault("action_required_reason", "")
+    return merged
 
 
 def resolve_session_title(metadata: Dict[str, Any]) -> Optional[str]:

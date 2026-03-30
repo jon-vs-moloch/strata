@@ -3,7 +3,7 @@ import json
 import re
 from strata.schemas.execution import ExecutionContext, TrainerExecutionContext
 from strata.models.registry import registry
-from strata.models.providers import ModelResponse
+from strata.models.providers import ModelResponse, persist_provider_telemetry_snapshot
 
 class ModelAdapter:
     """
@@ -73,6 +73,7 @@ class ModelAdapter:
 
             response: ModelResponse = await provider.complete(messages, **kwargs)
             self.last_response = response
+            persist_provider_telemetry_snapshot()
 
             # Post-call validation: if weak-eval but used cloud provider, mark as invalid
             if self.context.evaluation_run and self.context.mode == "agent" and provider.__class__.__name__ == "CloudProvider":
@@ -87,6 +88,7 @@ class ModelAdapter:
                 "usage": response.usage or {},
             }
         except Exception as e:
+            persist_provider_telemetry_snapshot()
             return {"status": "error", "message": str(e)}
 
     def extract_yaml(self, raw_content: str) -> Dict[str, Any]:

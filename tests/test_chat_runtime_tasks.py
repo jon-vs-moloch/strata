@@ -154,6 +154,28 @@ def test_list_tasks_payload_includes_pending_question_metadata():
     assert tasks[0]["pending_question"]["question"] == queued["question"]
 
 
+def test_list_tasks_payload_can_limit_attempts_and_omit_evidence():
+    storage = make_storage()
+    runtime = make_runtime()
+    task = storage.tasks.create(
+        title="Task with many attempts",
+        description="trim me",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    for index in range(3):
+        attempt = storage.attempts.create(task_id=task.task_id)
+        attempt.reason = f"failure {index}"
+        attempt.evidence = {"failure_kind": f"kind_{index}"}
+    storage.commit()
+
+    tasks = runtime.list_tasks_payload(storage, lane="agent", attempt_limit=2, include_evidence=False)
+
+    assert len(tasks[0]["attempts"]) == 2
+    assert tasks[0]["attempts"][0]["evidence"] == {}
+
+
 def test_task_repository_inherits_lane_from_parent_task():
     storage = make_storage()
 

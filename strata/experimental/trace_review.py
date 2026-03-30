@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from strata.api.message_feedback import list_message_feedback_events
 from strata.feedback.signals import get_feedback_signal, register_feedback_signal
 from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
-from strata.storage.models import MessageModel, TaskModel
+from strata.storage.models import AttemptObservabilityArtifactModel, MessageModel, TaskModel
 
 
 def _clip(text: Any, limit: int = 240) -> str:
@@ -70,6 +70,185 @@ def _message_payload(message: MessageModel) -> Dict[str, Any]:
         "content": _clip(message.content, 360),
         "is_intervention": bool(message.is_intervention),
     }
+
+
+def _attempt_observability_payload(artifact: AttemptObservabilityArtifactModel) -> Dict[str, Any]:
+    payload = dict(artifact.payload or {})
+    summary = ""
+    if artifact.artifact_kind == "failure_autopsy":
+        evidence = dict(payload.get("evidence") or {})
+        failure_kind = str(evidence.get("failure_kind") or payload.get("failure_kind") or "").strip()
+        reason = _clip(payload.get("reason"), 180)
+        summary = " | ".join(part for part in [failure_kind, reason] if part)
+    elif artifact.artifact_kind == "plan_review":
+        plan_health = str(payload.get("plan_health") or "").strip()
+        recommendation = str(payload.get("recommendation") or "").strip()
+        rationale = _clip(payload.get("rationale"), 180)
+        summary = " | ".join(part for part in [plan_health, recommendation, rationale] if part)
+    return {
+        "artifact_id": artifact.id,
+        "task_id": artifact.task_id,
+        "attempt_id": artifact.attempt_id,
+        "session_id": artifact.session_id,
+        "artifact_kind": artifact.artifact_kind,
+        "created_at": _iso(artifact.created_at),
+        "summary": summary,
+        "payload": payload,
+    }
+
+
+def list_attempt_observability_artifacts(
+    storage,
+    *,
+    task_id: Optional[str] = None,
+    attempt_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    artifact_kind: Optional[str] = None,
+    limit: int = 25,
+) -> List[Dict[str, Any]]:
+    if not hasattr(storage, "session"):
+        return []
+    query = storage.session.query(AttemptObservabilityArtifactModel)
+    if task_id:
+        query = query.filter(AttemptObservabilityArtifactModel.task_id == task_id)
+    if attempt_id:
+        query = query.filter(AttemptObservabilityArtifactModel.attempt_id == attempt_id)
+    if session_id:
+        query = query.filter(AttemptObservabilityArtifactModel.session_id == session_id)
+    if artifact_kind:
+        query = query.filter(AttemptObservabilityArtifactModel.artifact_kind == artifact_kind)
+    rows = (
+        query
+        .order_by(AttemptObservabilityArtifactModel.created_at.desc(), AttemptObservabilityArtifactModel.id.desc())
+        .limit(max(1, min(limit, 200)))
+        .all()
+    )
+    return [_attempt_observability_payload(row) for row in rows]
+
+
+def build_attempt_intelligence(
+    storage,
+    *,
+    task: TaskModel,
+    attempt_id: Optional[str] = None,
+    recent_attempt_limit: int = 4,
+    recent_artifact_limit: int = 6,
+) -> Dict[str, Any]:
+    attempts = storage.attempts.get_by_task_id(task.task_id)
+    recent_attempts = []
+    branch_failure_kinds: Dict[str, int] = {}
+    branch_failure_count = 0
+    for attempt in attempts[: max(1, recent_attempt_limit)]:
+        evidence = dict(getattr(attempt, "evidence", {}) or {})
+        autopsy = dict(evidence.get("autopsy") or {}) if isinstance(evidence.get("autopsy"), dict) else {}
+        failure_kind = str(evidence.get("failure_kind") or autopsy.get("failure_kind") or "").strip()
+        if getattr(getattr(attempt, "outcome", None), "value", None) == "failed":
+            branch_failure_count += 1
+            if failure_kind:
+                branch_failure_kinds[failure_kind] = branch_failure_kinds.get(failure_kind, 0) + 1
+        recent_attempts.append(
+            {
+                "attempt_id": attempt.attempt_id,
+                "outcome": getattr(attempt.outcome, "value", None),
+                "resolution": getattr(attempt.resolution, "value", None),
+                "failure_kind": failure_kind,
+                "reason": _clip(attempt.reason, 180),
+            }
+        )
+
+    lineage_iteration_failures = 0
+    visited = set()
+    current = task
+    while current and getattr(current, "task_id", None) and current.task_id not in visited:
+        visited.add(current.task_id)
+        current_attempts = storage.attempts.get_by_task_id(current.task_id)
+        for attempt in current_attempts:
+            evidence = dict(getattr(attempt, "evidence", {}) or {})
+            failure_kind = str(evidence.get("failure_kind") or "").strip()
+            reason = str(getattr(attempt, "reason", "") or "").lower()
+            if failure_kind == "iteration_budget_exhausted" or "iteration limit reached" in reason:
+                lineage_iteration_failures += 1
+        parent_task_id = getattr(current, "parent_task_id", None)
+        current = storage.tasks.get_by_id(parent_task_id) if parent_task_id else None
+
+    artifacts = list_attempt_observability_artifacts(
+        storage,
+        task_id=task.task_id,
+        attempt_id=attempt_id,
+        limit=max(1, recent_artifact_limit),
+    )
+    recent_artifacts = [
+        {
+            "artifact_kind": item.get("artifact_kind"),
+            "summary": str(item.get("summary") or ""),
+            "created_at": item.get("created_at"),
+        }
+        for item in artifacts
+    ]
+
+    top_failure_kinds = [
+        {"failure_kind": kind, "count": count}
+        for kind, count in sorted(branch_failure_kinds.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+    return {
+        "task_id": task.task_id,
+        "attempt_id": attempt_id,
+        "branch_failure_count": branch_failure_count,
+        "lineage_iteration_failures": lineage_iteration_failures,
+        "top_failure_kinds": top_failure_kinds,
+        "recent_attempts": recent_attempts,
+        "recent_artifacts": recent_artifacts,
+    }
+
+
+def render_attempt_intelligence(intelligence: Dict[str, Any]) -> str:
+    if not isinstance(intelligence, dict) or not intelligence:
+        return "No recent attempt intelligence available."
+
+    lines = [
+        "Attempt Intelligence:",
+        f"- Branch failure count: {int(intelligence.get('branch_failure_count', 0) or 0)}",
+        f"- Lineage iteration failures: {int(intelligence.get('lineage_iteration_failures', 0) or 0)}",
+    ]
+    failure_kinds = intelligence.get("top_failure_kinds") or []
+    if failure_kinds:
+        formatted = ", ".join(
+            f"{item.get('failure_kind')} x{int(item.get('count', 0) or 0)}"
+            for item in failure_kinds[:3]
+            if item.get("failure_kind")
+        )
+        if formatted:
+            lines.append(f"- Frequent failure kinds: {formatted}")
+
+    recent_attempts = intelligence.get("recent_attempts") or []
+    if recent_attempts:
+        lines.append("- Recent attempts:")
+        for item in recent_attempts[:4]:
+            lines.append(
+                "  "
+                + " | ".join(
+                    part
+                    for part in [
+                        str(item.get("outcome") or "unknown"),
+                        str(item.get("failure_kind") or "").strip(),
+                        str(item.get("resolution") or "").strip(),
+                        str(item.get("reason") or "").strip(),
+                    ]
+                    if part
+                )
+            )
+
+    recent_artifacts = intelligence.get("recent_artifacts") or []
+    if recent_artifacts:
+        lines.append("- Recent autopsy/review artifacts:")
+        for item in recent_artifacts[:4]:
+            summary = str(item.get("summary") or "").strip()
+            kind = str(item.get("artifact_kind") or "").strip()
+            if summary or kind:
+                lines.append("  " + " | ".join(part for part in [kind, summary] if part))
+
+    return "\n".join(lines)
 
 
 def _repo_root() -> Path:
@@ -265,6 +444,13 @@ def build_task_trace_summary(
         messages = [msg for msg in session_messages if msg.associated_task_id == task_id][-message_limit:]
     repo_fact_checks = _build_repo_fact_checks(task, attempts, messages)
     attempt_note_excerpts = _build_attempt_note_excerpts(attempts)
+    observability_artifacts = (
+        storage.session.query(AttemptObservabilityArtifactModel)
+        .filter(AttemptObservabilityArtifactModel.task_id == task_id)
+        .order_by(AttemptObservabilityArtifactModel.created_at.desc(), AttemptObservabilityArtifactModel.id.desc())
+        .limit(12)
+        .all()
+    )
 
     return {
         "task": _task_payload(task),
@@ -276,6 +462,7 @@ def build_task_trace_summary(
         "associated_reports": list((task.constraints or {}).get("associated_reports") or []),
         "repo_fact_checks": repo_fact_checks,
         "attempt_note_excerpts": attempt_note_excerpts,
+        "observability_artifacts": [_attempt_observability_payload(item) for item in observability_artifacts],
     }
 
 

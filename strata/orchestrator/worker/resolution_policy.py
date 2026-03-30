@@ -8,14 +8,14 @@ import logging
 import asyncio
 from typing import Optional, List
 from strata.core.lanes import infer_lane_from_task
+from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
 from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, AttemptOutcome, TaskState, TaskType
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
+from strata.orchestrator.research import load_research_iteration_policy
 from strata.orchestrator.user_questions import enqueue_user_question
 
 logger = logging.getLogger(__name__)
-MAX_RESEARCH_REATTEMPTS = 2
-MAX_DEFAULT_REATTEMPTS = 3
 
 
 def _tool_repair_shape(improvement_reason: str) -> tuple[str, TaskType]:
@@ -30,6 +30,53 @@ def _tool_repair_shape(improvement_reason: str) -> tuple[str, TaskType]:
         return "Tool Guidance", TaskType.REFACTOR
     return "Tool Repair", TaskType.IMPL
 
+
+def _failure_kind(error: Exception) -> str:
+    return str(getattr(error, "failure_kind", "") or "").strip().lower()
+
+
+def _iteration_autopsy(error: Exception) -> dict:
+    payload = getattr(error, "autopsy", None)
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def _is_recovery_shell_task(task: TaskModel) -> bool:
+    title = str(getattr(task, "title", "") or "").strip().lower()
+    description = str(getattr(task, "description", "") or "").strip().lower()
+    return title == "error recover" or "research manually" in description
+
+
+def _count_iteration_limit_failures_in_lineage(storage, task: TaskModel) -> int:
+    if storage is None or not hasattr(storage, "attempts") or not hasattr(storage, "tasks"):
+        return 0
+    visited = set()
+    current = task
+    total = 0
+    while current and getattr(current, "task_id", None) and current.task_id not in visited:
+        visited.add(current.task_id)
+        for attempt in storage.attempts.get_by_task_id(current.task_id):
+            reason = str(getattr(attempt, "reason", "") or "").lower()
+            evidence = dict(getattr(attempt, "evidence", {}) or {})
+            if (
+                getattr(getattr(attempt, "outcome", None), "value", None) == AttemptOutcome.FAILED.value
+                and (
+                    evidence.get("failure_kind") == "iteration_budget_exhausted"
+                    or "iteration limit reached" in reason
+                )
+            ):
+                total += 1
+        parent_task_id = getattr(current, "parent_task_id", None)
+        current = storage.tasks.get_by_id(parent_task_id) if parent_task_id else None
+    return total
+
+
+def _reattempt_limit_for_task(task: TaskModel, policy: dict) -> int:
+    if task.type == TaskType.RESEARCH:
+        return int(policy.get("research_reattempt_limit", 2) or 2)
+    if _is_recovery_shell_task(task):
+        return int(policy.get("recovery_shell_reattempt_limit", 1) or 1)
+    return int(policy.get("default_reattempt_limit", 3) or 3)
+
 async def determine_resolution(task: TaskModel, error: Exception, model_adapter, storage) -> AttemptResolutionSchema:
     """
     @summary Choose a resolution strategy for a failed task.
@@ -39,6 +86,10 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
     
     # 1. DETERMINISTIC MAPPING (Priority)
     err_str = str(error).lower()
+    policy = load_research_iteration_policy(storage) if storage is not None else {}
+    failure_kind = _failure_kind(error)
+    iteration_autopsy = _iteration_autopsy(error)
+    lineage_iteration_failures = _count_iteration_limit_failures_in_lineage(storage, task)
     
     # A. Parse Errors -> internal_replan
     if any(x in err_str for x in ["syntaxerror", "parse error", "invalid json"]):
@@ -55,15 +106,38 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
         )
 
     # B2. Iteration exhaustion on research-like work -> decompose
-    if "iteration limit reached" in err_str and task.type == TaskType.RESEARCH:
-        return AttemptResolutionSchema(
-            reasoning=(
-                "The task exhausted its autonomous iteration budget during research. "
-                "Treat this as a scope/plan problem and decompose instead of blindly retrying."
-            ),
-            resolution="decompose",
-            new_subtasks=[],
-        )
+    if failure_kind == "iteration_budget_exhausted" or "iteration limit reached" in err_str:
+        if lineage_iteration_failures >= int(policy.get("lineage_iteration_limit", 4) or 4):
+            return AttemptResolutionSchema(
+                reasoning=(
+                    "The branch has repeatedly exhausted its autonomous iteration budget across the current "
+                    "task lineage. Stop recursive recovery and escalate the branch for higher-level replacement "
+                    "or abandonment."
+                ),
+                resolution="abandon_to_parent" if _is_recovery_shell_task(task) or task.type != TaskType.RESEARCH else "blocked",
+                new_subtasks=[],
+            )
+        if task.type == TaskType.RESEARCH:
+            return AttemptResolutionSchema(
+                reasoning=(
+                    "The task exhausted its autonomous iteration budget during research. "
+                    "Treat this as a scope/plan problem and decompose instead of blindly retrying."
+                ),
+                resolution="decompose",
+                new_subtasks=[],
+            )
+        if _is_recovery_shell_task(task):
+            archived_path = str((iteration_autopsy.get("archived_transcript") or {}).get("path") or "").strip()
+            archive_hint = f" Archived transcript: {archived_path}." if archived_path else ""
+            return AttemptResolutionSchema(
+                reasoning=(
+                    "Recovery-shell implementation exhausted its iteration budget. Restructure the approach using "
+                    "the captured autopsy instead of recursively retrying the same manual-research shell."
+                    f"{archive_hint}"
+                ),
+                resolution="internal_replan",
+                new_subtasks=[],
+            )
 
     # B3. Failed decomposition on recovery work should not recurse forever
     if (
@@ -91,12 +165,16 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
 
     # 2. LLM-BASED ANALYSIS (Fallback/Override)
     logger.info("Falling back to LLM for complex failure analysis.")
+    attempt_intelligence = render_attempt_intelligence(
+        build_attempt_intelligence(storage, task=task) if storage is not None else {}
+    )
     prompt = f"""You are a failure analysis agent for Strata.
 A background task has failed. Evaluate the error and determine the structural fix.
 
 TASK: {task.title}
 DESCRIPTION: {task.description}
 ERROR: {str(error)}
+{attempt_intelligence}
 
 RESOLUTIONS:
 - reattempt: Use for transient/random errors.
@@ -154,9 +232,17 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         attempts = storage.attempts.get_by_task_id(task.task_id)
         failed_attempts = [attempt for attempt in attempts if attempt.outcome == AttemptOutcome.FAILED]
         error_text = str(error).lower()
-        max_reattempts = MAX_RESEARCH_REATTEMPTS if task.type == TaskType.RESEARCH else MAX_DEFAULT_REATTEMPTS
+        policy = load_research_iteration_policy(storage)
+        max_reattempts = _reattempt_limit_for_task(task, policy)
         repeated_iteration_limit = "iteration limit reached" in error_text
-        if len(failed_attempts) >= max_reattempts and repeated_iteration_limit:
+        lineage_iteration_failures = _count_iteration_limit_failures_in_lineage(storage, task)
+        if (
+            repeated_iteration_limit
+            and (
+                len(failed_attempts) >= max_reattempts
+                or lineage_iteration_failures >= int(policy.get("lineage_iteration_limit", 4) or 4)
+            )
+        ):
             task.state = TaskState.BLOCKED
             task.human_intervention_required = True
             enqueue_user_question(
@@ -164,12 +250,19 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 session_id=task.session_id or "default",
                 question=(
                     f"Task '{task.title}' hit repeated autonomous iteration limits after "
-                    f"{len(failed_attempts)} failed attempts. What should I change or clarify before retrying?"
+                    f"{len(failed_attempts)} failed attempts on this branch and {lineage_iteration_failures} across its lineage. "
+                    "What should I change or clarify before retrying?"
                 ),
                 source_type="task_blocked",
                 source_id=task.task_id,
                 lane=task_lane,
-                context={"reasoning": str(error), "title": task.title, "lane": task_lane},
+                context={
+                    "reasoning": str(error),
+                    "title": task.title,
+                    "lane": task_lane,
+                    "lineage_iteration_failures": lineage_iteration_failures,
+                    "branch_iteration_failures": len(failed_attempts),
+                },
             )
             storage.commit()
             return

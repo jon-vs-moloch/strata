@@ -13,6 +13,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
+from heapq import nlargest
 from typing import Any, Dict, Iterable, Optional
 
 from fastapi import HTTPException
@@ -20,6 +21,7 @@ from fastapi import HTTPException
 from strata.eval.harness_eval import EVAL_HARNESS_CONFIG_DESCRIPTION, EVAL_HARNESS_CONFIG_KEY
 from strata.experimental.experiment_runner import ExperimentRunner, iter_experiment_reports, report_has_weak_gain
 from strata.experimental.variants import get_variant_rating_snapshot
+from strata.models.providers import get_latest_persisted_provider_telemetry
 from strata.specs.bootstrap import list_spec_proposals
 from strata.storage.models import MetricModel
 from strata.storage.services.main import StorageManager
@@ -1080,7 +1082,9 @@ def build_dashboard_snapshot(
 ) -> Dict[str, Any]:
     telemetry = build_telemetry_snapshot(storage, limit=limit)
     provider_telemetry = get_provider_telemetry_snapshot() or (
-        storage.parameters.peek_parameter("provider_transport_telemetry_snapshot", default_value={}) or {}
+        get_latest_persisted_provider_telemetry(storage) or (
+            storage.parameters.peek_parameter("provider_transport_telemetry_snapshot", default_value={}) or {}
+        )
     )
     context_telemetry = get_context_load_telemetry(storage)
     promoted_state = storage.parameters.peek_parameter(
@@ -1134,15 +1138,15 @@ def build_dashboard_snapshot(
             break
     if ignition is None:
         ignition = {"detected": False}
-    top_context_artifacts = sorted(
-        list((context_telemetry.get("stats", {}).get("artifacts") or {}).values()),
+    top_context_artifacts = nlargest(
+        5,
+        (context_telemetry.get("stats", {}).get("artifacts") or {}).values(),
         key=lambda item: (
             float(item.get("recent_token_share_pct", 0.0) or 0.0),
             float(item.get("token_share_pct", 0.0) or 0.0),
             int(item.get("total_estimated_tokens", 0) or 0),
         ),
-        reverse=True,
-    )[:5]
+    )
     recent_spec_proposals = list_spec_proposals(storage, limit=5)
     eval_metric_rows = (
         storage.session.query(MetricModel)

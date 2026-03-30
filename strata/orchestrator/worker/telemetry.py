@@ -26,7 +26,8 @@ def record_metric(
     details: dict | None = None,
     run_mode: str | None = None, # New
     execution_context: str | None = None, # New
-    candidate_change_id: str | None = None # New
+    candidate_change_id: str | None = None, # New
+    commit: bool = False,
 ):
     """
     @summary Persist a structured architectural fitness signal.
@@ -46,7 +47,8 @@ def record_metric(
             metric.details["task_id"] = task_id
             
         storage.session.add(metric)
-        storage.commit()
+        if commit and hasattr(storage, "commit"):
+            storage.commit()
     except Exception as e:
         logger.error(f"Failed to record metric {metric_name}: {e}")
 

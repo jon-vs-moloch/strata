@@ -5,8 +5,10 @@ from types import SimpleNamespace
 import sys
 
 from strata.orchestrator.worker.resolution_policy import apply_resolution, determine_resolution
+from strata.orchestrator.worker.plan_review import generate_plan_review
+from strata.orchestrator.research import ResearchIterationLimitError
 from strata.schemas.core import AttemptResolutionSchema
-from strata.storage.models import TaskState, TaskType
+from strata.storage.models import AttemptOutcome, TaskState, TaskType
 
 
 class DummyTask:
@@ -27,25 +29,36 @@ class DummyTaskRepo:
     def __init__(self):
         self.created = []
         self.dependencies = []
+        self.by_id = {}
 
     def create(self, **kwargs):
         task = SimpleNamespace(task_id="repair-1", **kwargs)
         self.created.append(task)
+        self.by_id[task.task_id] = task
         return task
 
     def add_dependency(self, task_id, depends_on_id):
         self.dependencies.append((task_id, depends_on_id))
 
+    def get_by_id(self, task_id):
+        return self.by_id.get(task_id)
+
 
 class DummyAttemptsRepo:
+    def __init__(self, by_task_id=None):
+        self.by_task_id = by_task_id or {}
+
     def get_by_task_id(self, task_id):
-        return []
+        return list(self.by_task_id.get(task_id) or [])
 
 
 class DummyStorage:
-    def __init__(self):
+    def __init__(self, attempts_by_task=None, policy=None):
         self.tasks = DummyTaskRepo()
-        self.attempts = DummyAttemptsRepo()
+        self.attempts = DummyAttemptsRepo(attempts_by_task)
+        self.parameters = SimpleNamespace(
+            get_parameter=lambda key, default_value, description="": policy or default_value
+        )
         self.commits = 0
 
     def commit(self):
@@ -53,6 +66,28 @@ class DummyStorage:
 
     def apply_dependency_cascade(self):
         return None
+
+
+class PromptCapturingModel:
+    def __init__(self, content='{"reasoning":"ok","resolution":"reattempt","new_subtasks":[]}'):
+        self.prompts = []
+        self._content = content
+
+    async def chat(self, messages=None, **_kwargs):
+        self.prompts.append(messages or [])
+        return {"content": self._content}
+
+    def extract_structured_object(self, raw_content):
+        import json
+        return json.loads(raw_content)
+
+    def extract_yaml(self, _raw_content):
+        return {
+            "plan_health": "degraded",
+            "recommendation": "internal_replan",
+            "confidence": 0.9,
+            "rationale": "Observed looping branch.",
+        }
 
 
 async def _run_apply_resolution(task_priority=17.0, reason="tool_broken"):
@@ -165,6 +200,79 @@ def test_failed_decomposition_prefers_abandon_to_parent():
     assert resolution.resolution == "abandon_to_parent"
 
 
+def test_recovery_shell_iteration_limit_prefers_internal_replan():
+    task = DummyTask(task_id="recover-1")
+    task.title = "Error Recover"
+    task.description = "Initial decomposition failed. Research manually."
+    storage = DummyStorage(policy={"lineage_iteration_limit": 4})
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            ResearchIterationLimitError(
+                public_message="Agent iteration limit reached. Partial context saved.",
+                autopsy={"archived_transcript": {"path": "./.knowledge/wip_research_demo.md"}},
+            ),
+            model_adapter=None,
+            storage=storage,
+        )
+    )
+
+    assert resolution.resolution == "internal_replan"
+    assert "captured autopsy" in resolution.reasoning
+
+
+def test_recovery_shell_iteration_limit_abandons_after_lineage_cap():
+    task = DummyTask(task_id="recover-2")
+    task.title = "Error Recover"
+    task.description = "Initial decomposition failed. Research manually."
+    task.parent_task_id = "parent-1"
+    storage = DummyStorage(
+        attempts_by_task={
+            "recover-2": [
+                SimpleNamespace(
+                    outcome=AttemptOutcome.FAILED,
+                    reason="Agent iteration limit reached.",
+                    evidence={"failure_kind": "iteration_budget_exhausted"},
+                )
+            ],
+            "parent-1": [
+                SimpleNamespace(
+                    outcome=AttemptOutcome.FAILED,
+                    reason="Agent iteration limit reached.",
+                    evidence={"failure_kind": "iteration_budget_exhausted"},
+                ),
+                SimpleNamespace(
+                    outcome=AttemptOutcome.FAILED,
+                    reason="Agent iteration limit reached.",
+                    evidence={"failure_kind": "iteration_budget_exhausted"},
+                ),
+                SimpleNamespace(
+                    outcome=AttemptOutcome.FAILED,
+                    reason="Agent iteration limit reached.",
+                    evidence={"failure_kind": "iteration_budget_exhausted"},
+                ),
+            ]
+        },
+        policy={"lineage_iteration_limit": 4},
+    )
+    storage.tasks.by_id["parent-1"] = SimpleNamespace(task_id="parent-1", parent_task_id=None)
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            ResearchIterationLimitError(
+                public_message="Agent iteration limit reached. Partial context saved.",
+                autopsy={},
+            ),
+            model_adapter=None,
+            storage=storage,
+        )
+    )
+
+    assert resolution.resolution == "abandon_to_parent"
+
+
 def test_abandon_to_parent_agent_task_queues_trainer_intervention():
     storage = DummyStorage()
     task = DummyTask(session_id="agent:default")
@@ -200,3 +308,76 @@ def test_abandon_to_parent_agent_task_queues_trainer_intervention():
     payload = queued_review_payloads[0]
     assert payload["kind"] == "trace_review"
     assert payload["payload"]["supervision_reason"] == "abandon_to_parent_recovery_loop"
+
+
+def test_determine_resolution_prompt_includes_attempt_intelligence():
+    task = DummyTask(task_id="recover-3")
+    task.parent_task_id = "parent-2"
+    storage = DummyStorage(
+        attempts_by_task={
+            "recover-3": [
+                SimpleNamespace(
+                    attempt_id="attempt-1",
+                    outcome=AttemptOutcome.FAILED,
+                    resolution=None,
+                    reason="Agent iteration limit reached.",
+                    evidence={"failure_kind": "iteration_budget_exhausted"},
+                )
+            ],
+            "parent-2": [
+                SimpleNamespace(
+                    attempt_id="attempt-parent",
+                    outcome=AttemptOutcome.FAILED,
+                    resolution=None,
+                    reason="Agent iteration limit reached.",
+                    evidence={"failure_kind": "iteration_budget_exhausted"},
+                ),
+            ],
+        },
+    )
+    storage.tasks.by_id["parent-2"] = SimpleNamespace(task_id="parent-2", parent_task_id=None)
+    model = PromptCapturingModel()
+
+    resolution = asyncio.run(
+        determine_resolution(
+            task,
+            RuntimeError("ambiguous failure"),
+            model_adapter=model,
+            storage=storage,
+        )
+    )
+
+    prompt = model.prompts[0][0]["content"]
+    assert resolution.resolution == "reattempt"
+    assert "Attempt Intelligence:" in prompt
+    assert "Lineage iteration failures: 2" in prompt
+
+
+def test_generate_plan_review_prompt_includes_attempt_intelligence():
+    task = DummyTask(task_id="review-1")
+    storage = DummyStorage(
+        attempts_by_task={
+            "review-1": [
+                SimpleNamespace(
+                    attempt_id="attempt-1",
+                    outcome=AttemptOutcome.FAILED,
+                    resolution=None,
+                    reason="Repeated timeout while retrying.",
+                    evidence={"failure_kind": "network_timeout"},
+                )
+            ]
+        }
+    )
+    attempt = SimpleNamespace(
+        attempt_id="attempt-1",
+        outcome=AttemptOutcome.FAILED,
+        reason="Repeated timeout while retrying.",
+    )
+    model = PromptCapturingModel(content="plan_health: degraded\nrecommendation: internal_replan\nconfidence: 0.9\nrationale: Observed looping branch.")
+
+    review = asyncio.run(generate_plan_review(task, attempt, model, storage))
+
+    prompt = model.prompts[0][0]["content"]
+    assert review["recommendation"] == "internal_replan"
+    assert "Attempt Intelligence:" in prompt
+    assert "network_timeout" in prompt

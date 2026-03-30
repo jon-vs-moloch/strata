@@ -6,7 +6,7 @@
   invariants: always returns a list (empty if no matches).
   symbol: SemanticMemory
   kind: class
-  path: shotgun_tokens/memory/semantic.py
+  path: strata/memory/semantic.py
 - summary: Universal bridge between the orchestrator and local inference engines.
   inputs: 'endpoint: local model URL'
   outputs: side-effect driven (network calls) or completion strings
@@ -15,33 +15,33 @@
   invariants: does not expose API keys if built locally (defaults to local-no-auth)
   symbol: ModelAdapter
   kind: class
-  path: shotgun_tokens/models/adapter.py
+  path: strata/models/adapter.py
 - summary: Structured output of a research phase, summarizing findings.
   inputs: none (Pydantic model)
   outputs: none (Pydantic model)
   invariants: Findings must be actionable for the next agent stage.
   symbol: ResearchReport
   kind: class
-  path: shotgun_tokens/schemas/core.py
+  path: strata/schemas/core.py
 - summary: Structured framing of a coding task context.
   inputs: none (Pydantic model)
   outputs: none (Pydantic model)
   invariants: ensures the agent understands the repository and goals.
   symbol: TaskFraming
   kind: class
-  path: shotgun_tokens/schemas/core.py
+  path: strata/schemas/core.py
 - summary: Blueprint for a single atom of work (leaf task).
   inputs: none (Pydantic model)
   outputs: none (Pydantic model)
   symbol: LeafTaskPrototype
   kind: class
-  path: shotgun_tokens/schemas/core.py
+  path: strata/schemas/core.py
 - summary: Complete decomposition of a root task into parallelizable steps.
   inputs: none (Pydantic model)
   outputs: none (Pydantic model)
   symbol: TaskDecomposition
   kind: class
-  path: shotgun_tokens/schemas/core.py
+  path: strata/schemas/core.py
 - summary: Represents a root or leaf coding task in the dependency graph.
   inputs: none (ORM entity)
   outputs: none (ORM entity)
@@ -49,7 +49,7 @@
   invariants: Every task has a unique task_id and valid TaskStatus.
   symbol: TaskModel
   kind: class
-  path: shotgun_tokens/storage/models.py
+  path: strata/storage/models.py
 - summary: Represents a single generated code candidate for a task.
   inputs: none (ORM entity)
   outputs: none (ORM entity)
@@ -57,7 +57,7 @@
   invariants: Always maps to exactly one TaskModel via task_id.
   symbol: CandidateModel
   kind: class
-  path: shotgun_tokens/storage/models.py
+  path: strata/storage/models.py
 - summary: Represents a test/eval execution result for a single candidate.
   inputs: none (ORM entity)
   outputs: none (ORM entity)
@@ -65,7 +65,7 @@
   invariants: Always maps to exactly one CandidateModel.
   symbol: EvaluationModel
   kind: class
-  path: shotgun_tokens/storage/models.py
+  path: strata/storage/models.py
 - summary: Represents a versioned system prompt used for agent stages.
   inputs: none (ORM entity)
   outputs: none (ORM entity)
@@ -73,7 +73,7 @@
   invariants: Tracking usage_count helps meta-evaluation.
   symbol: PromptModel
   kind: class
-  path: shotgun_tokens/storage/models.py
+  path: strata/storage/models.py
 - summary: Represents a chat message in the Orchestrator Chat log.
   inputs: none (ORM entity)
   outputs: none (ORM entity)
@@ -81,7 +81,7 @@
   invariants: role must be 'user', 'assistant', or 'system'.
   symbol: MessageModel
   kind: class
-  path: shotgun_tokens/storage/models.py
+  path: strata/storage/models.py
 - summary: Manages structured task storage and retrieval using SQLAlchemy.
   inputs: 'session: SQLAlchemy Session'
   outputs: side-effect driven (DB mutations) or TaskModel objects
@@ -90,7 +90,7 @@
   invariants: does not commit the session (left to orchestrator)
   symbol: TaskRepository
   kind: class
-  path: shotgun_tokens/storage/repositories/tasks.py
+  path: strata/storage/repositories/tasks.py
 - summary: Manages the chat history and user intervention messages in SQL.
   inputs: 'session: SQLAlchemy Session'
   outputs: side-effect driven (DB mutations) or MessageModel objects
@@ -99,7 +99,7 @@
   invariants: does not commit the session.
   symbol: MessageRepository
   kind: class
-  path: shotgun_tokens/storage/repositories/messages.py
+  path: strata/storage/repositories/messages.py
 - summary: Central entrypoint for database access.
   inputs: 'db_url: SQLite path or other SQLAlchemy URL'
   outputs: side-effect driven (DB initialization)
@@ -108,57 +108,57 @@
   invariants: does not expose raw sessions to the orchestrator layer directly.
   symbol: StorageManager
   kind: class
-  path: shotgun_tokens/storage/services/main.py
+  path: strata/storage/services/main.py
 - summary: Dependency provider for the shared StorageManager.
   inputs: none
   outputs: StorageManager instance
   symbol: get_storage
   kind: function
-  path: shotgun_tokens/api/main.py
+  path: strata/api/main.py
 - summary: Retrieve all active work contexts from the swarm.
   inputs: 'storage: injected StorageManager'
   outputs: List of task objects in JSON format
   symbol: list_tasks
   kind: function
-  path: shotgun_tokens/api/main.py
+  path: strata/api/main.py
 - summary: Retrieve the chat history for the orchestrator.
   symbol: get_messages
   kind: function
-  path: shotgun_tokens/api/main.py
+  path: strata/api/main.py
 - summary: Process a user chat message.
   inputs: 'payload: { role: ''user'', content: ''...'' }'
   outputs: assistant response acknowledgement
   side_effects: triggers orchestrator if task-related
   symbol: post_chat
   kind: function
-  path: shotgun_tokens/api/main.py
+  path: strata/api/main.py
 - summary: Manually enqueue a new task into the swarm.
   inputs: 'task_data: JSON payload with title/description'
   outputs: The created task record
   side_effects: writes a new row to the database
   symbol: create_task
   kind: function
-  path: shotgun_tokens/api/main.py
+  path: strata/api/main.py
 - summary: Instruct the swarm to initialize and frame a new coding objective.
   symbol: CreateTaskAction
   kind: class
-  path: shotgun_tokens/orchestrator/command.py
+  path: strata/orchestrator/command.py
 - summary: Manually change a task's progress state (e.g. to archive or block).
   symbol: UpdateStatusAction
   kind: class
-  path: shotgun_tokens/orchestrator/command.py
+  path: strata/orchestrator/command.py
 - summary: Steer the swarm by shifting relative task importance.
   symbol: PrioritizeAction
   kind: class
-  path: shotgun_tokens/orchestrator/command.py
+  path: strata/orchestrator/command.py
 - summary: Mark a task as inactive and hide from the primary swarm dashboard.
   symbol: ArchiveAction
   kind: class
-  path: shotgun_tokens/orchestrator/command.py
+  path: strata/orchestrator/command.py
 - summary: Unified wrapper for a tool-call emitted by the Chat Agent.
   symbol: SwarmCommand
   kind: class
-  path: shotgun_tokens/orchestrator/command.py
+  path: strata/orchestrator/command.py
 - summary: Executes the research phase for a given task, querying repo metadata.
   inputs: 'model: ModelAdapter, storage: StorageManager'
   outputs: ResearchReport containing synthesized context
@@ -167,15 +167,15 @@
   invariants: always returns a ResearchReport regardless of findings
   symbol: ResearchModule
   kind: class
-  path: shotgun_tokens/orchestrator/research.py
-- summary: Coordinates the full Shotgun Tokens task execution flow.
+  path: strata/orchestrator/research.py
+- summary: Coordinates the full Strata task execution flow.
   inputs: storage_manager, model_adapter, sandbox_provider
   outputs: side-effect driven (updates DB tasks, creates candidates)
   side_effects: creates worktrees, writes to DB, triggers LLM calls
   depends: storage.manager, models.adapter, sandbox.local
   symbol: SkeletonOrchestrator
   kind: class
-  path: shotgun_tokens/orchestrator/skeleton.py
+  path: strata/orchestrator/skeleton.py
 - summary: Manages the leaf-level execution of a code transformation task.
   inputs: 'model: ModelAdapter, storage: StorageManager, researcher: ResearchModule'
   outputs: List of candidate IDs
@@ -184,7 +184,7 @@
   invariants: does not mutate the main branch (uses candidates/worktrees)
   symbol: ImplementationModule
   kind: class
-  path: shotgun_tokens/orchestrator/implementation.py
+  path: strata/orchestrator/implementation.py
 - summary: Ranks candidate implementations for a specific task using a Borda-weighted
     voting system.
   inputs: 'model: ModelAdapter, storage: StorageManager'
@@ -194,7 +194,7 @@
   invariants: candidates with same score occupy adjacent ranks
   symbol: JudgeModule
   kind: class
-  path: shotgun_tokens/orchestrator/judge.py
+  path: strata/orchestrator/judge.py
 - summary: Analyzes a task and uses LLM to generate a structured decomposition.
   inputs: 'model: ModelAdapter, storage: StorageManager'
   outputs: TaskDecomposition object
@@ -203,7 +203,7 @@
   invariants: total_estimated_budget in decomposition is > 0
   symbol: DecompositionModule
   kind: class
-  path: shotgun_tokens/orchestrator/decomposition.py
+  path: strata/orchestrator/decomposition.py
 - summary: Provides top-down task selection logic for the swarm.
   inputs: 'storage: StorageManager'
   outputs: The next 'ready-to-work' TaskModel
@@ -212,7 +212,7 @@
   invariants: always prefers higher priority over lower, then older over newer.
   symbol: SchedulerModule
   kind: class
-  path: shotgun_tokens/orchestrator/scheduler.py
+  path: strata/orchestrator/scheduler.py
 - summary: Provides high-performance local and remote search for the swarm.
   inputs: none (initializes self)
   outputs: 'results: list of contextual snippets'
@@ -221,7 +221,7 @@
   invariants: does not perform write operations on the filesystem.
   symbol: BrowsingModule
   kind: class
-  path: shotgun_tokens/orchestrator/browsing.py
+  path: strata/orchestrator/browsing.py
 - summary: Consolidates multiple child task artifacts into a single coherent patch.
   inputs: 'model: ModelAdapter, storage: StorageManager'
   outputs: Resulting synthesis patch or file
@@ -230,4 +230,4 @@
   invariants: does not produce a patch that breaks existing tests
   symbol: SynthesisModule
   kind: class
-  path: shotgun_tokens/orchestrator/synthesis.py
+  path: strata/orchestrator/synthesis.py

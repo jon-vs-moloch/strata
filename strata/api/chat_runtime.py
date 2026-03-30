@@ -67,13 +67,21 @@ class ChatRuntime:
             }
         return payload
 
-    def list_tasks_payload(self, storage, *, lane: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_tasks_payload(
+        self,
+        storage,
+        *,
+        lane: Optional[str] = None,
+        attempt_limit: Optional[int] = None,
+        include_evidence: bool = True,
+    ) -> List[Dict[str, Any]]:
         from sqlalchemy.orm import selectinload
 
         task_model_cls = self.deps["task_model_cls"]
         get_question_for_source = self.deps["get_question_for_source"]
         tasks = storage.session.query(task_model_cls).options(selectinload(task_model_cls.attempts)).all()
         normalized_lane = str(lane or "").strip().lower() or None
+        safe_attempt_limit = None if attempt_limit is None else max(1, int(attempt_limit))
         payload = []
         for task in tasks:
             task_lane = (task.constraints or {}).get("lane") or infer_lane_from_session_id(getattr(task, "session_id", None))
@@ -92,6 +100,8 @@ class ChatRuntime:
                 ),
                 reverse=True,
             )
+            if safe_attempt_limit is not None:
+                sorted_attempts = sorted_attempts[:safe_attempt_limit]
             payload.append(
                 {
                     "id": task.task_id,
@@ -131,7 +141,7 @@ class ChatRuntime:
                             "ended_at": attempt.ended_at.isoformat() if attempt.ended_at else None,
                             "reason": attempt.reason,
                             "artifacts": self._slim_attempt_artifacts(attempt.artifacts),
-                            "evidence": dict(attempt.evidence or {}),
+                            "evidence": dict(attempt.evidence or {}) if include_evidence else {},
                             "plan_review": dict(attempt.plan_review or {}),
                         }
                         for attempt in sorted_attempts

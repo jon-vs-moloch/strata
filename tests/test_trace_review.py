@@ -1,15 +1,20 @@
 import asyncio
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.api import main as api_main
 from strata.api import message_feedback
+from strata.api.runtime_admin import register_runtime_admin_routes
 from strata.eval.job_runner import run_eval_job_task
 from strata.experimental.audit_registry import get_audit_artifact, get_timeline_artifact
 from strata.experimental.artifact_pipeline import append_trace_review_to_session
 from strata.feedback.signals import list_feedback_signals, register_feedback_signal
-from strata.experimental.trace_review import build_task_trace_summary, review_trace
+from strata.experimental.trace_review import build_task_trace_summary, list_attempt_observability_artifacts, review_trace
+from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.storage.models import Base, AttemptOutcome, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 
@@ -84,6 +89,186 @@ def test_build_task_trace_summary_includes_attempts_children_and_messages():
     assert summary["messages"][0]["associated_task_id"] == task.task_id
     assert summary["associated_reports"][0]["candidate_change_id"] == "candidate_a"
     assert summary["repo_fact_checks"] == []
+
+
+def test_list_attempt_observability_artifacts_returns_scan_friendly_summary():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Inspect repo",
+        description="Find the current system bottleneck.",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+    )
+    attempt = storage.attempts.create(task_id=task.task_id)
+    storage.commit()
+    enqueue_attempt_observability_artifact(
+        {
+            "task_id": task.task_id,
+            "attempt_id": attempt.attempt_id,
+            "session_id": task.session_id,
+            "artifact_kind": "failure_autopsy",
+            "payload": {
+                "reason": "Agent iteration limit reached after repeated manual recovery.",
+                "evidence": {"failure_kind": "iteration_budget_exhausted"},
+            },
+        }
+    )
+    flush_observability_writes(lambda: storage)
+
+    artifacts = list_attempt_observability_artifacts(storage, task_id=task.task_id)
+
+    assert artifacts[0]["artifact_kind"] == "failure_autopsy"
+    assert "iteration_budget_exhausted" in artifacts[0]["summary"]
+
+
+def test_runtime_admin_exposes_attempt_observability_endpoint(tmp_path):
+    db_path = tmp_path / "runtime-admin-observability.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    storage = StorageManager(session=session_factory())
+    task = storage.tasks.create(
+        title="Inspect repo",
+        description="Find the current system bottleneck.",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+    )
+    attempt = storage.attempts.create(task_id=task.task_id)
+    storage.commit()
+    enqueue_attempt_observability_artifact(
+        {
+            "task_id": task.task_id,
+            "attempt_id": attempt.attempt_id,
+            "session_id": task.session_id,
+            "artifact_kind": "plan_review",
+            "payload": {
+                "plan_health": "degraded",
+                "recommendation": "internal_replan",
+                "rationale": "The branch is looping without new evidence.",
+            },
+        }
+    )
+    flush_observability_writes(lambda: storage)
+
+    app = FastAPI()
+
+    class DummyWorker:
+        _running_task = None
+        status = {}
+
+        def pause(self, *_args, **_kwargs):
+            return None
+
+        def resume(self, *_args, **_kwargs):
+            return None
+
+        def stop_current(self, *_args, **_kwargs):
+            return False
+
+        async def enqueue_runnable_tasks(self, *_args, **_kwargs):
+            return 0
+
+        async def wait_until_idle(self, timeout=10.0):
+            return True
+
+        def clear_queue(self):
+            return 0
+
+    class DummyBroadcaster:
+        async def subscribe(self):
+            return None
+
+        async def unsubscribe(self, queue):
+            return None
+
+    class DummyHotReloader:
+        def list_experimental(self):
+            return []
+
+        async def promote(self, module):
+            return type("Result", (), {"success": True, "module": module, "rolled_back": False, "message": "ok", "validation": None})()
+
+        def rollback(self, module):
+            return type("Result", (), {"success": True, "module": module, "message": "ok"})()
+
+    register_runtime_admin_routes(
+        app,
+        get_storage=lambda: StorageManager(session=session_factory()),
+        model_adapter=FakeModelAdapter(),
+        global_settings={},
+        normalized_settings=lambda payload=None: payload or {},
+        settings_parameter_key="settings",
+        settings_parameter_description="settings",
+        worker=DummyWorker(),
+        event_broadcaster=DummyBroadcaster(),
+        hotreloader=DummyHotReloader(),
+        base_dir=".",
+    )
+
+    client = TestClient(app)
+    response = client.get(f"/admin/observability/attempts?task_id={task.task_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["artifacts"][0]["artifact_kind"] == "plan_review"
+    assert payload["artifacts"][0]["payload"]["recommendation"] == "internal_replan"
+    storage.close()
+
+
+def test_attempt_intelligence_summarizes_branch_and_artifacts():
+    storage = make_storage()
+    parent = storage.tasks.create(
+        title="Parent task",
+        description="Parent branch.",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+    )
+    child = storage.tasks.create(
+        title="Child task",
+        description="Child branch.",
+        session_id="trace-session",
+        state=TaskState.WORKING,
+        type=TaskType.RESEARCH,
+        parent_task_id=parent.task_id,
+    )
+    parent_attempt = storage.attempts.create(task_id=parent.task_id)
+    parent_attempt.outcome = AttemptOutcome.FAILED
+    parent_attempt.reason = "Agent iteration limit reached."
+    parent_attempt.evidence = {"failure_kind": "iteration_budget_exhausted"}
+    child_attempt = storage.attempts.create(task_id=child.task_id)
+    child_attempt.outcome = AttemptOutcome.FAILED
+    child_attempt.reason = "Agent iteration limit reached."
+    child_attempt.evidence = {
+        "failure_kind": "iteration_budget_exhausted",
+        "autopsy": {"failure_kind": "iteration_budget_exhausted"},
+    }
+    storage.commit()
+    enqueue_attempt_observability_artifact(
+        {
+            "task_id": child.task_id,
+            "attempt_id": child_attempt.attempt_id,
+            "session_id": child.session_id,
+            "artifact_kind": "plan_review",
+            "payload": {
+                "plan_health": "degraded",
+                "recommendation": "internal_replan",
+                "rationale": "The branch is looping.",
+            },
+        }
+    )
+    flush_observability_writes(lambda: storage)
+
+    intelligence = build_attempt_intelligence(storage, task=child, attempt_id=child_attempt.attempt_id)
+    rendered = render_attempt_intelligence(intelligence)
+
+    assert intelligence["branch_failure_count"] == 1
+    assert intelligence["lineage_iteration_failures"] == 2
+    assert intelligence["top_failure_kinds"][0]["failure_kind"] == "iteration_budget_exhausted"
+    assert "Attempt Intelligence:" in rendered
+    assert "Lineage iteration failures: 2" in rendered
 
 
 def test_build_task_trace_summary_fact_checks_canonical_spec_paths():

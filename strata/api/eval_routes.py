@@ -23,6 +23,7 @@ from strata.eval.matrix import run_eval_matrix
 from strata.experimental.promotion_policy import get_promotion_policy
 from strata.experimental.variants import ensure_variant
 from strata.orchestrator.worker.telemetry import record_metric
+from strata.models.providers import get_latest_persisted_provider_telemetry
 
 
 def register_eval_routes(
@@ -98,11 +99,12 @@ def register_eval_routes(
         if providers:
             return {"status": "ok", "providers": providers, "source": "live"}
 
-        persisted = storage.parameters.get_parameter(
-            key="provider_transport_telemetry_snapshot",
-            default_value={},
-            description="Last persisted provider transport telemetry snapshot.",
-        ) or {}
+        persisted = get_latest_persisted_provider_telemetry(storage) or (
+            storage.parameters.peek_parameter(
+                "provider_transport_telemetry_snapshot",
+                default_value={},
+            ) or {}
+        )
         return {"status": "ok", "providers": persisted, "source": "persisted"}
 
     @app.get("/admin/evals/suites")
@@ -148,6 +150,7 @@ def register_eval_routes(
                 variant_assignment=variant_assignment,
             )
             reports.append(report)
+        storage.commit()
         return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
 
     @app.post("/admin/evals/run")
@@ -196,6 +199,7 @@ def register_eval_routes(
                 variant_assignment=variant_assignment,
             )
             reports.append(report)
+        storage.commit()
         return {"status": "ok", "reports": reports, "candidate_change_id": candidate_change_id, "run_count": run_count}
 
     @app.post("/admin/evals/matrix")

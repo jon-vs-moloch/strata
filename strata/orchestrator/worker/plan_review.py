@@ -4,6 +4,7 @@
 """
 
 import logging
+from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
 from strata.storage.models import TaskModel, AttemptModel
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,13 @@ async def generate_plan_review(task: TaskModel, attempt: AttemptModel, model_ada
     # Gather context
     outcome_str = attempt.outcome.value if attempt.outcome else "unknown"
     reason_str = attempt.reason or "No specific reason provided."
+    attempt_intelligence = render_attempt_intelligence(
+        build_attempt_intelligence(
+            storage,
+            task=task,
+            attempt_id=getattr(attempt, "attempt_id", None),
+        )
+    )
     
     prompt = f"""You are a senior technical project manager reviewing an agent's progress.
 An 'Attempt' has just finished for the following task:
@@ -26,6 +34,7 @@ Description: {task.description}
 
 Attempt Outcome: {outcome_str}
 Attempt Reason/Error: {reason_str}
+{attempt_intelligence}
 
 Evaluate if the current plan (pursuing this task and its subtasks) still makes sense or if it needs structural adjustment.
 

@@ -10,7 +10,12 @@ from typing import Any, Dict, Optional, List, Literal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
+from threading import Lock
+import time
 from pydantic import BaseModel, Field
+
+from strata.observability.writer import enqueue_provider_observability_snapshot, flush_observability_writes
+from strata.storage.models import ProviderTelemetrySnapshotModel
 
 class ModelResponse(BaseModel):
     """
@@ -77,6 +82,11 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
     """
     _throttle_states: Dict[str, ThrottleState] = {}
     _telemetry_states: Dict[str, ProviderTelemetryState] = {}
+    _telemetry_persist_lock = Lock()
+    _telemetry_dirty: bool = False
+    _telemetry_revision: int = 0
+    _last_persisted_revision: int = 0
+    _last_persisted_at: float = 0.0
 
     def _throttle_key(self) -> str:
         return ":".join([
@@ -103,6 +113,13 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         if key not in self._telemetry_states:
             self._telemetry_states[key] = ProviderTelemetryState()
         return self._telemetry_states[key]
+
+    @classmethod
+    def _mark_telemetry_dirty(cls):
+        base = GenericOpenAICompatibleProvider
+        with base._telemetry_persist_lock:
+            base._telemetry_dirty = True
+            base._telemetry_revision += 1
 
     def _is_local_transport(self) -> bool:
         return self.__class__.__name__ == "LocalProvider"
@@ -254,10 +271,12 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         await self._apply_retry_after(state, retry_after_s or backoff_time)
 
                     if retry < max_retries - 1 and status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+                        self._mark_telemetry_dirty()
                         telemetry.retried_count += 1
                         await asyncio.sleep(float(max(retry_after_s, backoff_time)))
                         backoff_time *= 2.0
                         continue
+                    self._mark_telemetry_dirty()
                     return ModelResponse(
                         status="error",
                         content=f"HTTP {status_code}: {e.response.text}",
@@ -271,10 +290,12 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                     telemetry.last_status_code = None
                     telemetry.total_latency_s += asyncio.get_running_loop().time() - started_at
                     if retry < max_retries - 1:
+                        self._mark_telemetry_dirty()
                         telemetry.retried_count += 1
                         await asyncio.sleep(float(backoff_time))
                         backoff_time *= 2.0
                         continue
+                    self._mark_telemetry_dirty()
                     return ModelResponse(
                         status="error",
                         content=str(e),
@@ -282,7 +303,10 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         provider=self.provider_id,
                         usage={},
                     )
+                finally:
+                    self._mark_telemetry_dirty()
         
+        self._mark_telemetry_dirty()
         return ModelResponse(
             status="error", 
             content="Max retries reached", 
@@ -335,3 +359,86 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
             "last_rate_limit_headers": state.last_rate_limit_headers or {},
         }
     return snapshot
+
+
+def persist_provider_telemetry_snapshot(
+    storage=None,
+    *,
+    force: bool = False,
+    min_interval_s: float = 30.0,
+    commit: bool = True,
+) -> bool:
+    now = time.monotonic()
+    snapshot = get_provider_telemetry_snapshot()
+    if not snapshot:
+        return False
+
+    with GenericOpenAICompatibleProvider._telemetry_persist_lock:
+        dirty = GenericOpenAICompatibleProvider._telemetry_dirty
+        revision = GenericOpenAICompatibleProvider._telemetry_revision
+        last_persisted_revision = GenericOpenAICompatibleProvider._last_persisted_revision
+        last_persisted_at = GenericOpenAICompatibleProvider._last_persisted_at
+        if not force:
+            if not dirty or revision == last_persisted_revision:
+                return False
+            if (now - last_persisted_at) < max(0.0, float(min_interval_s)):
+                return False
+
+    owns_storage = storage is None
+    if owns_storage and not force:
+        should_flush = enqueue_provider_observability_snapshot(snapshot)
+        if should_flush:
+            return flush_observability_writes()
+        return False
+    if owns_storage:
+        from strata.storage.services.main import StorageManager
+
+        storage = StorageManager()
+    try:
+        bind = None
+        try:
+            bind = storage.session.get_bind()
+        except Exception:
+            bind = getattr(storage, "engine", None)
+        if bind is not None:
+            ProviderTelemetrySnapshotModel.__table__.create(bind=bind, checkfirst=True)
+        storage.session.add(ProviderTelemetrySnapshotModel(snapshot=snapshot))
+        if commit and hasattr(storage, "commit"):
+            storage.commit()
+        with GenericOpenAICompatibleProvider._telemetry_persist_lock:
+            if GenericOpenAICompatibleProvider._telemetry_revision == revision:
+                GenericOpenAICompatibleProvider._telemetry_dirty = False
+            GenericOpenAICompatibleProvider._last_persisted_revision = max(
+                GenericOpenAICompatibleProvider._last_persisted_revision,
+                revision,
+            )
+            GenericOpenAICompatibleProvider._last_persisted_at = now
+        return True
+    except Exception:
+        if commit and hasattr(storage, "rollback"):
+            storage.rollback()
+        return False
+    finally:
+        if owns_storage and hasattr(storage, "close"):
+            storage.close()
+
+
+def get_latest_persisted_provider_telemetry(storage) -> Dict[str, Dict[str, object]]:
+    try:
+        bind = None
+        try:
+            bind = storage.session.get_bind()
+        except Exception:
+            bind = getattr(storage, "engine", None)
+        if bind is not None:
+            ProviderTelemetrySnapshotModel.__table__.create(bind=bind, checkfirst=True)
+        row = (
+            storage.session.query(ProviderTelemetrySnapshotModel)
+            .order_by(ProviderTelemetrySnapshotModel.recorded_at.desc(), ProviderTelemetrySnapshotModel.id.desc())
+            .first()
+        )
+    except Exception:
+        return {}
+    if not row or not isinstance(row.snapshot, dict):
+        return {}
+    return row.snapshot
