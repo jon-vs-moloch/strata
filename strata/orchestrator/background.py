@@ -13,6 +13,8 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional
+from urllib.parse import urlparse, urlunparse
+import httpx
 
 from strata.core.lanes import infer_lane_from_task, normalize_lane
 from strata.experimental.trace_review import list_attempt_observability_artifacts
@@ -31,6 +33,63 @@ from strata.experimental.verifier import emit_verifier_attention_signal, verify_
 
 logger = logging.getLogger(__name__)
 LANE_NAMES = ("trainer", "agent")
+
+
+def _models_endpoint_from_chat_endpoint(endpoint: str) -> str:
+    parsed = urlparse(str(endpoint or "").strip())
+    path = parsed.path or ""
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")] + "/models"
+    elif path.endswith("/completions"):
+        path = path[: -len("/completions")] + "/models"
+    elif not path.endswith("/models"):
+        path = path.rstrip("/") + "/models"
+    return urlunparse(parsed._replace(path=path))
+
+
+async def _preflight_local_model_catalog(lane_model, *, timeout_s: float = 3.0) -> tuple[bool, str]:
+    endpoint = str(getattr(lane_model, "endpoint", "") or "").strip()
+    model_id = str(getattr(lane_model, "active_model", "") or "").strip()
+    if not endpoint or not model_id:
+        return False, "local preflight missing endpoint or model"
+    models_endpoint = _models_endpoint_from_chat_endpoint(endpoint)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
+            response = await client.get(models_endpoint)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        return False, str(exc)
+    catalog = list(payload.get("data") or [])
+    if any(str(item.get("id") or "").strip() == model_id for item in catalog if isinstance(item, dict)):
+        return True, ""
+    return False, f"local model '{model_id}' not present in {models_endpoint}"
+
+
+async def _preflight_lane_model(name: str, lane_model, ctx, *, timeout_s: float = 6.0) -> tuple[bool, str]:
+    lane_model.bind_execution_context(ctx)
+    endpoint = str(getattr(lane_model, "endpoint", "") or "").strip().lower()
+    if endpoint.startswith("http://127.0.0.1:") or endpoint.startswith("http://localhost:"):
+        return await _preflight_local_model_catalog(lane_model, timeout_s=min(timeout_s, 3.0))
+    try:
+        response = await asyncio.wait_for(
+            lane_model.chat(
+                [{"role": "user", "content": "ping"}],
+                timeout=5.0,
+                max_retries=1,
+            ),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        return False, f"{name} preflight timed out after {timeout_s:.1f}s"
+    except Exception as exc:
+        return False, str(exc)
+
+    if not isinstance(response, dict):
+        return False, f"{name} preflight returned invalid response type"
+    if str(response.get("status") or "").strip().lower() != "success":
+        return False, str(response.get("message") or response.get("content") or f"{name} preflight returned non-success status")
+    return True, ""
 
 
 def _parse_timestamp(value) -> Optional[datetime]:
@@ -419,12 +478,10 @@ class BackgroundWorker:
         for name, ctx in contexts:
             logger.info(f"Checking {name} model tier...")
             lane_model = self._lane_model(name)
-            lane_model.bind_execution_context(ctx)
             try:
-                # Ping with a simple no-op (Max 5s timeout)
-                # If it's a Cloud transport without an API key, bind_execution_context may throw
-                # or the chat call will throw.
-                await lane_model.chat([{"role": "user", "content": "ping"}], timeout=5.0)
+                ok, reason = await _preflight_lane_model(name, lane_model, ctx)
+                if not ok:
+                    raise RuntimeError(reason)
                 logger.info(f"  -> {name} tier is reachable.")
                 self._tier_health[name] = "ok"
             except Exception as e:
@@ -575,6 +632,12 @@ class BackgroundWorker:
         
     async def enqueue_with_priority(self, task_id: str, *, front: bool = False):
         queue = self._lane_queue(self._lane_for_task_id(task_id))
+        if task_id in {queued_task_id for queued_task_id in list(getattr(queue, "_queue", []))}:
+            logger.info("Skipped enqueue for task %s because it is already queued.", task_id)
+            return
+        if task_id in {current_task_id for current_task_id in self._current_task_ids.values() if current_task_id}:
+            logger.info("Skipped enqueue for task %s because it is already active.", task_id)
+            return
         if front:
             queue._queue.appendleft(task_id)
         else:

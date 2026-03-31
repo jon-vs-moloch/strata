@@ -6,6 +6,7 @@ import asyncio
 
 from strata.orchestrator.background import (
     BackgroundWorker,
+    _preflight_lane_model,
     ensure_blocked_weak_task_review,
     resolution_from_plan_review,
 )
@@ -119,6 +120,22 @@ class DependentDecompModel(DummyModel):
 class ExplodingModel(DummyModel):
     async def chat(self, *_args, **_kwargs):
         raise AssertionError("idle alignment should not call the model before onboarding exists")
+
+
+class ErrorStatusModel(DummyModel):
+    async def chat(self, *_args, **_kwargs):
+        return {"status": "error", "message": "local provider unhealthy"}
+
+
+class HangingModel(DummyModel):
+    async def chat(self, *_args, **_kwargs):
+        await asyncio.sleep(10)
+        return {"status": "success", "content": "ok"}
+
+
+class LocalCatalogModel(DummyModel):
+    endpoint = "http://127.0.0.1:1234/v1/chat/completions"
+    active_model = "foo-local-model"
 
 
 def test_background_worker_can_pause_and_resume_individual_lanes():
@@ -285,6 +302,17 @@ def test_worker_status_exposes_live_step_details():
     assert "Executing research tool: read_file" in agent_detail["ticker_items"][-1]
 
 
+def test_enqueue_with_priority_skips_duplicate_queued_task():
+    worker = BackgroundWorker(storage_factory=make_storage, model_adapter=DummyModel())
+    queue = worker._lane_queue("agent")
+    queue.put_nowait("task-123")
+
+    asyncio.run(worker.enqueue_with_priority("task-123"))
+
+    queued = list(queue._queue)
+    assert queued == ["task-123"]
+
+
 def test_task_and_attempt_creation_retry_after_sqlite_lock(monkeypatch):
     storage = make_storage()
     try:
@@ -387,6 +415,59 @@ def test_lane_idle_policies_can_seed_weak_even_when_other_lane_is_busy(monkeypat
 
 def test_runtime_defaults_replay_pending_tasks_on_startup():
     assert GLOBAL_SETTINGS["replay_pending_tasks_on_startup"] is True
+
+
+def test_preflight_lane_model_treats_error_status_as_failure():
+    ok, reason = asyncio.run(
+        _preflight_lane_model("agent", ErrorStatusModel(), object(), timeout_s=0.2)
+    )
+
+    assert ok is False
+    assert "unhealthy" in reason
+
+
+def test_preflight_lane_model_times_out_hard():
+    ok, reason = asyncio.run(
+        _preflight_lane_model("agent", HangingModel(), object(), timeout_s=0.05)
+    )
+
+    assert ok is False
+    assert "timed out" in reason
+
+
+def test_preflight_lane_model_uses_local_catalog_for_local_endpoints(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"id": "foo-local-model"}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr("strata.orchestrator.background.httpx.AsyncClient", FakeClient)
+
+    ok, reason = asyncio.run(
+        _preflight_lane_model("agent", LocalCatalogModel(), object(), timeout_s=0.2)
+    )
+
+    assert ok is True
+    assert reason == ""
+    assert calls == ["http://127.0.0.1:1234/v1/models"]
 
 
 def test_run_idle_tasks_seeds_startup_smoke_before_onboarding(monkeypatch):
