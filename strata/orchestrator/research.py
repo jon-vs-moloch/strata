@@ -185,6 +185,7 @@ def _build_task_boundary_autopsy(
     response: Optional[Dict[str, Any]],
     tool_call: Optional[Dict[str, Any]] = None,
     tool_result_preview: str = "",
+    tool_result_full: str = "",
     next_step_hint: str = "",
 ) -> Dict[str, Any]:
     serialized_response = _serialize_research_turn(
@@ -211,6 +212,8 @@ def _build_task_boundary_autopsy(
         ).get("tool_calls", [{}])[0]
     if tool_result_preview:
         autopsy["tool_result_preview"] = _clip_text(tool_result_preview, 1200)
+    if tool_result_full:
+        autopsy["tool_result_full"] = str(tool_result_full)
     return autopsy
 
 
@@ -258,6 +261,7 @@ def _build_research_system_prompt(
     preferred_start_paths: Optional[list[str]] = None,
     focused_guidance: str = "",
     disallow_broad_repo_scan: bool = False,
+    handoff_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     spec_lines = "\n".join(f"- {path}" for path in (spec_paths or [])) or "- None provided"
     repo_hint_block = f"\nObserved repository snapshot:\n{repo_snapshot}\n" if repo_snapshot else ""
@@ -266,6 +270,32 @@ def _build_research_system_prompt(
     focused_hint_block = (
         f"\nFocused starting points for this task:\n{preferred_lines}\nGuidance: {focused_guidance}\n"
         if (preferred_start_paths or focused_guidance)
+        else ""
+    )
+    handoff_context = dict(handoff_context or {})
+    handoff_lines = []
+    if handoff_context:
+        tool_name = str(((handoff_context.get("tool_call") or {}).get("name")) or "").strip()
+        tool_args = str(((handoff_context.get("tool_call") or {}).get("arguments")) or "").strip()
+        if tool_name:
+            handoff_lines.append(f"- Prior tool call already executed: {tool_name} {tool_args}".strip())
+        tool_result_full = str(handoff_context.get("tool_result_full") or "").strip()
+        if tool_result_full:
+            handoff_lines.append(f"- Prior full tool result:\n{tool_result_full}")
+        tool_result_preview = str(handoff_context.get("tool_result_preview") or "").strip()
+        if tool_result_preview and not tool_result_full:
+            handoff_lines.append(f"- Prior tool result preview: {tool_result_preview}")
+        next_step_hint = str(handoff_context.get("next_step_hint") or "").strip()
+        if next_step_hint:
+            handoff_lines.append(f"- Prior next-step hint: {next_step_hint}")
+        avoid_repeat = dict(handoff_context.get("avoid_repeating_first_tool") or {})
+        if avoid_repeat:
+            handoff_lines.append(
+                f"- Do not repeat {avoid_repeat.get('name')} as your first move unless you can explain why the inherited evidence is insufficient."
+            )
+    handoff_block = (
+        "\nPrior handoff evidence from the parent step:\n" + "\n".join(handoff_lines) + "\n"
+        if handoff_lines
         else ""
     )
     codebase_nudge = ""
@@ -313,7 +343,7 @@ Your current tools: list_directory, read_file, search_web, write_library_file, l
 [LOCAL CONTEXT]
 - Repository paths are relative to the repo root.
 - Canonical spec paths for this task:
-{spec_lines}{repo_hint_block}{focused_hint_block}{codebase_nudge}
+{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{codebase_nudge}
 
 When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
 Focus area: {target_scope.upper()} scope."""
@@ -372,6 +402,7 @@ class ResearchModule:
             or ""
         ).strip()
         disallow_broad_repo_scan = bool(context_hints.get("disallow_broad_repo_scan"))
+        handoff_context = dict(context_hints.get("handoff_context") or {})
         research_lane = infer_lane_from_session_id((task_context or {}).get("session_id"))
         research_task_type = str((task_context or {}).get("type") or "").strip() or "RESEARCH"
         research_task_id = str((task_context or {}).get("task_id") or "").strip() or None
@@ -600,6 +631,7 @@ class ResearchModule:
                     preferred_start_paths=preferred_start_paths,
                     focused_guidance=focused_guidance,
                     disallow_broad_repo_scan=disallow_broad_repo_scan,
+                    handoff_context=handoff_context,
                 ),
             },
             {
@@ -680,6 +712,7 @@ class ResearchModule:
                         response=response,
                         tool_call=call,
                         tool_result_preview=tool_result,
+                        tool_result_full=tool_result if len(str(tool_result or "")) <= 12000 else "",
                         next_step_hint="Choose a different tool or split the task so tool repair and research are separate tasks.",
                     ),
                 )
@@ -915,6 +948,7 @@ class ResearchModule:
                         response=response,
                         tool_call=call,
                         tool_result_preview=tool_result,
+                        tool_result_full=tool_result if len(str(tool_result or "")) <= 12000 else "",
                         next_step_hint=(
                             "Split the work so one task can inspect exactly one source or artifact and a later task can synthesize."
                         ),

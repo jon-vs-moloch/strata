@@ -168,6 +168,10 @@ Current status:
 
 - heavily evolved today
 - now much closer to the intended one-attempt / one-variance-bearing-invocation model
+- DAG-aware execution semantics are becoming explicit:
+  - serial child chains hand forward deterministic evidence
+  - parallel children write into parent-owned merge state
+  - coordination nodes replan from branch-wide child status rather than isolated sibling guesses
 
 ### Bootstrap / Self-Improvement
 
@@ -245,6 +249,43 @@ Current status:
 
 - much stronger than before
 - now a core learning substrate rather than just logging
+
+### `Context Pressure`
+
+Purpose:
+
+- make prompt/context occupancy visible and governable instead of invisible prompt glue
+- preserve high-value context while allowing low-value or stale context to compact away deterministically
+- support explicit handoff of useful evidence between parent and child tasks
+
+Owns:
+
+- persistent pinned-context registry
+- context priority and age metadata
+- deterministic compaction and unload behavior
+- context-pressure notices surfaced into prompts and operator views
+- parent-to-child execution handoff payloads for decomposed work
+
+Does not own:
+
+- semantic memory retrieval as a whole
+- long-term knowledge synthesis
+- arbitrary retention of every artifact forever
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/strata/context/loaded_files.py](/Users/jon/Projects/strata/strata/context/loaded_files.py)
+- [/Users/jon/Projects/strata/strata/api/chat_tools.py](/Users/jon/Projects/strata/strata/api/chat_tools.py)
+- [/Users/jon/Projects/strata/strata/api/chat_tool_executor.py](/Users/jon/Projects/strata/strata/api/chat_tool_executor.py)
+- [/Users/jon/Projects/strata/strata/api/chat_runtime.py](/Users/jon/Projects/strata/strata/api/chat_runtime.py)
+- [/Users/jon/Projects/strata/strata/orchestrator/worker/attempt_runner.py](/Users/jon/Projects/strata/strata/orchestrator/worker/attempt_runner.py)
+- [/Users/jon/Projects/strata/strata/orchestrator/research.py](/Users/jon/Projects/strata/strata/orchestrator/research.py)
+
+Current status:
+
+- newly first-class and increasingly foundational
+- now supports explicit priority, deterministic compaction, and prompt-visible pressure summaries
+- still wants a fuller policy layer for when the system should compact automatically versus merely advising the model/operator
 
 ### Knowledge
 

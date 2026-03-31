@@ -151,6 +151,33 @@ The point of storing structured outcomes is to answer questions like:
 
 The system should evolve from measured outcomes, not from intuition alone.
 
+### 6. Context is a managed resource
+
+Context is not free, and it should not be treated as an invisible dumping ground.
+
+Strata should treat prompt/context budget as a first-class managed resource:
+
+- useful context should persist when it continues to help the system complete current work
+- stale or low-value context should be compacted or removed before it silently crowds out better evidence
+- context management should be explicit enough that the model can reason about it, rather than blindly acting as if everything it ever saw is still equally available
+
+This applies both to operator-pinned context and to execution handoff between tasks.
+
+In practice, this means:
+
+- context entries should carry priority
+- age should matter when deciding what to compact
+- deterministic policy should be allowed to compact low-priority context when pressure becomes too high
+- the model should be told what is currently loaded, how much budget is in use, and when context pressure is becoming unhealthy
+
+The system should not force the model to waste a fresh variance-bearing invocation reacquiring information that was already obtained in a previous step. When a tool call produces useful evidence, that evidence should be handed forward deterministically in an explicit form rather than rediscovered by accident.
+
+Branch structure matters here too:
+
+- serial work may hand deterministic state directly to the next node
+- parallel work should merge through a coordination node
+- replanning should consider the whole active child set, including partial successes and still-running siblings
+
 ## Agent/Trainer Separation
 
 The trainer/agent split is intentional and foundational.

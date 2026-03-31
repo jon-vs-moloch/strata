@@ -8,7 +8,14 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 from strata.core.lanes import infer_lane_from_session_id
-from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
+from strata.context.loaded_files import (
+    build_loaded_context_notice,
+    compact_context_files,
+    list_loaded_context_files,
+    load_context_file,
+    reprioritize_context_file,
+    unload_context_file,
+)
 from strata.feedback.signals import register_feedback_signal
 from strata.orchestrator.tool_health import record_tool_execution, should_throttle_tool
 from strata.orchestrator.trainer_controls import (
@@ -431,15 +438,17 @@ class ChatToolExecutor:
                 tool_content = "No workspace files are currently pinned into round-level context."
             else:
                 tool_content = "Loaded workspace context files:\n" + "\n".join(
-                    f"- {entry.get('path')} ({entry.get('estimated_tokens')} est. tokens)"
+                    f"- {entry.get('path')} [{entry.get('priority') or 'normal'}] ({entry.get('estimated_tokens')} est. tokens)"
                     for entry in files
                 )
+                tool_content += "\n\n" + build_loaded_context_notice(storage)
             tool_outputs_generated = True
         elif func_name == "load_context_file":
             result = load_context_file(
                 storage,
                 str(args.get("path") or ""),
                 source="chat_tool_executor.load_context_file",
+                priority=str(args.get("priority") or "normal"),
             )
             if result.get("status") == "over_budget":
                 tool_content = (
@@ -452,7 +461,41 @@ class ChatToolExecutor:
             else:
                 tool_content = (
                     f"Loaded {result.get('path')} into persistent round-level context "
-                    f"({result.get('estimated_tokens')} est. tokens)."
+                    f"({result.get('estimated_tokens')} est. tokens, priority={str(args.get('priority') or 'normal').strip().lower() or 'normal'})."
+                )
+            tool_outputs_generated = True
+        elif func_name == "reprioritize_context_file":
+            result = reprioritize_context_file(
+                storage,
+                str(args.get("path") or ""),
+                priority=str(args.get("priority") or "normal"),
+            )
+            tool_content = (
+                f"Updated {result.get('path')} to priority {result.get('priority')}."
+                if result.get("updated")
+                else f"{result.get('path')} is not currently loaded into persistent context."
+            )
+            tool_outputs_generated = True
+        elif func_name == "compact_context":
+            result = compact_context_files(
+                storage,
+                target_tokens=args.get("target_tokens"),
+            )
+            removed = list(result.get("removed") or [])
+            if not removed:
+                tool_content = (
+                    "Persistent context did not need compaction.\n\n"
+                    + build_loaded_context_notice(storage)
+                )
+            else:
+                tool_content = (
+                    "Compacted persistent context by unloading:\n"
+                    + "\n".join(
+                        f"- {entry.get('path')} [{entry.get('priority') or 'normal'}] ({entry.get('estimated_tokens')} est. tokens)"
+                        for entry in removed
+                    )
+                    + "\n\n"
+                    + build_loaded_context_notice(storage)
                 )
             tool_outputs_generated = True
         elif func_name == "unload_context_file":

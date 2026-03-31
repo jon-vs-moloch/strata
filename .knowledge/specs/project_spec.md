@@ -62,6 +62,12 @@ Operational guidance:
 - runtime surfaces should expose live attempt-step state in real time so the operator can see whether a lane is routing, generating, executing a tool, validating, reviewing, or truly idle
 - the agent should be allowed to discover and execute a decomposition needed to complete a Procedure, and once that decomposition proves stable, the resulting process should be eligible to fold back into the Procedure artifact itself
 - tool telemetry should support scope-aware circuit breakers so the system can learn "this tool is broken for this lane doing this class of work" and stop spamming the same failing call until remediation is underway
+- prompt/context budget should be treated as an explicitly managed resource: pinned context should carry priority, context pressure should be surfaced into prompts and operator views, and low-value or stale context should be compactable deterministically before it silently crowds out better evidence
+- useful tool results should normally be handed forward into child work deterministically; the system should not force a new attempt to spend its only move re-acquiring evidence the parent already gathered
+- DAG shape matters for deterministic handoff:
+  - serial chains may hand branch state directly to the next dependency-ready node
+  - parallel children must merge upward through parent-owned branch state
+  - replanning should inspect the full active child set, not only the last failing child
 - surprising signals should themselves remain auditable so the system can ask not only "what happened?" but also "was it right to be surprised by this?" and recalibrate its own attention policy
 - prefer evolving existing pipelines into shared primitives instead of creating adjacent special-purpose systems; a new subsystem should justify itself by becoming reusable across multiple Strata surfaces
 - plugin and module interfaces should be explicit and versioned so interchangeable product surfaces are normal behavior, not bespoke glue code

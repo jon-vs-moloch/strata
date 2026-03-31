@@ -183,3 +183,103 @@ def test_root_procedure_task_expands_into_children_without_research_turn(monkeyp
     assert all(front is True for _, front in enqueued)
     assert (task.task_id, TaskState.WORKING.value) in notifications
     assert (task.task_id, TaskState.PUSHED.value) in notifications
+
+
+def test_serial_dependency_handoff_is_injected_before_run(monkeypatch):
+    storage = make_storage()
+    parent = storage.tasks.create(
+        title="Parent",
+        description="Parent task",
+        session_id="agent:default",
+        state=TaskState.PUSHED,
+        type=TaskType.DECOMP,
+        constraints={"lane": "agent", "execution_mode": "serial"},
+    )
+    inspect_task = storage.tasks.create(
+        title="Inspect sources",
+        description="Inspect sources",
+        session_id="agent:default",
+        parent_task_id=parent.task_id,
+        state=TaskState.COMPLETE,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "agent", "execution_mode": "serial"},
+    )
+    decide_task = storage.tasks.create(
+        title="Decide status",
+        description="Decide status",
+        session_id="agent:default",
+        parent_task_id=parent.task_id,
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "agent", "execution_mode": "serial"},
+    )
+    storage.tasks.add_dependency(decide_task.task_id, inspect_task.task_id)
+    storage.commit()
+
+    attempt = storage.attempts.create(task_id=inspect_task.task_id)
+    attempt.outcome = AttemptOutcome.SUCCEEDED
+    attempt.evidence = {
+        "autopsy": {
+            "tool_call": {"name": "read_file", "arguments": "{\"path\": \".knowledge/specs/project_spec.md\"}"},
+            "tool_result_preview": "project_spec excerpt",
+            "tool_result_full": "full project_spec content",
+            "next_step_hint": "Decide whether the item is satisfied from the inspected file.",
+            "avoid_repeating_first_tool": {"name": "read_file", "reason": "The source file was already inspected."},
+        }
+    }
+    storage.commit()
+
+    async def succeed(task_obj, *_args, **_kwargs):
+        handoff = dict((task_obj.constraints or {}).get("handoff_context") or {})
+        assert handoff.get("upstream_task_id") == inspect_task.task_id
+        assert handoff.get("tool_result_full") == "full project_spec content"
+        assert "parent_branch_state" in handoff
+
+    monkeypatch.setattr(attempt_runner, "_run_research", succeed)
+
+    success, error, _ = __import__("asyncio").run(
+        attempt_runner.run_attempt(decide_task, storage, DummyModel(), _noop_notify, _noop_enqueue)
+    )
+
+    assert success is True
+    assert error is None
+
+
+def test_completed_child_writes_handback_into_parent_branch_state(monkeypatch):
+    storage = make_storage()
+    parent = storage.tasks.create(
+        title="Parallel parent",
+        description="Coordinate child work",
+        session_id="agent:default",
+        state=TaskState.PUSHED,
+        type=TaskType.DECOMP,
+        constraints={"lane": "agent", "execution_mode": "parallel"},
+    )
+    child = storage.tasks.create(
+        title="Parallel child",
+        description="Do a leaf task",
+        session_id="agent:default",
+        parent_task_id=parent.task_id,
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "agent", "execution_mode": "parallel"},
+    )
+    parent.active_child_ids = [child.task_id]
+    storage.commit()
+
+    async def succeed(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(attempt_runner, "_run_research", succeed)
+
+    success, error, attempt = __import__("asyncio").run(
+        attempt_runner.run_attempt(child, storage, DummyModel(), _noop_notify, _noop_enqueue)
+    )
+
+    assert success is True
+    assert error is None
+    updated_parent = storage.tasks.get_by_id(parent.task_id)
+    branch_state = dict((updated_parent.constraints or {}).get("child_branch_state") or {})
+    children = dict(branch_state.get("children") or {})
+    assert child.task_id in children
+    assert children[child.task_id]["attempt_id"] == attempt.attempt_id

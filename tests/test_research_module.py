@@ -40,6 +40,27 @@ def test_research_prompt_omits_codebase_nudge_for_non_codebase_scope():
     assert "[CODEBASE-FIRST BEHAVIOR]" not in prompt
 
 
+def test_research_prompt_includes_handoff_context_and_avoid_repeat_guidance():
+    prompt = _build_research_system_prompt(
+        target_scope="codebase",
+        task_description="Confirm the core spec files are present.",
+        preferred_start_paths=[".knowledge/specs/constitution.md"],
+        handoff_context={
+            "tool_call": {"name": "list_directory", "arguments": '{"path":"."}'},
+            "tool_result_full": "README.md\n.knowledge/\nstrata/\ndocs/",
+            "tool_result_preview": "README.md\nstrata/\n.knowledge/",
+            "next_step_hint": "Read the canonical spec files directly.",
+            "avoid_repeating_first_tool": {"name": "list_directory"},
+        },
+    )
+
+    assert "Prior handoff evidence from the parent step" in prompt
+    assert "Prior tool call already executed: list_directory" in prompt
+    assert "Prior full tool result:\nREADME.md\n.knowledge/\nstrata/\ndocs/" in prompt
+    assert "Prior next-step hint: Read the canonical spec files directly." in prompt
+    assert "Do not repeat list_directory as your first move" in prompt
+
+
 def test_canonical_spec_reads_bypass_progressive_summary_cache():
     assert _should_return_raw_file(
         filepath=".knowledge/specs/project_spec.md",

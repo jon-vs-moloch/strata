@@ -393,8 +393,48 @@ NON_GENERATIVE_TOOLS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Repository-relative or absolute file path."},
+                    "priority": {
+                        "type": "string",
+                        "description": "How important this pinned context is relative to other pinned items.",
+                        "enum": ["critical", "high", "normal", "low"],
+                    },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reprioritize_context_file",
+            "description": "Change the priority of a pinned context file so the system can compact lower-priority context first under pressure.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository-relative or absolute file path."},
+                    "priority": {
+                        "type": "string",
+                        "description": "The new priority for this pinned context item.",
+                        "enum": ["critical", "high", "normal", "low"],
+                    },
+                },
+                "required": ["path", "priority"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compact_context",
+            "description": "Deterministically unload lower-priority pinned context items until the context budget is healthier.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_tokens": {
+                        "type": "integer",
+                        "description": "Optional target total estimated tokens to compact down to. Defaults to the configured budget.",
+                    },
+                },
             },
         },
     },

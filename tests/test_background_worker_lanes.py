@@ -13,7 +13,7 @@ from strata.orchestrator.worker.idle_policy import run_idle_tasks
 from strata.orchestrator.worker.attempt_runner import _run_decomposition
 from strata.procedures.registry import queue_procedure
 from strata.schemas.core import TaskDecomposition, TaskFraming
-from strata.storage.models import Base, TaskModel, TaskState, TaskType
+from strata.storage.models import AttemptOutcome, Base, TaskModel, TaskState, TaskType
 from strata.storage.services.main import StorageManager
 from strata.api.main import GLOBAL_SETTINGS
 from sqlalchemy.exc import OperationalError
@@ -627,6 +627,17 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
         constraints={"lane": "agent", "recovery_focus_task_id": focus.task_id},
     )
     decomp_task.type = TaskType.DECOMP
+    attempt = storage.attempts.create(task_id=focus.task_id)
+    attempt.evidence = {
+        "failure_kind": "task_boundary_violation",
+        "autopsy": {
+            "failure_kind": "task_boundary_violation",
+            "tool_call": {"name": "list_directory", "arguments": '{"path":"."}'},
+            "tool_result_preview": "README.md\nstrata/\n.knowledge/",
+            "next_step_hint": "Read the hinted runtime posture files directly.",
+        },
+    }
+    storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.FAILED, reason="needs decomposition")
     storage.commit()
 
     queued = []
@@ -648,6 +659,10 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
     assert decide_task in cash_out_task.dependencies
     assert decide_task.constraints.get("disallow_broad_repo_scan") is True
     assert "strata/api/main.py" in list(decide_task.constraints.get("preferred_start_paths") or [])
+    handoff = dict(decide_task.constraints.get("handoff_context") or {})
+    assert handoff.get("tool_call", {}).get("name") == "list_directory"
+    assert "runtime posture files directly" in str(handoff.get("next_step_hint") or "")
+    assert handoff.get("avoid_repeating_first_tool", {}).get("name") == "list_directory"
     assert decomp_task.state == TaskState.PUSHED
     assert sorted(decomp_task.active_child_ids) == sorted(child.task_id for child in created)
     assert all(front is True for _, front in queued)

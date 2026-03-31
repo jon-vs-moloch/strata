@@ -15,7 +15,7 @@ from strata.communication.primitives import build_communication_decision, delive
 from strata.api.chat_tools import filter_chat_tools_for_lane
 from strata.observability.context import record_context_load
 from strata.api.chat_tool_executor import ChatToolExecutor
-from strata.context.loaded_files import build_loaded_context_block
+from strata.context.loaded_files import build_loaded_context_block, build_loaded_context_notice
 from strata.core.lanes import infer_lane_from_session_id
 from strata.models.adapter import ModelAdapter
 from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
@@ -387,6 +387,17 @@ Available Tools:
         loaded_context_block = build_loaded_context_block(
             storage,
             source="api.chat_runtime.build_chat_messages.loaded_context",
+        )
+        loaded_context_notice = build_loaded_context_notice(storage)
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Context management notice:\n"
+                    f"{loaded_context_notice}\n\n"
+                    "If persistent context grows stale or too large, prefer reprioritizing or compacting it deliberately."
+                ),
+            }
         )
         if loaded_context_block:
             messages.append(

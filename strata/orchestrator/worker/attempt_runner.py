@@ -117,6 +117,140 @@ def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
     return selected
 
 
+def _default_carry_forward_policy() -> Dict[str, Any]:
+    return {
+        "tool_call": "summary",
+        "tool_result_preview": "summary",
+        "tool_result_full": "small_only",
+        "next_step_hint": "summary",
+        "failure_autopsy": "summary",
+    }
+
+
+def _terminal_handoff_payload(task: TaskModel, attempt) -> Dict[str, Any]:
+    artifacts = dict(getattr(attempt, "artifacts", {}) or {})
+    evidence = dict(getattr(attempt, "evidence", {}) or {})
+    autopsy = dict(evidence.get("autopsy") or {}) if isinstance(evidence.get("autopsy"), dict) else {}
+    return {
+        "task_id": str(getattr(task, "task_id", "") or ""),
+        "title": str(getattr(task, "title", "") or ""),
+        "attempt_id": str(getattr(attempt, "attempt_id", "") or ""),
+        "outcome": str(getattr(getattr(attempt, "outcome", None), "value", getattr(attempt, "outcome", "")) or ""),
+        "reason": str(getattr(attempt, "reason", "") or ""),
+        "tool_call": dict(autopsy.get("tool_call") or {}),
+        "tool_result_preview": str(autopsy.get("tool_result_preview") or ""),
+        "tool_result_full": str(autopsy.get("tool_result_full") or ""),
+        "next_step_hint": str(autopsy.get("next_step_hint") or ""),
+        "avoid_repeating_first_tool": dict(autopsy.get("avoid_repeating_first_tool") or {}),
+        "failure_kind": str(evidence.get("failure_kind") or autopsy.get("failure_kind") or ""),
+        "step_history": list(artifacts.get("step_history") or []),
+        "duration_s": artifacts.get("duration_s"),
+    }
+
+
+def _update_parent_branch_state(storage, task: TaskModel, attempt) -> None:
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if not parent_task_id:
+        return
+    parent = storage.tasks.get_by_id(parent_task_id)
+    if parent is None:
+        return
+    parent_constraints = dict(getattr(parent, "constraints", {}) or {})
+    branch_state = dict(parent_constraints.get("child_branch_state") or {})
+    children = dict(branch_state.get("children") or {})
+    payload = _terminal_handoff_payload(task, attempt)
+    children[str(task.task_id)] = payload
+    branch_state["children"] = children
+    branch_state["last_completed_child_id"] = str(task.task_id)
+    branch_state["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+    branch_state["open_child_ids"] = list(getattr(parent, "active_child_ids", []) or [])
+    parent_constraints["child_branch_state"] = branch_state
+    parent.constraints = parent_constraints
+
+
+def _inherit_dependency_handoff(storage, task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    execution_mode = str(constraints.get("execution_mode") or "").strip().lower()
+    if execution_mode and execution_mode != "serial":
+        return False
+    completed_dependencies = [dep for dep in list(getattr(task, "dependencies", []) or []) if dep.state == TaskState.COMPLETE]
+    if not completed_dependencies:
+        return False
+    dependency = sorted(
+        completed_dependencies,
+        key=lambda dep: getattr(dep, "updated_at", None) or getattr(dep, "created_at", None) or datetime.min,
+    )[-1]
+    attempts = list(storage.attempts.get_by_task_id(dependency.task_id) or [])
+    successful = [attempt for attempt in attempts if attempt.outcome == AttemptOutcome.SUCCEEDED]
+    if not successful:
+        return False
+    latest_attempt = sorted(
+        successful,
+        key=lambda attempt: getattr(attempt, "ended_at", None) or getattr(attempt, "started_at", None) or datetime.min,
+    )[-1]
+    payload = _terminal_handoff_payload(dependency, latest_attempt)
+    handoff_context = dict(constraints.get("handoff_context") or {})
+    handoff_context.update(
+        {
+            "upstream_task_id": payload.get("task_id"),
+            "upstream_title": payload.get("title"),
+            "upstream_attempt_id": payload.get("attempt_id"),
+            "tool_call": payload.get("tool_call") or {},
+            "tool_result_preview": payload.get("tool_result_preview") or "",
+            "tool_result_full": payload.get("tool_result_full") or "",
+            "next_step_hint": payload.get("next_step_hint") or "",
+            "avoid_repeating_first_tool": payload.get("avoid_repeating_first_tool") or {},
+        }
+    )
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if parent_task_id:
+        parent = storage.tasks.get_by_id(parent_task_id)
+        if parent is not None:
+            handoff_context["parent_branch_state"] = dict((getattr(parent, "constraints", {}) or {}).get("child_branch_state") or {})
+    constraints["handoff_context"] = handoff_context
+    task.constraints = constraints
+    return True
+
+
+def _latest_attempt_handoff(storage, task: TaskModel) -> Dict[str, Any]:
+    attempts = list(storage.attempts.get_by_task_id(task.task_id) or [])
+    if not attempts:
+        return {}
+    attempt = attempts[0]
+    evidence = dict(getattr(attempt, "evidence", {}) or {})
+    autopsy = dict(evidence.get("autopsy") or {}) if isinstance(evidence.get("autopsy"), dict) else {}
+    tool_call = dict(autopsy.get("tool_call") or {}) if isinstance(autopsy.get("tool_call"), dict) else {}
+    handoff: Dict[str, Any] = {
+        "from_task_id": str(task.task_id or ""),
+        "from_task_title": str(getattr(task, "title", "") or ""),
+        "from_attempt_id": str(getattr(attempt, "attempt_id", "") or ""),
+        "failure_kind": str(evidence.get("failure_kind") or autopsy.get("failure_kind") or "").strip(),
+        "next_step_hint": str(autopsy.get("next_step_hint") or "").strip(),
+        "tool_result_preview": str(autopsy.get("tool_result_preview") or "").strip(),
+        "tool_call": {
+            "name": str(tool_call.get("name") or "").strip(),
+            "arguments": str(tool_call.get("arguments") or "").strip(),
+        },
+    }
+    tool_name = str(((handoff.get("tool_call") or {}).get("name")) or "").strip()
+    if tool_name:
+        handoff["avoid_repeating_first_tool"] = {
+            "name": tool_name,
+            "reason": "This tool call already ran in the parent step; only repeat it if the inherited result was insufficient.",
+        }
+    if handoff.get("tool_call", {}).get("name") == "":
+        handoff.pop("tool_call", None)
+    if not handoff.get("tool_result_preview"):
+        handoff.pop("tool_result_preview", None)
+    if not handoff.get("next_step_hint"):
+        handoff.pop("next_step_hint", None)
+    if not handoff.get("failure_kind"):
+        handoff.pop("failure_kind", None)
+    if not handoff.get("avoid_repeating_first_tool"):
+        handoff.pop("avoid_repeating_first_tool", None)
+    return {k: v for k, v in handoff.items() if v not in ("", None, {}, [])}
+
+
 def _ensure_procedure_item_source_hints(task: TaskModel) -> bool:
     constraints = dict(getattr(task, "constraints", {}) or {})
     checklist_item = dict(constraints.get("procedure_checklist_item") or {})
@@ -219,7 +353,9 @@ def _procedure_checklist_subtasks(storage, task):
                     "procedure_id": constraints.get("procedure_id"),
                     "procedure_title": procedure_title,
                     "procedure_parent_task_id": getattr(focus, "task_id", None),
+                    "execution_mode": "parallel",
                     "source_hints": source_hints,
+                    "carry_forward": _default_carry_forward_policy(),
                     "procedure_checklist_item": {
                         "id": item_id,
                         "title": item_title,
@@ -242,6 +378,7 @@ def _procedure_item_recovery_subtasks(storage, task):
     if not item_id or not item_title:
         return []
     source_hints = dict(constraints.get("source_hints") or _procedure_checklist_item_source_hints(item_id))
+    handoff_context = _latest_attempt_handoff(storage, focus)
     preferred_paths = list(source_hints.get("preferred_paths") or [])
     guidance = str(source_hints.get("guidance") or "").strip()
     base_constraints = {
@@ -251,6 +388,9 @@ def _procedure_item_recovery_subtasks(storage, task):
         "procedure_parent_task_id": constraints.get("procedure_parent_task_id") or getattr(focus, "parent_task_id", None),
         "procedure_checklist_item": checklist_item,
         "source_hints": source_hints,
+        "carry_forward": _default_carry_forward_policy(),
+        "handoff_context": handoff_context,
+        "execution_mode": "serial",
         "recovered_from_decomposition_failure": True,
     }
     return [
@@ -355,13 +495,14 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
                 reason="Superseded by a newer attempt.",
             )
 
+    dependency_handoff_updated = _inherit_dependency_handoff(storage, task)
     # Start a new Attempt
     attempt = storage.attempts.create(task_id=task.task_id)
     constraints_updated = _ensure_procedure_item_source_hints(task)
     if task.state != TaskState.WORKING:
         task.state = TaskState.WORKING
     storage.commit()
-    if constraints_updated or task.state == TaskState.WORKING:
+    if dependency_handoff_updated or constraints_updated or task.state == TaskState.WORKING:
         await notify_fn(task.task_id, task.state.value)
     started_at = time.perf_counter()
     step_history = []
@@ -432,6 +573,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             attempt.artifacts["usage"] = model_adapter.last_response.usage or {}
         attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
         attempt.artifacts["step_history"] = list(step_history)
+        _update_parent_branch_state(storage, task, attempt)
             
         task.state = TaskState.COMPLETE
         storage.commit()
@@ -459,6 +601,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             failed_attempt.artifacts = {**dict(failed_attempt.artifacts or {}), **artifacts}
             failed_attempt.evidence = {**dict(failed_attempt.evidence or {}), **evidence}
             storage.attempts.update_outcome(failed_attempt.attempt_id, AttemptOutcome.FAILED, reason=str(e))
+            _update_parent_branch_state(storage, task, failed_attempt)
             storage.commit()
             if evidence:
                 should_flush = enqueue_attempt_observability_artifact(

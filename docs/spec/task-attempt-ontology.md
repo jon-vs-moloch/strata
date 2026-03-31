@@ -48,6 +48,8 @@ The system consists of:
 - If progress requires a second semantically different non-deterministic step, the task was underspecified and should decompose.
 - Deterministic work may surround an attempt, but does not become a new attempt just by taking time.
 - Long-running work, deterministic or non-deterministic, must emit progress telemetry so the operator can see forward motion.
+- Deterministic handoff between tasks matters. If a parent attempt already gathered useful evidence, child tasks should inherit an explicit deterministic handoff rather than spending a new variance-bearing attempt re-acquiring the same state.
+- DAG structure determines handoff shape. Serial edges may hand deterministic state directly to the next node; parallel edges must merge through parent-owned branch state.
 
 ## 3. Task
 
@@ -98,7 +100,14 @@ Task cannot proceed until a dependency is resolved.
 
 `pushed`
 
-Task is deprioritized in favor of higher-priority work.
+Task is acting as a coordination node rather than a runnable leaf.
+
+For decomposed work, this should be read operationally as:
+
+- the parent is now a coordination node
+- the children own execution
+- the parent should not be re-run as an ordinary leaf task while it still has live children
+- if the child plan fails, reactivating the parent should be deliberate rather than accidental
 
 `complete`
 
@@ -211,6 +220,45 @@ The attempt was overtaken by a newer attempt or branch.
 
 ### 5.1 Definition
 
+## 6. DAG Handoff Rules
+
+### 6.1 Serial edges
+
+For serial work, deterministic state may hand forward directly to the next dependency-ready node.
+
+That means:
+
+- child N completes
+- its deterministic handback is recorded
+- child N+1 inherits that handback as part of starting context
+
+This is the normal shape for chains like:
+
+1. inspect
+2. decide
+3. cash out
+
+### 6.2 Parallel edges
+
+For parallel work, siblings should not mutate each other's live context directly.
+
+Instead:
+
+- each child writes a deterministic handback into parent-owned branch state
+- the parent acts as the merge point
+- later serial steps or replans consume the merged branch state
+
+### 6.3 Replanning
+
+If a child triggers replanning, the coordination node should inspect:
+
+- completed child outputs
+- still-running or pending child status
+- failure autopsies
+- open questions and unresolved attention items
+
+Replanning should happen from the coordination node with the whole branch picture available, not by sibling-to-sibling improvisation.
+
 An execution record is the broader operational trace of one concrete invocation or step.
 
 Examples:
@@ -218,6 +266,7 @@ Examples:
 - a non-deterministic model call
 - a temperature-0 model call
 - a tool invocation
+- a deterministic handoff artifact derived from a prior tool result
 - deterministic context assembly
 - patch application
 - validation
