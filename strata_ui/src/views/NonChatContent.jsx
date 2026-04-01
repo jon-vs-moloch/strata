@@ -48,6 +48,22 @@ const stringifyJson = (value) => {
   }
 };
 
+const stripInlineMarkdown = (content) => {
+  const raw = String(content || '').trim();
+  if (!raw) return '';
+  return raw
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 const summarizeBootstrapReasons = (items = []) => {
   const counts = new Map();
   items.forEach((item) => {
