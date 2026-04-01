@@ -1134,6 +1134,21 @@ class BackgroundWorker:
                     logger.error(f"Invalid resolution choice: {resolution_data.resolution}")
                 
                 await apply_resolution(task, resolution_data, error, storage, self.enqueue)
+
+                if (
+                    str(getattr(resolution_data, "resolution", "") or "").strip().lower() == "decompose"
+                    and task.state == TaskState.PUSHED
+                    and self._task_has_live_children(task, storage)
+                ):
+                    self._mark_lane_progress(
+                        lane or context.mode,
+                        step="complete",
+                        label="Handed off to children",
+                        detail=f"{len(list(getattr(task, 'active_child_ids', []) or []))} child task(s) queued",
+                        attempt_id=getattr(attempt, "attempt_id", None),
+                        progress_label="children in progress",
+                    )
+                    return
                 
                 # --- RECORD METRICS ---
                 from strata.orchestrator.worker.telemetry import record_metric
@@ -1224,6 +1239,14 @@ class BackgroundWorker:
                     attempt=attempt,
                     model_adapter=lane_model,
                     context=context,
+                    progress_fn=lambda **payload: self._mark_lane_progress(
+                        lane or context.mode,
+                        step=str(payload.get("step") or "verification"),
+                        label=str(payload.get("label") or "Verifying output"),
+                        detail=str(payload.get("detail") or ""),
+                        attempt_id=attempt_id,
+                        progress_label=str(payload.get("progress_label") or ""),
+                    ),
                 )
                 if verification:
                     verifier_signal = emit_verifier_attention_signal(
@@ -1452,6 +1475,47 @@ class BackgroundWorker:
         if last_activity_at is not None:
             snapshot["last_activity_at"] = last_activity_at.isoformat()
         snapshot.update(dict(self._lane_activity_details.get(normalized_lane) or {}))
+
+        # Reconcile volatile in-memory lane activity with durable task/attempt state so
+        # operator-facing status does not drift from the actual active branch.
+        if current_task_id:
+            storage = None
+            try:
+                storage = self._storage_factory()
+                task = storage.tasks.get_by_id(str(current_task_id))
+                if task is not None:
+                    snapshot["current_task_title"] = str(getattr(task, "title", "") or snapshot.get("current_task_title") or "")
+                    task_state = getattr(task, "state", None)
+                    snapshot["current_task_state"] = getattr(task_state, "value", task_state) if task_state is not None else snapshot.get("current_task_state")
+                    if started_at is None:
+                        task_updated = _parse_timestamp(getattr(task, "updated_at", None) or getattr(task, "created_at", None))
+                        if task_updated is not None:
+                            snapshot["current_task_started_at"] = task_updated.isoformat()
+                active_attempt_id = str(snapshot.get("active_attempt_id") or "").strip()
+                attempt = None
+                if active_attempt_id:
+                    attempt = storage.attempts.get_by_id(active_attempt_id)
+                    if attempt is None and task is not None:
+                        snapshot["active_attempt_id"] = None
+                if attempt is None and task is not None:
+                    attempts = list(storage.attempts.get_by_task_id(str(current_task_id)) or [])
+                    active_attempts = [
+                        candidate
+                        for candidate in attempts
+                        if getattr(candidate, "outcome", None) is None and getattr(candidate, "ended_at", None) is None
+                    ]
+                    if active_attempts:
+                        attempt = active_attempts[0]
+                        snapshot["active_attempt_id"] = str(getattr(attempt, "attempt_id", "") or "")
+                if attempt is not None:
+                    attempt_started = _parse_timestamp(getattr(attempt, "started_at", None))
+                    if attempt_started is not None:
+                        snapshot["current_task_started_at"] = attempt_started.isoformat()
+            except Exception:
+                logger.debug("Failed to reconcile lane runtime snapshot for %s", normalized_lane, exc_info=True)
+            finally:
+                if storage is not None:
+                    storage.session.close()
 
         now = datetime.now(timezone.utc)
         if last_activity_at is not None:

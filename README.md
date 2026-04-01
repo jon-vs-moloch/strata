@@ -6,6 +6,17 @@ Strata is an agent orchestration prototype with three main pieces:
 - A background worker that routes tasks through research, decomposition, and implementation flows.
 - A React/Vite dashboard in `strata_ui/` for chat, task visibility, and admin controls.
 
+## Unified Direction
+
+Strata is merging with [Astra](/Users/jon/Projects/astra/). In the unified product, Strata becomes the **upstream quality-amplification pipeline** — it turns weak local inference into reliable agency. Astra is the **downstream product** that takes that agency and builds a user-facing coordination system around it.
+
+For the full vision, integration plan, and Strata's specific role, see:
+- [UNIFIED_VISION.md](/Users/jon/Projects/UNIFIED_VISION.md) — philosophy and stack model
+- [INTEGRATION.md](/Users/jon/Projects/INTEGRATION.md) — practical integration plan
+- [unified-direction.md](/Users/jon/Projects/strata/docs/spec/unified-direction.md) — Strata-side perspective
+
+---
+
 The project philosophy and bootstrap strategy are documented in [project-philosophy.md](/Users/jon/Projects/strata/docs/spec/project-philosophy.md). That document is the best explanation of what Strata is trying to accomplish and why the repository is structured the way it is.
 The repository structure itself is mapped in [codemap.md](/Users/jon/Projects/strata/docs/spec/codemap.md), which is the fastest way to find the right module without loading the entire codebase.
 The current staged productization plan lives in [product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md).

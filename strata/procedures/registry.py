@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
+import re
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from strata.core.lanes import canonical_session_id_for_lane, normalize_lane
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
@@ -23,6 +26,10 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
         "title": "Startup Sanity Check",
         "summary": "Resolve a small, source-grounded startup checklist to prove the harness can complete bounded Procedure work.",
         "repeatable": True,
+        "lifecycle_state": "vetted",
+        "lineage_id": STARTUP_SMOKE_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
         "target_lane": DEFAULT_PROCEDURE_LANE,
         "task_type": "RESEARCH",
         "instructions": (
@@ -63,6 +70,10 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
         "title": "Operator Onboarding",
         "summary": "Establish the agent's identity, operator defaults, and baseline trust posture.",
         "repeatable": True,
+        "lifecycle_state": "vetted",
+        "lineage_id": ONBOARDING_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
         "target_lane": DEFAULT_PROCEDURE_LANE,
         "task_type": "RESEARCH",
         "instructions": (
@@ -118,6 +129,23 @@ def _default_registry() -> Dict[str, Any]:
     return {"procedures": deepcopy(DEFAULT_PROCEDURES)}
 
 
+def _slugify(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return cleaned.strip("_") or "procedure"
+
+
+def _normalize_stats(source: Dict[str, Any]) -> Dict[str, Any]:
+    raw = dict(source or {})
+    return {
+        "run_count": int(raw.get("run_count") or 0),
+        "success_count": int(raw.get("success_count") or 0),
+        "failure_count": int(raw.get("failure_count") or 0),
+        "tested_at": str(raw.get("tested_at") or "").strip() or None,
+        "last_run_at": str(raw.get("last_run_at") or "").strip() or None,
+        "last_source_task_id": str(raw.get("last_source_task_id") or "").strip() or None,
+    }
+
+
 def _normalize_procedure(definition: Dict[str, Any]) -> Dict[str, Any]:
     procedure_id = str(definition.get("procedure_id") or "").strip()
     if not procedure_id:
@@ -127,6 +155,13 @@ def _normalize_procedure(definition: Dict[str, Any]) -> Dict[str, Any]:
     normalized["title"] = str(normalized.get("title") or procedure_id.replace("_", " ").title()).strip()
     normalized["summary"] = str(normalized.get("summary") or "").strip()
     normalized["repeatable"] = bool(normalized.get("repeatable", True))
+    lifecycle_state = str(normalized.get("lifecycle_state") or "draft").strip().lower()
+    if lifecycle_state not in {"draft", "tested", "vetted", "retired"}:
+        lifecycle_state = "draft"
+    normalized["lifecycle_state"] = lifecycle_state
+    normalized["lineage_id"] = str(normalized.get("lineage_id") or procedure_id).strip() or procedure_id
+    normalized["variant_of"] = str(normalized.get("variant_of") or "").strip() or None
+    normalized["mutable"] = bool(normalized.get("mutable", True))
     normalized["target_lane"] = normalize_lane(normalized.get("target_lane")) or DEFAULT_PROCEDURE_LANE
     normalized["task_type"] = str(normalized.get("task_type") or "RESEARCH").strip().upper()
     normalized["instructions"] = str(normalized.get("instructions") or "").strip()
@@ -140,6 +175,8 @@ def _normalize_procedure(definition: Dict[str, Any]) -> Dict[str, Any]:
         if str(item.get("title") or "").strip()
     ]
     normalized["success_criteria"] = dict(normalized.get("success_criteria") or {})
+    normalized["draft_source"] = dict(normalized.get("draft_source") or {})
+    normalized["stats"] = _normalize_stats(dict(normalized.get("stats") or {}))
     return normalized
 
 
@@ -184,6 +221,102 @@ def save_procedure(storage, definition: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def ensure_draft_procedure_for_task(storage, task: TaskModel, *, checklist: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    existing_id = str(constraints.get("procedure_id") or "").strip()
+    if existing_id:
+        try:
+            return get_procedure(storage, existing_id)
+        except KeyError:
+            pass
+
+    root = task
+    seen = set()
+    while getattr(root, "parent_task_id", None) and getattr(root, "parent_task_id", None) not in seen:
+        seen.add(str(getattr(root, "task_id", "")))
+        parent = storage.tasks.get_by_id(str(root.parent_task_id))
+        if parent is None:
+            break
+        root = parent
+
+    root_constraints = dict(getattr(root, "constraints", {}) or {})
+    root_procedure_id = str(root_constraints.get("procedure_id") or "").strip()
+    if root_procedure_id:
+        return get_procedure(storage, root_procedure_id)
+
+    title = str(getattr(root, "title", "") or getattr(task, "title", "") or "Recovered workflow").strip()
+    draft_id = f"draft_{_slugify(title)}_{str(getattr(root, 'task_id', '') or uuid4())[:8]}"
+    normalized_checklist: List[Dict[str, Any]] = []
+    for index, item in enumerate(list(checklist or []), start=1):
+        item_title = str(item.get("title") or "").strip()
+        if not item_title:
+            continue
+        normalized_checklist.append(
+            {
+                "id": str(item.get("id") or item.get("proto_id") or f"step_{index}").strip() or f"step_{index}",
+                "title": item_title,
+                "verification": str(item.get("verification") or item.get("description") or "").strip(),
+            }
+        )
+
+    procedure = save_procedure(
+        storage,
+        {
+            "procedure_id": draft_id,
+            "title": title,
+            "summary": str(getattr(root, "description", "") or getattr(task, "description", "") or "").strip()[:400],
+            "repeatable": True,
+            "lifecycle_state": "draft",
+            "lineage_id": draft_id,
+            "variant_of": None,
+            "mutable": True,
+            "target_lane": normalize_lane(root_constraints.get("lane") or constraints.get("lane")) or DEFAULT_PROCEDURE_LANE,
+            "task_type": str(getattr(task, "type", TaskType.RESEARCH).value if getattr(task, "type", None) else "RESEARCH"),
+            "instructions": (
+                "This is a draft Procedure discovered from live execution. Treat it as provisional working memory for the workflow "
+                "until it succeeds and accumulates evidence."
+            ),
+            "checklist": normalized_checklist,
+            "success_criteria": dict(getattr(root, "success_criteria", {}) or {}),
+            "draft_source": {
+                "root_task_id": getattr(root, "task_id", None),
+                "source_task_id": getattr(task, "task_id", None),
+                "source_title": str(getattr(task, "title", "") or "").strip(),
+            },
+        },
+    )
+
+    for node in [root, task]:
+        node_constraints = dict(getattr(node, "constraints", {}) or {})
+        node_constraints["procedure_id"] = procedure["procedure_id"]
+        node_constraints["procedure_title"] = procedure["title"]
+        node_constraints["procedure_lifecycle_state"] = procedure["lifecycle_state"]
+        node_constraints["procedure_lineage_id"] = procedure["lineage_id"]
+        node.constraints = node_constraints
+    storage.commit()
+    return procedure
+
+
+def record_procedure_run(storage, procedure_id: str, *, outcome: str, source_task_id: Optional[str] = None) -> Dict[str, Any]:
+    procedure = get_procedure(storage, procedure_id)
+    updated = deepcopy(procedure)
+    stats = _normalize_stats(dict(updated.get("stats") or {}))
+    stats["run_count"] += 1
+    stats["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    if source_task_id:
+        stats["last_source_task_id"] = str(source_task_id)
+    normalized_outcome = str(outcome or "").strip().lower()
+    if normalized_outcome == "succeeded":
+        stats["success_count"] += 1
+        if updated.get("lifecycle_state") == "draft":
+            updated["lifecycle_state"] = "tested"
+            stats["tested_at"] = datetime.now(timezone.utc).isoformat()
+    elif normalized_outcome == "failed":
+        stats["failure_count"] += 1
+    updated["stats"] = stats
+    return save_procedure(storage, updated)
+
+
 def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[str] = None, lane: Optional[str] = None):
     procedure = get_procedure(storage, procedure_id)
     target_lane = normalize_lane(lane) or procedure.get("target_lane") or DEFAULT_PROCEDURE_LANE
@@ -207,6 +340,8 @@ def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[
             "lane": target_lane,
             "procedure_id": procedure["procedure_id"],
             "procedure_title": procedure.get("title"),
+            "procedure_lifecycle_state": procedure.get("lifecycle_state"),
+            "procedure_lineage_id": procedure.get("lineage_id"),
             "procedure_summary": procedure.get("summary"),
             "procedure_checklist": checklist,
             "procedure_repeatable": bool(procedure.get("repeatable", True)),

@@ -12,7 +12,9 @@
     "desktop:build": "tauri build --config src-tauri/tauri.conf.json",
     "desktop:install": "bash ./scripts/install_desktop_safe.sh",
     "desktop:build:alpha": "bash ./scripts/build_desktop_channel.sh alpha",
-    "desktop:build:stable": "bash ./scripts/build_desktop_channel.sh stable"
+    "desktop:build:stable": "bash ./scripts/build_desktop_channel.sh stable",
+    "desktop:update:setup:local": "bash ./scripts/setup_local_desktop_updates.sh",
+    "desktop:update:publish:local": "bash ./scripts/publish_local_desktop_update.sh alpha"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

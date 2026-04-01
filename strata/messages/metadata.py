@@ -46,6 +46,7 @@ def get_message_metadata(storage, message_id: str) -> Dict[str, Any]:
     merged.setdefault("action_required_reason", "")
     merged.setdefault("action_required_for", "")
     merged.setdefault("tags", [])
+    merged.setdefault("attachments", [])
     return merged
 
 

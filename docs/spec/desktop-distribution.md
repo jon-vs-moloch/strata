@@ -141,6 +141,35 @@ For internal packaged testing:
 - desktop installs track that channel
 - use the in-app updater panel to check, install, and restart cleanly after an update
 
+## Local Alpha Workflow
+
+For local packaged iteration on one machine, Strata should support a repo-local alpha channel.
+
+Recommended flow:
+
+1. Run `npm run desktop:update:setup:local`
+   - generates a local signing keypair if needed
+   - writes a repo-local desktop updater config
+   - starts a tiny localhost server for updater artifacts
+2. Install the desktop app once with the normal packaged flow
+3. Publish later changes with `npm run desktop:update:publish:local`
+   - builds a signed alpha update
+   - auto-bumps the packaged desktop version to the next patch release, for example `0.1.1`, then `0.1.2`
+   - writes it into the local channel directory
+   - makes it available to the already-installed desktop shell
+4. Pick the update up from inside the app
+   - bring the desktop app to the foreground or open `Settings`
+   - let the updater auto-check, or click `Check for updates`
+   - click `Install update`
+   - restart the app when prompted
+
+Important:
+- the installed app must already be on an updater-capable build; the very first install is still manual
+ - every publish intended for the updater path must advance the desktop version; the local alpha publish path should do this automatically with a fresh prerelease version
+- during active alpha-branch iteration, any desktop-visible change that should reach the packaged app should be followed by a local alpha publish rather than relying on manual rebuild/reinstall
+
+This does not replace `desktop:dev` for fast UI work, but it should remove the need to manually reinstall a packaged app for every internal alpha delta.
+
 ## Future Extension
 
 - Allow runtime channel overrides for canary builds.

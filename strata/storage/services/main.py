@@ -14,7 +14,7 @@ _DB_URL = os.getenv("DATABASE_URL", "sqlite:///strata/runtime/strata.db")
 _engine_kwargs = {}
 if _DB_URL.startswith("sqlite"):
     _engine_kwargs["connect_args"] = {
-        "timeout": 30,
+        "timeout": 2,
         "check_same_thread": False,
     }
 _engine = create_engine(_DB_URL, **_engine_kwargs)
@@ -27,7 +27,7 @@ if _DB_URL.startswith("sqlite"):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA busy_timeout=2000")
         cursor.close()
 
 _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)

@@ -185,6 +185,45 @@ def test_root_procedure_task_expands_into_children_without_research_turn(monkeyp
     assert (task.task_id, TaskState.PUSHED.value) in notifications
 
 
+def test_startup_smoke_leaf_uses_deterministic_check_without_research_turn(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Procedure Step: Confirm the split runtime wiring is present",
+        description="Verify split runtime wiring.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={
+            "lane": "agent",
+            "procedure_id": "startup_sanity_check",
+            "procedure_title": "Startup Sanity Check",
+            "procedure_checklist_item": {
+                "id": "runtime_wiring",
+                "title": "Confirm the split runtime wiring is present",
+                "verification": "The system can identify separate API and worker launch surfaces in the codebase.",
+            },
+        },
+    )
+    storage.commit()
+
+    async def should_not_run(*_args, **_kwargs):
+        raise AssertionError("startup smoke leaf should resolve deterministically before a research turn")
+
+    monkeypatch.setattr(attempt_runner, "_run_research", should_not_run)
+
+    success, error, attempt = __import__("asyncio").run(
+        attempt_runner.run_attempt(task, storage, DummyModel(), _noop_notify, _noop_enqueue)
+    )
+
+    assert success is True
+    assert error is None
+    persisted_attempt = storage.attempts.get_by_id(attempt.attempt_id)
+    assert persisted_attempt.outcome == AttemptOutcome.SUCCEEDED
+    assert persisted_attempt.artifacts["deterministic_check"]["item_id"] == "runtime_wiring"
+    updated_task = storage.tasks.get_by_id(task.task_id)
+    assert updated_task.state == TaskState.COMPLETE
+
+
 def test_serial_dependency_handoff_is_injected_before_run(monkeypatch):
     storage = make_storage()
     parent = storage.tasks.create(

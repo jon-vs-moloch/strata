@@ -130,6 +130,37 @@ def test_enqueue_update_task_supports_maintenance_operations(tmp_path, monkeypat
     assert task.constraints["related_knowledge_slugs"] == ["system-constitution"]
 
 
+def test_enqueue_update_task_dedupes_existing_open_refresh(tmp_path, monkeypatch):
+    monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
+    storage = DummyStorage()
+    store = knowledge_pages.KnowledgePageStore(storage)
+
+    first = store.enqueue_update_task(
+        slug="project-spec",
+        reason="first refresh reason",
+        target_scope="codebase",
+        operation="knowledge_refresh",
+        evidence=["first hint"],
+        related_slugs=["constitution"],
+    )
+    storage.commit()
+
+    second = store.enqueue_update_task(
+        slug="project-spec",
+        reason="second refresh reason",
+        target_scope="codebase",
+        operation="knowledge_refresh",
+        evidence=["second hint"],
+        related_slugs=["system-substrates"],
+    )
+    storage.commit()
+
+    assert second.task_id == first.task_id
+    assert second.constraints["reason"] == "second refresh reason"
+    assert second.constraints["evidence_hints"] == ["first hint", "second hint"]
+    assert second.constraints["related_knowledge_slugs"] == ["constitution", "system-substrates"]
+
+
 def test_user_access_respects_visibility_and_redaction(tmp_path, monkeypatch):
     monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
     storage = DummyStorage()

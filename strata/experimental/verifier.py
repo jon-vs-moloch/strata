@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import asyncio
 from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
@@ -269,8 +270,18 @@ def _normalize_verifier_result(parsed: Dict[str, Any], *, verification_kind: str
     }
 
 
-async def verify_task_output(storage, *, task: TaskModel, attempt: AttemptModel, model_adapter, context) -> Optional[Dict[str, Any]]:
+async def verify_task_output(
+    storage,
+    *,
+    task: TaskModel,
+    attempt: AttemptModel,
+    model_adapter,
+    context,
+    progress_fn=None,
+) -> Optional[Dict[str, Any]]:
     mode = str(getattr(context, "mode", infer_lane_from_task(task) or "unknown") or "unknown").strip().lower()
+    if progress_fn:
+        progress_fn(step="verification", label="Preparing verifier", detail=str(task.title or task.task_id), progress_label="prepare verifier")
     summary = _trim_summary_for_verifier(build_task_trace_summary(storage, task_id=task.task_id, message_limit=6))
     artifact = await verify_artifact(
         storage,
@@ -280,6 +291,7 @@ async def verify_task_output(storage, *, task: TaskModel, attempt: AttemptModel,
         summary=summary,
         task=task,
         attempt=attempt,
+        progress_fn=progress_fn,
     )
     return artifact
 
@@ -296,6 +308,7 @@ async def verify_artifact(
     task: Optional[TaskModel] = None,
     attempt: Optional[AttemptModel] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    progress_fn=None,
 ) -> Optional[Dict[str, Any]]:
     normalized_mode = str(mode or "unknown").strip().lower() or "unknown"
     policy = select_verification_policy(storage, mode=normalized_mode)
@@ -341,6 +354,13 @@ async def verify_artifact(
             "residual_risk": ["The artifact was not reviewed by a verifier model."],
         }
     else:
+        if progress_fn:
+            progress_fn(
+                step="verification",
+                label="Running verifier model",
+                detail=str(getattr(task, "title", None) or getattr(attempt, "attempt_id", None) or artifact_kind),
+                progress_label="verifier model",
+            )
         prompt = f"""
 You are Strata's lightweight verifier.
 Given the artifact context and the attached evidence, decide whether the thing that just happened is good and correct.
@@ -369,7 +389,18 @@ Verification policy:
 Verification summary:
 {json.dumps(summary_payload, indent=2)}
 """.strip()
-        response = await model_adapter.chat([{"role": "user", "content": prompt}], temperature=0.0)
+        try:
+            response = await asyncio.wait_for(
+                model_adapter.chat([{"role": "user", "content": prompt}], temperature=0.0),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            response = {
+                "content": "",
+                "status": "error",
+                "message": "Verifier model timed out after 90s",
+                "usage": {},
+            }
         raw_content = response.get("content", "")
         try:
             parsed = model_adapter.extract_structured_object(raw_content)

@@ -10,6 +10,7 @@ from strata.orchestrator.background import (
     ensure_blocked_weak_task_review,
     resolution_from_plan_review,
 )
+from strata.schemas.core import AttemptResolutionSchema
 from strata.orchestrator.worker.idle_policy import run_idle_tasks
 from strata.orchestrator.worker.attempt_runner import _run_decomposition
 from strata.procedures.registry import queue_procedure
@@ -470,6 +471,74 @@ def test_preflight_lane_model_uses_local_catalog_for_local_endpoints(monkeypatch
     assert calls == ["http://127.0.0.1:1234/v1/models"]
 
 
+def test_run_task_cycle_returns_immediately_after_decompose_handoff(monkeypatch):
+    storage_factory = make_storage_factory()
+    storage = storage_factory()
+    task = storage.tasks.create(
+        title="Smoke child",
+        description="Confirm the core spec files are present.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    task_id = task.task_id
+    storage.close()
+
+    worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
+
+    async def fail_attempt(*_args, **_kwargs):
+        storage = _args[1]
+        task = _args[0]
+        attempt = storage.attempts.create(task_id=task.task_id)
+        storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.FAILED, reason="boom")
+        storage.commit()
+        return False, RuntimeError("boom"), attempt
+
+    async def fake_determine_resolution(*_args, **_kwargs):
+        return AttemptResolutionSchema(reasoning="decompose it", resolution="decompose", new_subtasks=[])
+
+    async def fake_apply_resolution(task, _resolution, _error, storage, enqueue_fn):
+        child = storage.tasks.create(
+            title="Recovery child",
+            description="child",
+            session_id=task.session_id,
+            parent_task_id=task.task_id,
+            state=TaskState.PENDING,
+            constraints={"lane": "agent"},
+        )
+        task.active_child_ids = [child.task_id]
+        task.state = TaskState.PUSHED
+        storage.commit()
+        await enqueue_fn(child.task_id)
+
+    async def should_not_verify(*_args, **_kwargs):
+        raise AssertionError("verification should be skipped after decompose handoff")
+
+    async def should_not_review(*_args, **_kwargs):
+        raise AssertionError("review should be skipped after decompose handoff")
+
+    monkeypatch.setattr("strata.orchestrator.background.run_attempt", fail_attempt)
+    monkeypatch.setattr("strata.orchestrator.background.determine_resolution", fake_determine_resolution)
+    monkeypatch.setattr("strata.orchestrator.background.apply_resolution", fake_apply_resolution)
+    monkeypatch.setattr("strata.orchestrator.background.verify_task_output", should_not_verify)
+    monkeypatch.setattr("strata.orchestrator.background.generate_plan_review", should_not_review)
+
+    asyncio.run(worker._run_task_cycle(task_id, lane="agent"))
+
+    reloaded = storage_factory()
+    try:
+        parent = reloaded.tasks.get_by_id(task_id)
+        assert parent is not None
+        assert parent.state == TaskState.PUSHED
+        assert list(parent.active_child_ids or [])
+        queued = list(worker._lane_queue("agent")._queue)
+        assert queued
+    finally:
+        reloaded.close()
+
+
 def test_run_idle_tasks_seeds_startup_smoke_before_onboarding(monkeypatch):
     storage_factory = make_storage_factory()
     queue = asyncio.Queue()
@@ -729,14 +798,18 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
     asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
 
     created = [child for child in storage.session.query(TaskModel).all() if child.parent_task_id == decomp_task.task_id]
-    assert len(created) == 3
+    assert len(created) == 5
     by_title = {child.title: child for child in created}
-    inspect_task = by_title["Inspect sources for Confirm local/cloud and quiet-hardware preferences"]
+    inspect_task = by_title["Inspect .knowledge/specs/project_spec.md for Confirm local/cloud and quiet-hardware preferences"]
+    second_inspect = by_title["Inspect strata/api/main.py for Confirm local/cloud and quiet-hardware preferences"]
+    third_inspect = by_title["Inspect strata/models/providers.py for Confirm local/cloud and quiet-hardware preferences"]
     decide_task = by_title["Decide status for Confirm local/cloud and quiet-hardware preferences"]
     cash_out_task = by_title["Cash out Confirm local/cloud and quiet-hardware preferences"]
 
     assert all(child.task_id in [task_id for task_id, _ in queued] for child in created)
     assert inspect_task in decide_task.dependencies
+    assert second_inspect in decide_task.dependencies
+    assert third_inspect in decide_task.dependencies
     assert decide_task in cash_out_task.dependencies
     assert decide_task.constraints.get("disallow_broad_repo_scan") is True
     assert "strata/api/main.py" in list(decide_task.constraints.get("preferred_start_paths") or [])
@@ -744,6 +817,7 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
     assert handoff.get("tool_call", {}).get("name") == "list_directory"
     assert "runtime posture files directly" in str(handoff.get("next_step_hint") or "")
     assert handoff.get("avoid_repeating_first_tool", {}).get("name") == "list_directory"
+    assert inspect_task.constraints.get("inspect_target_path") == ".knowledge/specs/project_spec.md"
     assert decomp_task.state == TaskState.PUSHED
     assert sorted(decomp_task.active_child_ids) == sorted(child.task_id for child in created)
     assert all(front is True for _, front in queued)

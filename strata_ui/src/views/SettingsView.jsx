@@ -25,6 +25,24 @@ const isDesktopRuntime = () =>
   typeof window !== 'undefined' &&
   Object.prototype.hasOwnProperty.call(window, '__TAURI_INTERNALS__');
 
+const compareSemver = (left, right) => {
+  const normalize = (value) => String(value || '')
+    .trim()
+    .split('-')[0]
+    .split('+')[0]
+    .split('.')
+    .map((part) => Number.parseInt(part, 10) || 0);
+
+  const a = normalize(left);
+  const b = normalize(right);
+  const length = Math.max(a.length, b.length, 3);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (a[i] || 0) - (b[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+};
+
 export default function SettingsView({ onResetDatabase, apiUrl, currentScope = 'home' }) {
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -36,15 +54,48 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
   const [testingMode, setTestingMode] = useState(false);
   const [replayPendingOnStartup, setReplayPendingOnStartup] = useState(false);
   const [heavyReflectionMode, setHeavyReflectionMode] = useState(false);
+  const [throttleMode, setThrottleMode] = useState('quiet');
+  const [autoSwapLocalMissing, setAutoSwapLocalMissing] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
   const [registryConfig, setRegistryConfig] = useState({ trainer: [], agent: [] });
   const [registryPresets, setRegistryPresets] = useState({ trainer: {}, agent: {} });
+  const [registryCatalog, setRegistryCatalog] = useState({ trainer: { endpoints: [] }, agent: { endpoints: [] } });
   const [savingRegistry, setSavingRegistry] = useState(false);
   const [desktopUpdateStatus, setDesktopUpdateStatus] = useState(null);
+  const [channelManifestStatus, setChannelManifestStatus] = useState(null);
   const [checkingDesktopUpdate, setCheckingDesktopUpdate] = useState(false);
   const [installingDesktopUpdate, setInstallingDesktopUpdate] = useState(false);
   const [restartingDesktop, setRestartingDesktop] = useState(false);
   const [desktopUpdateCheckedAt, setDesktopUpdateCheckedAt] = useState(null);
+  const [purgeSelection, setPurgeSelection] = useState({
+    clear_queue: true,
+    clear_loaded_context: true,
+  });
+  const [purgingEphemera, setPurgingEphemera] = useState(false);
+
+  const getPoolConfig = useCallback((pool) => {
+    const raw = registryConfig?.[pool];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      return {
+        allow_cloud: raw.allow_cloud ?? true,
+        allow_local: raw.allow_local ?? true,
+        preferred_transport: raw.preferred_transport ?? null,
+        endpoints: Array.isArray(raw.endpoints) ? raw.endpoints : [],
+      };
+    }
+    const legacyEndpoints = Array.isArray(raw) ? raw : [];
+    return {
+      allow_cloud: pool === 'trainer',
+      allow_local: pool === 'agent',
+      preferred_transport: pool === 'trainer' ? 'cloud' : 'local',
+      endpoints: legacyEndpoints,
+    };
+  }, [registryConfig]);
+
+  const getPoolEndpoint = useCallback((pool, index = 0) => {
+    const endpoints = getPoolConfig(pool).endpoints;
+    return endpoints[index] || {};
+  }, [getPoolConfig]);
 
   const loadDesktopUpdateStatus = useCallback(async () => {
     if (!isDesktopRuntime()) {
@@ -57,6 +108,24 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       const { invoke } = await import('@tauri-apps/api/core');
       const status = await invoke('desktop_update_status');
       setDesktopUpdateStatus(status);
+      if (status?.endpoint) {
+        try {
+          const manifestResponse = await axios.get(status.endpoint, { timeout: 5000 });
+          setChannelManifestStatus({
+            ok: true,
+            version: manifestResponse?.data?.version || null,
+            published_at: manifestResponse?.data?.pub_date || null,
+            notes: manifestResponse?.data?.notes || null,
+          });
+        } catch (manifestError) {
+          setChannelManifestStatus({
+            ok: false,
+            error: manifestError?.message || 'Failed to load channel manifest.',
+          });
+        }
+      } else {
+        setChannelManifestStatus(null);
+      }
       setDesktopUpdateCheckedAt(new Date().toISOString());
     } catch (e) {
       console.error('Failed to load desktop updater status', e);
@@ -65,6 +134,7 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
         configured: false,
         error: e?.message || 'Failed to load desktop updater status.',
       });
+      setChannelManifestStatus(null);
       setDesktopUpdateCheckedAt(new Date().toISOString());
     } finally {
       setCheckingDesktopUpdate(false);
@@ -75,11 +145,20 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     try {
       const res = await axios.get(`${apiUrl}/admin/settings`);
       if (res.data.status === 'ok') {
+        const policy = res?.data?.settings?.inference_throttle_policy || {};
+        const comfort = policy.operator_comfort || {};
         setMaxSyncIters(res.data.settings.max_sync_tool_iterations || 3);
         setAutomaticTaskGeneration(Boolean(res.data.settings.automatic_task_generation));
         setTestingMode(Boolean(res.data.settings.testing_mode));
         setReplayPendingOnStartup(Boolean(res.data.settings.replay_pending_tasks_on_startup));
         setHeavyReflectionMode(Boolean(res.data.settings.heavy_reflection_mode));
+        setThrottleMode(
+          String(policy.throttle_mode || 'hard').trim().toLowerCase() === 'greedy'
+            || String(comfort.profile || 'quiet').trim().toLowerCase() === 'aggressive'
+            ? 'turbo'
+            : 'quiet'
+        );
+        setAutoSwapLocalMissing(Boolean(res?.data?.settings?.model_catalog_policy?.auto_swap_local_missing ?? true));
       }
     } catch (e) {
       console.error('Failed to load settings', e);
@@ -92,6 +171,17 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       setRegistryConfig(res.data.config);
     } catch (e) {
       console.error('Failed to load registry', e);
+    }
+  }, [apiUrl]);
+
+  const loadRegistryCatalog = useCallback(async () => {
+    try {
+      const res = await axios.get(`${apiUrl}/admin/registry/catalog`);
+      if (res?.data?.status === 'ok') {
+        setRegistryCatalog(res.data.catalog || { trainer: { endpoints: [] }, agent: { endpoints: [] } });
+      }
+    } catch (e) {
+      console.error('Failed to load registry catalog', e);
     }
   }, [apiUrl]);
 
@@ -109,9 +199,10 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
   useEffect(() => {
     void loadSettings();
     void loadRegistry();
+    void loadRegistryCatalog();
     void loadRegistryPresets();
     void loadDesktopUpdateStatus();
-  }, [loadDesktopUpdateStatus, loadRegistry, loadRegistryPresets, loadSettings]);
+  }, [loadDesktopUpdateStatus, loadRegistry, loadRegistryCatalog, loadRegistryPresets, loadSettings]);
 
   useEffect(() => {
     if (!isDesktopRuntime()) return undefined;
@@ -131,17 +222,24 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
   }, [loadDesktopUpdateStatus]);
 
   const handleUpdateRegistry = async (pool, field, value, index = 0) => {
-    const next = { ...registryConfig };
-    if (!next[pool]) next[pool] = [{}];
-    if (!next[pool][index]) next[pool][index] = {};
-    next[pool][index][field] = value;
-    if (pool === 'trainer') next[pool][index].transport = 'cloud';
-    if (pool === 'agent') next[pool][index].transport = 'local';
-    if (!next[pool][index].provider) next[pool][index].provider = pool === 'trainer' ? 'openrouter' : 'lmstudio';
+    const poolConfig = getPoolConfig(pool);
+    const endpoints = [...poolConfig.endpoints];
+    if (!endpoints[index]) endpoints[index] = {};
+    endpoints[index] = { ...endpoints[index], [field]: value };
+    if (!endpoints[index].transport) endpoints[index].transport = pool === 'trainer' ? 'cloud' : 'local';
+    if (!endpoints[index].provider) endpoints[index].provider = pool === 'trainer' ? 'openrouter' : 'lmstudio';
+    const next = {
+      ...registryConfig,
+      [pool]: {
+        ...poolConfig,
+        endpoints,
+      },
+    };
     setRegistryConfig({ ...next });
     setSavingRegistry(true);
     try {
       await axios.post(`${apiUrl}/admin/registry`, next);
+      void loadRegistryCatalog();
     } catch (e) {
       console.error('Failed to save registry', e);
     } finally {
@@ -152,11 +250,18 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
   const applyPreset = async (pool, presetKey) => {
     const preset = registryPresets?.[pool]?.[presetKey];
     if (!preset) return;
-    const next = { ...registryConfig, [pool]: [{ ...preset }] };
+    const next = {
+      ...registryConfig,
+      [pool]: {
+        ...getPoolConfig(pool),
+        endpoints: [{ ...preset }],
+      },
+    };
     setRegistryConfig(next);
     setSavingRegistry(true);
     try {
       await axios.post(`${apiUrl}/admin/registry`, next);
+      void loadRegistryCatalog();
     } catch (e) {
       console.error('Failed to apply preset', e);
     } finally {
@@ -171,6 +276,10 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       testing_mode: overrides.testing_mode ?? testingMode,
       replay_pending_tasks_on_startup: overrides.replay_pending_tasks_on_startup ?? replayPendingOnStartup,
       heavy_reflection_mode: overrides.heavy_reflection_mode ?? heavyReflectionMode,
+      model_catalog_policy: {
+        auto_swap_local_missing: overrides.auto_swap_local_missing ?? autoSwapLocalMissing,
+      },
+      ...(overrides.inference_throttle_policy ? { inference_throttle_policy: overrides.inference_throttle_policy } : {}),
     };
     setSavingSettings(true);
     try {
@@ -179,6 +288,44 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       console.error('Failed to save settings', e);
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const updatePoolSetting = async (pool, field, value) => {
+    const poolConfig = getPoolConfig(pool);
+    const next = {
+      ...registryConfig,
+      [pool]: {
+        ...poolConfig,
+        [field]: value,
+      },
+    };
+    setRegistryConfig(next);
+    setSavingRegistry(true);
+    try {
+      await axios.post(`${apiUrl}/admin/registry`, next);
+      void loadRegistryCatalog();
+    } catch (e) {
+      console.error('Failed to update pool settings', e);
+    } finally {
+      setSavingRegistry(false);
+    }
+  };
+
+  const handlePurgeEphemera = async () => {
+    setPurgingEphemera(true);
+    try {
+      if (purgeSelection.clear_queue) {
+        await axios.post(`${apiUrl}/admin/worker/clear_queue`);
+      }
+      if (purgeSelection.clear_loaded_context) {
+        await axios.post(`${apiUrl}/admin/context/clear`);
+      }
+      await Promise.all([loadRegistryCatalog(), loadSettings()]);
+    } catch (e) {
+      console.error('Failed to purge ephemeral data', e);
+    } finally {
+      setPurgingEphemera(false);
     }
   };
 
@@ -269,10 +416,16 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     display: 'flex', flexDirection: 'column', gap: '8px'
   };
   const visiblePools = currentScope === 'home' ? ['trainer', 'agent'] : [currentScope];
+  const effectiveLatestVersion = channelManifestStatus?.version || desktopUpdateStatus?.latest_version;
+  const desktopLatestAhead = effectiveLatestVersion
+    && desktopUpdateStatus?.current_version
+    && compareSemver(effectiveLatestVersion, desktopUpdateStatus.current_version) > 0;
   const desktopUpdateSummary = desktopUpdateStatus?.restart_required
     ? `Restart ready | update ${desktopUpdateStatus.installed_version || desktopUpdateStatus.latest_version || ''}`.trim()
     : desktopUpdateStatus?.update_available
       ? `Update available: ${desktopUpdateStatus.latest_version || 'new version'}`
+      : desktopLatestAhead
+        ? `Channel latest is ${effectiveLatestVersion}, but the desktop still reports current at ${desktopUpdateStatus.current_version}.`
       : desktopUpdateStatus?.configured
         ? 'Desktop is current on this channel.'
         : desktopUpdateStatus?.error || 'Desktop updater is not configured yet.';
@@ -386,9 +539,19 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
                 Last checked: {new Date(desktopUpdateCheckedAt).toLocaleString()}
               </div>
             )}
-            {desktopUpdateStatus?.published_at && (
+            {(channelManifestStatus?.published_at || desktopUpdateStatus?.published_at) && (
               <div style={{ fontSize: '11px', color: '#6d7387' }}>
-                Published: {desktopUpdateStatus.published_at}
+                Published: {channelManifestStatus?.published_at || desktopUpdateStatus?.published_at}
+              </div>
+            )}
+            {effectiveLatestVersion && (
+              <div style={{ fontSize: '11px', color: desktopLatestAhead ? '#ffb020' : '#6d7387' }}>
+                Channel latest: {effectiveLatestVersion}
+              </div>
+            )}
+            {channelManifestStatus?.error && (
+              <div style={{ fontSize: '11px', color: '#ffb020', lineHeight: 1.5 }}>
+                Channel manifest check failed in the UI: {channelManifestStatus.error}
               </div>
             )}
             {desktopUpdateStatus?.installed_version && (
@@ -408,7 +571,7 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
             )}
             {!desktopUpdateStatus?.configured && (
               <div style={{ fontSize: '11px', color: '#6d7387', lineHeight: 1.5 }}>
-                Configure `STRATA_DESKTOP_UPDATE_ENDPOINT`, `STRATA_DESKTOP_UPDATE_PUBKEY`, and `TAURI_SIGNING_PRIVATE_KEY`, then run `npm run desktop:build:alpha` to publish a signed alpha build.
+                For local alpha updates, run `npm run desktop:update:setup:local` once, then `npm run desktop:update:publish:local` whenever you want to publish a new signed desktop build to the local channel.
               </div>
             )}
           </div>
@@ -456,28 +619,100 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {visiblePools.includes('trainer') && (
             <div style={inputGroupStyle}>
-              <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL (CLOUD)</div>
-              {registryConfig.trainer?.[0]?.provider && API_KEY_LINKS[registryConfig.trainer[0].provider] && (
-                <a href={API_KEY_LINKS[registryConfig.trainer[0].provider]} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#bca9ff', textDecoration: 'none' }}>
-                  Open {registryConfig.trainer[0].provider} API key page
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL</div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#cfc3ff', fontSize: '11px' }}>
+                  <input type="checkbox" checked={Boolean(getPoolConfig('trainer').allow_cloud)} onChange={(e) => void updatePoolSetting('trainer', 'allow_cloud', e.target.checked)} />
+                  Allow cloud
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#cfc3ff', fontSize: '11px' }}>
+                  <input type="checkbox" checked={Boolean(getPoolConfig('trainer').allow_local)} onChange={(e) => void updatePoolSetting('trainer', 'allow_local', e.target.checked)} />
+                  Allow local
+                </label>
+                <select value={getPoolConfig('trainer').preferred_transport || ''} onChange={(e) => void updatePoolSetting('trainer', 'preferred_transport', e.target.value || null)} style={{ ...infoValue, maxWidth: '180px' }}>
+                  <option value="">Auto transport</option>
+                  <option value="cloud">Prefer cloud</option>
+                  <option value="local">Prefer local</option>
+                </select>
+              </div>
+              {getPoolEndpoint('trainer').provider && API_KEY_LINKS[getPoolEndpoint('trainer').provider] && (
+                <a href={API_KEY_LINKS[getPoolEndpoint('trainer').provider]} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#bca9ff', textDecoration: 'none' }}>
+                  Open {getPoolEndpoint('trainer').provider} API key page
                 </a>
               )}
-              <input style={infoValue} placeholder="Model (e.g. anthropic/claude-3.5-sonnet)" value={registryConfig.trainer?.[0]?.model || ''} onChange={(e) => handleUpdateRegistry('trainer', 'model', e.target.value)} />
-              <input style={infoValue} placeholder="Endpoint URL (e.g. https://openrouter.ai/api/v1/chat/completions)" value={registryConfig.trainer?.[0]?.endpoint_url || ''} onChange={(e) => handleUpdateRegistry('trainer', 'endpoint_url', e.target.value)} />
-              <input style={infoValue} placeholder="API Key Env (e.g. OPENROUTER_API_KEY)" value={registryConfig.trainer?.[0]?.api_key_env || ''} onChange={(e) => handleUpdateRegistry('trainer', 'api_key_env', e.target.value)} />
-              <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={registryConfig.trainer?.[0]?.requests_per_minute || ''} onChange={(e) => handleUpdateRegistry('trainer', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={registryConfig.trainer?.[0]?.max_concurrency || ''} onChange={(e) => handleUpdateRegistry('trainer', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={registryConfig.trainer?.[0]?.min_interval_ms || ''} onChange={(e) => handleUpdateRegistry('trainer', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              <input style={infoValue} placeholder="Provider (e.g. google, openrouter, lmstudio)" value={getPoolEndpoint('trainer').provider || ''} onChange={(e) => handleUpdateRegistry('trainer', 'provider', e.target.value)} />
+              <select style={infoValue} value={getPoolEndpoint('trainer').transport || 'cloud'} onChange={(e) => handleUpdateRegistry('trainer', 'transport', e.target.value)}>
+                <option value="cloud">Cloud</option>
+                <option value="local">Local</option>
+              </select>
+              <input style={infoValue} placeholder="Model (e.g. anthropic/claude-3.5-sonnet)" value={getPoolEndpoint('trainer').model || ''} onChange={(e) => handleUpdateRegistry('trainer', 'model', e.target.value)} />
+              <input style={infoValue} placeholder="Endpoint URL (e.g. https://openrouter.ai/api/v1/chat/completions)" value={getPoolEndpoint('trainer').endpoint_url || ''} onChange={(e) => handleUpdateRegistry('trainer', 'endpoint_url', e.target.value)} />
+              <input style={infoValue} placeholder="API Key Env (e.g. OPENROUTER_API_KEY)" value={getPoolEndpoint('trainer').api_key_env || ''} onChange={(e) => handleUpdateRegistry('trainer', 'api_key_env', e.target.value)} />
+              <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={getPoolEndpoint('trainer').requests_per_minute || ''} onChange={(e) => handleUpdateRegistry('trainer', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={getPoolEndpoint('trainer').max_concurrency || ''} onChange={(e) => handleUpdateRegistry('trainer', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={getPoolEndpoint('trainer').min_interval_ms || ''} onChange={(e) => handleUpdateRegistry('trainer', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              {Array.isArray(registryCatalog.trainer?.endpoints) && registryCatalog.trainer.endpoints[0]?.transport === 'local' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div style={{ fontSize: '11px', color: '#8d8ea1' }}>
+                    Local catalog: {registryCatalog.trainer.endpoints[0]?.status === 'ok' ? `${(registryCatalog.trainer.endpoints[0]?.models || []).length} models detected` : (registryCatalog.trainer.endpoints[0]?.error || registryCatalog.trainer.endpoints[0]?.status || 'unknown')}
+                  </div>
+                  {registryCatalog.trainer.endpoints[0]?.status === 'ok' && registryCatalog.trainer.endpoints[0]?.configured_model_present === false && autoSwapLocalMissing ? (
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {(registryCatalog.trainer.endpoints[0]?.models || []).slice(0, 4).map((modelId) => (
+                        <button key={modelId} type="button" onClick={() => handleUpdateRegistry('trainer', 'model', modelId)} style={{ background: 'rgba(214,173,113,0.14)', border: '1px solid rgba(214,173,113,0.24)', borderRadius: '999px', color: '#f3ddbf', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                          Switch to {modelId}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           )}
           {visiblePools.includes('agent') && (
             <div style={inputGroupStyle}>
-              <div style={{ fontSize: '11px', fontWeight: 700, color: '#00d9ff', marginBottom: '4px', letterSpacing: '0.05em' }}>WEAK POOL (LOCAL)</div>
-              <input style={infoValue} placeholder="Model (e.g. qwen3.5-9b-distilled)" value={registryConfig.agent?.[0]?.model || ''} onChange={(e) => handleUpdateRegistry('agent', 'model', e.target.value)} />
-              <input style={infoValue} placeholder="Endpoint URL (e.g. http://127.0.0.1:1234/v1/chat/completions)" value={registryConfig.agent?.[0]?.endpoint_url || ''} onChange={(e) => handleUpdateRegistry('agent', 'endpoint_url', e.target.value)} />
-              <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={registryConfig.agent?.[0]?.requests_per_minute || ''} onChange={(e) => handleUpdateRegistry('agent', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={registryConfig.agent?.[0]?.max_concurrency || ''} onChange={(e) => handleUpdateRegistry('agent', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={registryConfig.agent?.[0]?.min_interval_ms || ''} onChange={(e) => handleUpdateRegistry('agent', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#00d9ff', marginBottom: '4px', letterSpacing: '0.05em' }}>WEAK POOL</div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#9fefff', fontSize: '11px' }}>
+                  <input type="checkbox" checked={Boolean(getPoolConfig('agent').allow_cloud)} onChange={(e) => void updatePoolSetting('agent', 'allow_cloud', e.target.checked)} />
+                  Allow cloud
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#9fefff', fontSize: '11px' }}>
+                  <input type="checkbox" checked={Boolean(getPoolConfig('agent').allow_local)} onChange={(e) => void updatePoolSetting('agent', 'allow_local', e.target.checked)} />
+                  Allow local
+                </label>
+                <select value={getPoolConfig('agent').preferred_transport || ''} onChange={(e) => void updatePoolSetting('agent', 'preferred_transport', e.target.value || null)} style={{ ...infoValue, maxWidth: '180px' }}>
+                  <option value="">Auto transport</option>
+                  <option value="local">Prefer local</option>
+                  <option value="cloud">Prefer cloud</option>
+                </select>
+              </div>
+              <input style={infoValue} placeholder="Provider (e.g. lmstudio, ollama, openrouter)" value={getPoolEndpoint('agent').provider || ''} onChange={(e) => handleUpdateRegistry('agent', 'provider', e.target.value)} />
+              <select style={infoValue} value={getPoolEndpoint('agent').transport || 'local'} onChange={(e) => handleUpdateRegistry('agent', 'transport', e.target.value)}>
+                <option value="local">Local</option>
+                <option value="cloud">Cloud</option>
+              </select>
+              <input style={infoValue} placeholder="Model (e.g. qwen3.5-9b-distilled)" value={getPoolEndpoint('agent').model || ''} onChange={(e) => handleUpdateRegistry('agent', 'model', e.target.value)} />
+              <input style={infoValue} placeholder="Endpoint URL (e.g. http://127.0.0.1:1234/v1/chat/completions)" value={getPoolEndpoint('agent').endpoint_url || ''} onChange={(e) => handleUpdateRegistry('agent', 'endpoint_url', e.target.value)} />
+              <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={getPoolEndpoint('agent').requests_per_minute || ''} onChange={(e) => handleUpdateRegistry('agent', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={getPoolEndpoint('agent').max_concurrency || ''} onChange={(e) => handleUpdateRegistry('agent', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={getPoolEndpoint('agent').min_interval_ms || ''} onChange={(e) => handleUpdateRegistry('agent', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
+              {Array.isArray(registryCatalog.agent?.endpoints) && registryCatalog.agent.endpoints[0]?.transport === 'local' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div style={{ fontSize: '11px', color: '#8d8ea1' }}>
+                    Local catalog: {registryCatalog.agent.endpoints[0]?.status === 'ok' ? `${(registryCatalog.agent.endpoints[0]?.models || []).length} models detected` : (registryCatalog.agent.endpoints[0]?.error || registryCatalog.agent.endpoints[0]?.status || 'unknown')}
+                  </div>
+                  {registryCatalog.agent.endpoints[0]?.status === 'ok' && registryCatalog.agent.endpoints[0]?.configured_model_present === false && autoSwapLocalMissing ? (
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {(registryCatalog.agent.endpoints[0]?.models || []).slice(0, 4).map((modelId) => (
+                        <button key={modelId} type="button" onClick={() => handleUpdateRegistry('agent', 'model', modelId)} style={{ background: 'rgba(0,217,255,0.12)', border: '1px solid rgba(0,217,255,0.24)', borderRadius: '999px', color: '#b9f8ff', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                          Switch to {modelId}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           )}
         </div>
@@ -495,12 +730,75 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
         <div style={{ fontSize: '11px', color: '#555', marginTop: '6px' }}>
           Limits how many times the model can independently recurse tools on a single message.
         </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '16px' }}>
+          <div style={{ fontSize: '13px', color: '#ccc' }}>Throttle mode</div>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {[
+              {
+                id: 'quiet',
+                label: 'Quiet',
+                helper: 'Conservative local pacing and lower operator annoyance.',
+                payload: {
+                  inference_throttle_policy: {
+                    throttle_mode: 'hard',
+                    operator_comfort: {
+                      profile: 'quiet',
+                      ambiguity_bias: 'prefer_quiet',
+                      allow_annoying_if_explicit: false,
+                    },
+                  },
+                },
+              },
+              {
+                id: 'turbo',
+                label: 'Turbo',
+                helper: 'Greedier throughput and faster local turn-taking.',
+                payload: {
+                  inference_throttle_policy: {
+                    throttle_mode: 'greedy',
+                    operator_comfort: {
+                      profile: 'aggressive',
+                      ambiguity_bias: 'prefer_action',
+                      allow_annoying_if_explicit: true,
+                    },
+                  },
+                },
+              },
+            ].map((mode) => {
+              const active = throttleMode === mode.id;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => {
+                    setThrottleMode(mode.id);
+                    void persistSettings(mode.payload);
+                  }}
+                  style={{
+                    background: active ? 'rgba(214,173,113,0.14)' : 'rgba(255,255,255,0.04)',
+                    border: active ? '1px solid rgba(214,173,113,0.28)' : '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '12px',
+                    padding: '10px 12px',
+                    color: active ? '#f1ddbf' : '#d5d7e4',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    minWidth: '220px',
+                  }}
+                >
+                  <div style={{ fontSize: '12px', fontWeight: 700, marginBottom: '4px' }}>{mode.label}</div>
+                  <div style={{ fontSize: '11px', color: active ? '#d8c7a5' : '#7d8296', lineHeight: 1.5 }}>{mode.helper}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
           {[
             ['Automatically generate tasks', automaticTaskGeneration, setAutomaticTaskGeneration, 'automatic_task_generation', 'Lets the chat model spawn background research and implementation tasks on its own. Default is off for quieter testing.'],
             ['Testing mode', testingMode, setTestingMode, 'testing_mode', 'Suppresses autonomous idle task generation so you can run focused evaluations without extra noise.'],
             ['Replay pending backlog on startup', replayPendingOnStartup, setReplayPendingOnStartup, 'replay_pending_tasks_on_startup', 'Re-enqueues old pending tasks after a reboot. Leave this off unless you intentionally want to resume backlog work.'],
             ['Heavy reflection mode', heavyReflectionMode, setHeavyReflectionMode, 'heavy_reflection_mode', 'Makes the trainer lane seed larger bootstrap supervision batches when idle so overnight runs synthesize telemetry faster.'],
+            ['Auto-swap missing local models', autoSwapLocalMissing, setAutoSwapLocalMissing, 'auto_swap_local_missing', 'When a configured local model is missing from the endpoint catalog, surface quick-switch options to available local models.'],
           ].map(([label, checked, setter, field, helper]) => (
             <label key={field} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
               <input
@@ -509,7 +807,7 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
                 onChange={(e) => {
                   const next = e.target.checked;
                   setter(next);
-                  void persistSettings({ [field]: next });
+                  void persistSettings(field === 'auto_swap_local_missing' ? { auto_swap_local_missing: next } : { [field]: next });
                 }}
               />
               <span>
@@ -522,6 +820,30 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       </DashboardPanel>
 
       <DashboardPanel title="DANGER ZONE">
+        <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '14px' }}>
+          <div>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: '#edeeef', marginBottom: '4px' }}>Purge Ephemeral State</div>
+            <div style={{ fontSize: '12px', color: '#888' }}>Recommended defaults clear runtime churn while preserving durable knowledge, Procedures, and settings.</div>
+          </div>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+            <input type="checkbox" checked={purgeSelection.clear_queue} onChange={(e) => setPurgeSelection((prev) => ({ ...prev, clear_queue: e.target.checked }))} />
+            <span>Clear queued runtime work<div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>Best when the worker is stuck in old recovery churn.</div></span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', color: '#ccc', fontSize: '13px', cursor: 'pointer' }}>
+            <input type="checkbox" checked={purgeSelection.clear_loaded_context} onChange={(e) => setPurgeSelection((prev) => ({ ...prev, clear_loaded_context: e.target.checked }))} />
+            <span>Clear pinned persistent context<div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>Useful when stale context keeps steering the model into old branches.</div></span>
+          </label>
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              onClick={handlePurgeEphemera}
+              disabled={purgingEphemera || (!purgeSelection.clear_queue && !purgeSelection.clear_loaded_context)}
+              style={{ background: 'rgba(214,173,113,0.14)', border: '1px solid rgba(214,173,113,0.28)', borderRadius: '8px', padding: '8px 16px', color: '#f3ddbf', fontSize: '12px', fontWeight: 700, cursor: 'pointer' }}
+            >
+              {purgingEphemera ? 'Purging…' : 'Purge Selected'}
+            </button>
+          </div>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Database size={14} color="#ff4d4d" />
           <span style={{ fontSize: '11px', fontWeight: 700, color: '#ff4d4d', letterSpacing: '0.08em' }}>DANGER ZONE</span>

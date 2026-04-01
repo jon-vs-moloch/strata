@@ -14,6 +14,7 @@ import json
 import os
 from datetime import datetime
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -116,6 +117,69 @@ def register_runtime_admin_routes(
 
         registry._load_config(payload)
         return {"status": "ok"}
+
+    @app.get("/admin/registry/catalog")
+    async def get_registry_catalog():
+        import httpx
+        from strata.models.registry import registry
+
+        def _base_models_url(raw_url: str) -> str:
+            value = str(raw_url or "").strip()
+            if not value:
+                return ""
+            parsed = urlparse(value)
+            path = parsed.path or ""
+            if path.endswith("/chat/completions"):
+                path = path[: -len("/chat/completions")]
+            if not path.endswith("/models"):
+                if path.endswith("/v1"):
+                    path = f"{path}/models"
+                else:
+                    path = f"{path.rstrip('/')}/v1/models"
+            return parsed._replace(path=path, params="", query="", fragment="").geturl()
+
+        catalog: Dict[str, Any] = {}
+        async with httpx.AsyncClient() as client:
+            for pool_name, pool in (registry.pools or {}).items():
+                entries = []
+                for index, endpoint in enumerate(list(pool.endpoints or [])):
+                    models_url = _base_models_url(endpoint.endpoint_url or "")
+                    entry = {
+                        "index": index,
+                        "provider": endpoint.provider,
+                        "model": endpoint.model,
+                        "transport": endpoint.transport,
+                        "endpoint_url": endpoint.endpoint_url,
+                        "models_url": models_url,
+                    }
+                    if not models_url:
+                        entry["status"] = "missing_endpoint"
+                        entries.append(entry)
+                        continue
+                    try:
+                        resp = await client.get(models_url, timeout=5.0)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        models = [
+                            str(item.get("id") or item.get("name") or "").strip()
+                            for item in list(data.get("data") or [])
+                            if isinstance(item, dict)
+                        ]
+                        models = [item for item in models if item]
+                        entry["status"] = "ok"
+                        entry["models"] = models
+                        entry["configured_model_present"] = str(endpoint.model or "") in set(models)
+                    except Exception as exc:
+                        entry["status"] = "error"
+                        entry["error"] = str(exc)
+                    entries.append(entry)
+                catalog[pool_name] = {
+                    "allow_local": bool(getattr(pool, "allow_local", True)),
+                    "allow_cloud": bool(getattr(pool, "allow_cloud", True)),
+                    "preferred_transport": getattr(pool, "preferred_transport", None),
+                    "endpoints": entries,
+                }
+        return {"status": "ok", "catalog": catalog}
 
     @app.get("/admin/health")
     async def health_check():
@@ -282,6 +346,18 @@ def register_runtime_admin_routes(
     @app.post("/admin/context/scan")
     async def rescan_context_pressure(storage=Depends(get_storage)):
         return {"status": "ok", "scan": scan_codebase_context_pressure(storage, base_dir=base_dir)}
+
+    @app.post("/admin/context/clear")
+    async def clear_loaded_context(storage=Depends(get_storage)):
+        from strata.context.loaded_files import LOADED_CONTEXT_FILES_DESCRIPTION, LOADED_CONTEXT_FILES_KEY
+
+        storage.parameters.set_parameter(
+            LOADED_CONTEXT_FILES_KEY,
+            {"files": [], "budget_tokens": 3200},
+            description=LOADED_CONTEXT_FILES_DESCRIPTION,
+        )
+        storage.commit()
+        return {"status": "ok", "cleared": "loaded_context"}
 
     @app.get("/admin/logs")
     async def get_logs(limit: int = 50):
@@ -453,6 +529,11 @@ def register_runtime_admin_routes(
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         aborted = worker.stop_current(normalized_lane)
         return {"status": "stopped", "aborted": aborted, "lane": normalized_lane}
+
+    @app.post("/admin/worker/clear_queue")
+    async def clear_worker_queue():
+        cleared = worker.clear_queue()
+        return {"status": "ok", "cleared_queue": cleared}
 
     @app.post("/admin/tasks/{task_id}/pause")
     async def pause_task(task_id: str):

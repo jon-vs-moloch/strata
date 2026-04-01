@@ -5,9 +5,9 @@ import {
   Plus, Zap,
   MessageSquare, Send,
   Terminal, AlertCircle, X, Settings,
-  Activity, Trash2, LayoutDashboard,
-  Pause, Play, Square, Pencil,
-  BookOpen, Search, ThumbsUp, ThumbsDown, Heart, Reply, Sparkles
+  Activity, Trash2, LayoutDashboard, History,
+  Pause, Play, Square, Pencil, Paperclip,
+  BookOpen, Search, ThumbsUp, ThumbsDown, Heart, Reply, Sparkles, GitBranch, Wrench
 } from 'lucide-react';
 
 const MotionDiv = motion.div;
@@ -38,11 +38,24 @@ const CHAT_LANES = ['trainer', 'agent'];
 const defaultSessionIdForLane = (lane) => `${lane}:default`;
 const draftSessionIdForLane = (lane) => `${lane}:draft-${Date.now()}`;
 const isDraftSessionId = (sessionId) => typeof sessionId === 'string' && /^(trainer|agent):draft-\d+$/.test(sessionId);
+const isDesktopRuntime = () =>
+  typeof window !== 'undefined' &&
+  Object.prototype.hasOwnProperty.call(window, '__TAURI_INTERNALS__');
 const draftHasContent = (draft) => {
   if (!draft) return false;
   const title = String(draft.title || '').trim();
   const body = String(draft.draftMessage || '').trim();
-  return Boolean(body) || (Boolean(title) && title !== 'New Session');
+  const attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+  return Boolean(body) || attachments.length > 0 || (Boolean(title) && title !== 'New Session');
+};
+
+const persistedSessionHasContent = (session) => {
+  if (!session || typeof session !== 'object') return false;
+  if (Number(session.message_count || 0) > 0) return true;
+  if (session.first_message_at || session.last_message_at) return true;
+  const preview = String(session.last_message_preview || '').trim();
+  if (preview && preview.toLowerCase() !== 'no messages yet') return true;
+  return false;
 };
 
 const normalizeLaneKey = (value) => {
@@ -146,6 +159,43 @@ const normalizeRoutingSummary = (raw) => {
   };
 };
 
+const deriveThrottleMode = (settings) => {
+  const policy = settings && typeof settings === 'object'
+    ? (settings.inference_throttle_policy || {})
+    : {};
+  const comfort = policy && typeof policy === 'object'
+    ? (policy.operator_comfort || {})
+    : {};
+  const throttleMode = String(policy.throttle_mode || 'hard').trim().toLowerCase();
+  const comfortProfile = String(comfort.profile || 'quiet').trim().toLowerCase();
+  return throttleMode === 'greedy' || comfortProfile === 'aggressive' ? 'turbo' : 'quiet';
+};
+
+const buildThrottleSettingsPayload = (mode) => {
+  if (mode === 'turbo') {
+    return {
+      inference_throttle_policy: {
+        throttle_mode: 'greedy',
+        operator_comfort: {
+          profile: 'aggressive',
+          ambiguity_bias: 'prefer_action',
+          allow_annoying_if_explicit: true,
+        },
+      },
+    };
+  }
+  return {
+    inference_throttle_policy: {
+      throttle_mode: 'hard',
+      operator_comfort: {
+        profile: 'quiet',
+        ambiguity_bias: 'prefer_quiet',
+        allow_annoying_if_explicit: false,
+      },
+    },
+  };
+};
+
 const fallbackSessionTitle = (sessionId) => {
   const visibleSessionId = displaySessionId(sessionId);
   if (!visibleSessionId || visibleSessionId === 'default') return 'New Session';
@@ -205,6 +255,25 @@ const formatHeartbeatAge = (seconds) => {
   return `${Math.round(numeric / 3600)}h`;
 };
 
+const buildTaskTree = (sourceTasks = []) => {
+  const map = {};
+  sourceTasks.forEach((task) => {
+    map[task.id] = { ...task, children: [] };
+  });
+
+  const roots = [];
+  sourceTasks.forEach((task) => {
+    if (task.parent_id && map[task.parent_id] && task.parent_id !== task.id) {
+      map[task.parent_id].children.push(map[task.id]);
+    } else if (!task.parent_id || task.parent_id === task.id) {
+      roots.push(map[task.id]);
+    }
+  });
+
+  roots.sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
+  return roots;
+};
+
 const formatLaneHeartbeat = (detail) => {
   if (!detail) return 'no signal';
   if (detail.heartbeat_age_s == null) {
@@ -226,6 +295,51 @@ const formatMessageForDisplay = (content) => {
     body: normalized.slice(headingIndex + 1).trim(),
   };
 };
+
+const createDraftRecord = (sessionId, draftMessage = '', overrides = {}) => ({
+  session_id: sessionId,
+  title: 'New Session',
+  draft: true,
+  draftMessage,
+  unread_count: 0,
+  created_at: new Date().toISOString(),
+  last_message_at: null,
+  last_message_preview: draftMessage.trim() || 'Draft',
+  session_metadata: {
+    participant_names: { user: 'You', trainer: 'Trainer', agent: 'Agent', system: 'System' },
+  },
+  ...overrides,
+});
+
+const formatBytes = (bytes) => {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const fileToBase64 = (file) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = String(reader.result || '');
+    const [, base64 = ''] = result.split(',', 2);
+    resolve(base64);
+  };
+  reader.onerror = () => reject(reader.error || new Error('Failed to read attachment.'));
+  reader.readAsDataURL(file);
+});
+
+const createPendingAttachmentPlaceholder = (file) => ({
+  id: `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  title: file.name || 'Attachment',
+  name: file.name || 'Attachment',
+  media_type: file.type || 'application/octet-stream',
+  size_bytes: Number(file.size || 0),
+  description: 'Preparing attachment',
+  status: 'preparing',
+  progress: 0.12,
+});
 
 const stripInlineMarkdown = (content) => {
   const raw = String(content || '').trim();
@@ -670,6 +784,65 @@ const MessageMetaRow = ({ message, lane, participantNames }) => {
   );
 };
 
+const AttachmentPill = ({ attachment, onRemove = null, compact = false }) => {
+  const label = String(attachment?.title || attachment?.name || 'Attachment');
+  const description = String(attachment?.description || formatBytes(attachment?.size_bytes) || '').trim();
+  const status = String(attachment?.status || '').trim().toLowerCase();
+  const progress = Math.max(0, Math.min(1, Number(attachment?.progress || 0)));
+  const accent = status === 'error'
+    ? '#ff8f8f'
+    : status === 'ready'
+    ? '#a8ffe4'
+    : '#b9c1d9';
+  return (
+    <div
+      style={{
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '8px',
+        maxWidth: compact ? '220px' : '320px',
+        background: 'rgba(255,255,255,0.04)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        borderRadius: '999px',
+        padding: compact ? '6px 10px' : '7px 12px',
+        overflow: 'hidden',
+      }}
+    >
+      {status && status !== 'ready' && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            bottom: 0,
+            height: '2px',
+            width: `${progress * 100}%`,
+            background: status === 'error' ? '#ff6b6b' : 'linear-gradient(90deg, #8b5cf6, #60a5fa)',
+          }}
+        />
+      )}
+      <Paperclip size={12} color="#9ca1b4" />
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#e7e8ef', fontSize: '11px', fontWeight: 700 }}>
+        {label}
+      </span>
+      {description && (
+        <span style={{ color: accent, fontSize: '10px', whiteSpace: 'nowrap', flexShrink: 0 }}>
+          {description}
+        </span>
+      )}
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          style={{ background: 'none', border: 'none', color: '#8b90a5', cursor: 'pointer', display: 'flex', padding: 0, marginLeft: '2px' }}
+        >
+          <X size={12} />
+        </button>
+      )}
+    </div>
+  );
+};
+
 const MessageCard = ({
   message,
   lane,
@@ -692,6 +865,7 @@ const MessageCard = ({
   const showReactionButton = message.role !== 'user' && !message.pending && !message.failed;
   const reactionMenuOpen = openReactionMenuId === message.id;
   const eventAlignment = eventAlignmentForMessage(message);
+  const attachments = Array.isArray(message?.message_metadata?.attachments) ? message.message_metadata.attachments : [];
   const alignSelf = direct
     ? (message.role === 'user' ? 'flex-end' : 'flex-start')
     : (eventAlignment === 'right' ? 'flex-end' : eventAlignment === 'center' ? 'center' : 'flex-start');
@@ -774,6 +948,17 @@ const MessageCard = ({
             <MarkdownMessageBody content={display.body} />
           </Suspense>
         </div>
+        {attachments.length > 0 && (
+          <div style={{ marginTop: '12px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {attachments.map((attachment, index) => (
+              <AttachmentPill
+                key={attachment.id || attachment.storage_key || `${message.id}-attachment-${index}`}
+                attachment={attachment}
+                compact
+              />
+            ))}
+          </div>
+        )}
         {(message.pending || message.failed) && (
           <div style={{ marginTop: '8px', fontSize: '10px', fontWeight: 700, letterSpacing: '0.06em', color: message.failed ? 'rgba(255,230,230,0.92)' : 'rgba(255,255,255,0.78)' }}>
             {message.failed ? 'SEND FAILED' : 'SENDING'}
@@ -1000,9 +1185,11 @@ function App() {
   const [laneDrafts, setLaneDrafts]   = useState({ trainer: [], agent: [] });
   const [isSending, setIsSending]     = useState(false);
   const [sendError, setSendError]     = useState('');
+  const [responseMode, setResponseMode] = useState('thinking');
   const [reactionBusyKey, setReactionBusyKey] = useState('');
   const [openReactionMenuId, setOpenReactionMenuId] = useState('');
   const [replyTarget, setReplyTarget] = useState(null);
+  const [pendingAttachments, setPendingAttachments] = useState([]);
   const [chatLane, setChatLane]       = useState('trainer');
   const [currentScope, setCurrentScope] = useState('trainer');
   const [scopeSessionIds, setScopeSessionIds] = useState({
@@ -1011,11 +1198,12 @@ function App() {
     agent: defaultSessionIdForLane('agent'),
   });
   const [sessionList, setSessionList] = useState([]);
-  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'tasks' | 'knowledge' | 'dashboard' | 'settings'
+  const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'tasks' | 'history' | 'knowledge' | 'procedures' | 'workbench' | 'dashboard' | 'settings'
   const [apiStatus, setApiStatus]     = useState('connecting'); // 'ok' | 'error' | 'connecting'
   const [workerApiStatus, setWorkerApiStatus] = useState('connecting'); // 'ok' | 'error' | 'connecting'
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const attachmentInputRef = useRef(null);
   const sessionListRef = useRef([]);
   const isSendingRef = useRef(false);
   const fetchGenRef = useRef(0);       // generation counter for stale-poll rejection
@@ -1032,6 +1220,9 @@ function App() {
   const [globalPaused, setGlobalPaused] = useState(false);
   const [pausedLanes, setPausedLanes] = useState([]);
   const [rebooting, setRebooting] = useState(false);
+  const [reconnectingBackend, setReconnectingBackend] = useState(false);
+  const [desiredGlobalEnabled, setDesiredGlobalEnabled] = useState(true);
+  const [desiredLaneEnabled, setDesiredLaneEnabled] = useState({ trainer: true, agent: true });
   const [telemetry, setTelemetry] = useState(null);
   const [providerTelemetry, setProviderTelemetry] = useState({});
   const [dashboard, setDashboard] = useState(null);
@@ -1044,12 +1235,18 @@ function App() {
   const [knowledgePages, setKnowledgePages] = useState([]);
   const [selectedKnowledgeSlug, setSelectedKnowledgeSlug] = useState('');
   const [selectedKnowledgePage, setSelectedKnowledgePage] = useState(null);
+  const [procedures, setProcedures] = useState([]);
+  const [selectedProcedureId, setSelectedProcedureId] = useState('');
+  const [workbenchTarget, setWorkbenchTarget] = useState(null);
+  const [selectedProcedure, setSelectedProcedure] = useState(null);
   const [retentionSnapshot, setRetentionSnapshot] = useState(null);
   const [variantRatingsSnapshot, setVariantRatingsSnapshot] = useState(null);
   const [predictionTrustSnapshot, setPredictionTrustSnapshot] = useState(null);
   const [proposalConfigSnapshot, setProposalConfigSnapshot] = useState(null);
   const [evalJobsSnapshot, setEvalJobsSnapshot] = useState([]);
   const [operatorNotice, setOperatorNotice] = useState('');
+  const [throttleMode, setThrottleMode] = useState('quiet');
+  const [throttleModeSaving, setThrottleModeSaving] = useState(false);
   const [showFinishedTasks, setShowFinishedTasks] = useState(false);
   const [editingSessionTitle, setEditingSessionTitle] = useState(false);
   const [sessionTitleDraft, setSessionTitleDraft] = useState('');
@@ -1104,9 +1301,56 @@ function App() {
   const showTaskPane = activeNav === 'chat' || activeNav === 'dashboard';
   const showSpecBanner = activeNav === 'chat';
 
+  const upsertLaneDraft = useCallback((lane, sessionIdToUpsert, updater) => {
+    setLaneDrafts((prev) => {
+      const drafts = prev[lane] || [];
+      const existingIndex = drafts.findIndex((draft) => draft?.session_id === sessionIdToUpsert);
+      const current = existingIndex >= 0 ? drafts[existingIndex] : null;
+      const nextDraft = updater(current);
+      if (!nextDraft) return prev;
+      if (existingIndex >= 0) {
+        const nextDrafts = drafts.slice();
+        nextDrafts[existingIndex] = nextDraft;
+        return { ...prev, [lane]: nextDrafts };
+      }
+      return { ...prev, [lane]: [nextDraft, ...drafts] };
+    });
+  }, []);
+
+  const materializeDraftIfNeeded = useCallback((lane, draftSessionId, draftMessage = '', overrides = {}) => {
+    let created = false;
+    upsertLaneDraft(lane, draftSessionId, (existing) => {
+      const nextMessage = draftMessage != null ? draftMessage : (existing?.draftMessage || '');
+      const nextDraft = existing
+        ? {
+            ...existing,
+            ...overrides,
+            draftMessage: nextMessage,
+            attachments: overrides.attachments ?? existing?.attachments ?? [],
+            last_message_preview: nextMessage.trim() || existing?.last_message_preview || 'Draft',
+          }
+        : createDraftRecord(draftSessionId, nextMessage, {
+            ...overrides,
+            attachments: overrides.attachments ?? [],
+          });
+      if (!existing) created = true;
+      return nextDraft;
+    });
+    return created;
+  }, [upsertLaneDraft]);
+
   useEffect(() => {
     sessionListRef.current = sessionList;
   }, [sessionList]);
+
+  useEffect(() => {
+    if (workerApiStatus !== 'ok') return;
+    setDesiredGlobalEnabled(workerStatus !== 'PAUSED' && workerStatus !== 'STOPPED');
+    setDesiredLaneEnabled({
+      trainer: !pausedLanes.includes('trainer'),
+      agent: !pausedLanes.includes('agent'),
+    });
+  }, [pausedLanes, workerApiStatus, workerStatus]);
 
   useEffect(() => {
     setOpenReactionMenuId('');
@@ -1115,11 +1359,13 @@ function App() {
   useEffect(() => {
     if (isDraftSession) {
       setInputText(currentDraft?.draftMessage || '');
+      setPendingAttachments(Array.isArray(currentDraft?.attachments) ? currentDraft.attachments : []);
       setMessages([]);
       setSendError('');
       return;
     }
-      setInputText('');
+    setInputText('');
+    setPendingAttachments([]);
   }, [currentDraft?.draftMessage, isDraftSession, sessionId]);
 
   useEffect(() => {
@@ -1168,14 +1414,43 @@ function App() {
     return request;
   }, [API]);
 
+  const loadRuntimeSettings = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API}/admin/settings`);
+      const nextSettings = res?.data?.settings || {};
+      setThrottleMode(deriveThrottleMode(nextSettings));
+    } catch (e) {
+      console.error('Failed to load runtime settings', e);
+    }
+  }, [API]);
+
   useEffect(() => {
     const timer = setTimeout(() => {
       void fetchWorkerStatus();
+      void loadRuntimeSettings();
     }, 0);
     return () => {
       clearTimeout(timer);
     };
-  }, [fetchWorkerStatus]);
+  }, [fetchWorkerStatus, loadRuntimeSettings]);
+
+  const handleSetThrottleMode = useCallback(async (nextMode) => {
+    const normalizedMode = nextMode === 'turbo' ? 'turbo' : 'quiet';
+    setThrottleMode(normalizedMode);
+    setThrottleModeSaving(true);
+    try {
+      const res = await axios.post(`${API}/admin/settings`, buildThrottleSettingsPayload(normalizedMode));
+      const nextSettings = res?.data?.settings || {};
+      setThrottleMode(deriveThrottleMode(nextSettings));
+      setOperatorNotice(`Throttle mode set to ${normalizedMode}.`);
+    } catch (e) {
+      console.error('Failed to update throttle mode', e);
+      setOperatorNotice(`Failed to switch to ${normalizedMode} mode.`);
+      void loadRuntimeSettings();
+    } finally {
+      setThrottleModeSaving(false);
+    }
+  }, [API, loadRuntimeSettings]);
 
   const handleReboot = async () => {
     setRebooting(true);
@@ -1209,7 +1484,7 @@ function App() {
     if (!taskId) return;
     try {
       await axios.post(`${API}/admin/tasks/${taskId}/pause`);
-      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+      await Promise.all([fetchWorkerStatus(), fetchData(true), loadRuntimeSettings()]);
     } catch (e) { console.error(e); }
   };
 
@@ -1353,6 +1628,37 @@ function App() {
     return request;
   }, [activeNav, currentScope, effectiveLane, isDraftSession, sessionId]);
 
+  const handleReconnect = useCallback(async () => {
+    setApiStatus('connecting');
+    setWorkerApiStatus('connecting');
+    setDesiredGlobalEnabled(true);
+    setReconnectingBackend(true);
+    try {
+      if (isDesktopRuntime()) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          await invoke('desktop_reconnect_backend');
+        } catch (err) {
+          console.error('Desktop reconnect failed', err);
+        }
+      }
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+      const healthy = await axios.get(`${API}/admin/health`, { timeout: 2500 })
+        .then(() => true)
+        .catch(() => false);
+      if (!healthy) {
+        setDesiredGlobalEnabled(false);
+      }
+      return healthy;
+    } catch (err) {
+      console.error('Reconnect refresh failed', err);
+      setDesiredGlobalEnabled(false);
+      return false;
+    } finally {
+      setReconnectingBackend(false);
+    }
+  }, [API, fetchData, fetchWorkerStatus, loadRuntimeSettings]);
+
   const scheduleRefresh = useCallback(({ force = false, refreshData = true, refreshWorker = true } = {}) => {
     if (refreshData) {
       pendingDataRefreshRef.current = true;
@@ -1470,6 +1776,43 @@ function App() {
     };
   }, [API, activeNav, knowledgeQuery, selectedKnowledgeSlug]);
 
+  useEffect(() => {
+    if (activeNav !== 'procedures') return;
+    let cancelled = false;
+
+    const loadProcedures = async () => {
+      try {
+        const proceduresRes = await axios.get(`${API}/admin/procedures`);
+        if (cancelled) return;
+        const nextProcedures = Array.isArray(proceduresRes?.data?.procedures) ? proceduresRes.data.procedures : [];
+        setProcedures(nextProcedures);
+
+        const hasCurrent = nextProcedures.some((procedure) => procedure.procedure_id === selectedProcedureId);
+        const nextProcedureId = hasCurrent ? selectedProcedureId : (nextProcedures[0]?.procedure_id || '');
+        setSelectedProcedureId(nextProcedureId);
+
+        if (!nextProcedureId) {
+          setSelectedProcedure(null);
+          return;
+        }
+
+        const detailRes = await axios.get(`${API}/admin/procedures/${encodeURIComponent(nextProcedureId)}`);
+        if (cancelled) return;
+        setSelectedProcedure(detailRes?.data?.procedure || null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Failed to load procedures', err);
+        setProcedures([]);
+        setSelectedProcedure(null);
+      }
+    };
+
+    void loadProcedures();
+    return () => {
+      cancelled = true;
+    };
+  }, [API, activeNav, selectedProcedureId]);
+
   const handleCreateKnowledgePage = useCallback(async () => {
     const title = window.prompt('Title for the new knowledge page:', '');
     if (title == null) return;
@@ -1557,8 +1900,136 @@ function App() {
     }
   }, [API, effectiveLane, sessionId]);
 
+  const syncDraftComposerState = useCallback((nextMessage, nextAttachments) => {
+    if (!isDraftSession) return;
+    const normalizedAttachments = Array.isArray(nextAttachments) ? nextAttachments : [];
+    const normalizedMessage = String(nextMessage || '');
+    if (normalizedMessage.trim() || normalizedAttachments.length > 0 || currentDraft) {
+      materializeDraftIfNeeded(effectiveLane, sessionId, normalizedMessage, {
+        attachments: normalizedAttachments,
+      });
+    }
+  }, [currentDraft, effectiveLane, isDraftSession, materializeDraftIfNeeded, sessionId]);
+
+  const discardPreparedAttachments = useCallback(async (attachments) => {
+    const discardable = (Array.isArray(attachments) ? attachments : []).filter((item) => item?.storage_key || item?.storage_path);
+    if (!discardable.length) return;
+    try {
+      await axios.post(`${API}/chat/attachments/discard`, {
+        attachments: discardable.map(({ storage_key, storage_path, id }) => ({ storage_key, storage_path, id })),
+      });
+    } catch (err) {
+      console.error('Failed to discard prepared attachment(s)', err);
+    }
+  }, [API]);
+
+  const handleQueueProcedure = useCallback(async (procedureId) => {
+    if (!procedureId) return;
+    try {
+      await axios.post(`${API}/admin/procedures/${encodeURIComponent(procedureId)}/queue`, {
+        lane: currentScope === 'home' ? effectiveLane : currentScope,
+        session_id: currentScope === 'home' ? sessionId : (sessionId || undefined),
+      });
+      scheduleRefresh({ force: true, refreshData: true, refreshWorker: true });
+    } catch (err) {
+      console.error('Failed to queue procedure', err);
+      window.alert('Failed to queue Procedure.');
+    }
+  }, [API, currentScope, effectiveLane, scheduleRefresh, sessionId]);
+
+  const addAttachments = useCallback(async (files) => {
+    const items = Array.from(files || []).filter(Boolean);
+    if (!items.length) return;
+    const placeholders = items.map(createPendingAttachmentPlaceholder);
+    setPendingAttachments((prev) => {
+      const next = [...prev, ...placeholders];
+      syncDraftComposerState(inputText, next);
+      return next;
+    });
+
+    await Promise.allSettled(items.map(async (file, index) => {
+      const placeholder = placeholders[index];
+      try {
+        setPendingAttachments((prev) => {
+          const next = prev.map((item) => (
+            item.id === placeholder.id
+              ? { ...item, description: 'Encoding attachment', progress: 0.32 }
+              : item
+          ));
+          syncDraftComposerState(inputText, next);
+          return next;
+        });
+        const prepared = {
+          id: placeholder.id,
+          name: file.name || 'Attachment',
+          media_type: file.type || 'application/octet-stream',
+          size_bytes: Number(file.size || 0),
+          base64_data: await fileToBase64(file),
+        };
+        setPendingAttachments((prev) => {
+          const next = prev.map((item) => (
+            item.id === placeholder.id
+              ? { ...item, description: 'Processing upload', progress: 0.68 }
+              : item
+          ));
+          syncDraftComposerState(inputText, next);
+          return next;
+        });
+        const res = await axios.post(`${API}/chat/attachments/prepare`, {
+          attachments: [prepared],
+        });
+        const processed = Array.isArray(res?.data?.attachments) ? res.data.attachments[0] : null;
+        if (!processed) throw new Error('Attachment processor returned no payload');
+        setPendingAttachments((prev) => {
+          const next = prev.map((item) => (
+            item.id === placeholder.id
+              ? {
+                  ...item,
+                  ...processed,
+                  id: placeholder.id,
+                  status: 'ready',
+                  progress: 1,
+                  description: processed.summary
+                    ? `Ready · ${formatBytes(processed.size_bytes)}`
+                    : (processed.description || `Ready · ${formatBytes(processed.size_bytes)}`),
+                }
+              : item
+          ));
+          syncDraftComposerState(inputText, next);
+          return next;
+        });
+      } catch (err) {
+        console.error('Failed to process attachment', err);
+        setPendingAttachments((prev) => {
+          const next = prev.map((item) => (
+            item.id === placeholder.id
+              ? { ...item, status: 'error', progress: 1, description: 'Upload failed' }
+              : item
+          ));
+          syncDraftComposerState(inputText, next);
+          return next;
+        });
+        setSendError('Failed to process one or more attachments.');
+      }
+    }));
+  }, [API, inputText, syncDraftComposerState]);
+
+  const removePendingAttachment = useCallback((attachmentId) => {
+    setPendingAttachments((prev) => {
+      const removed = prev.filter((item) => item.id === attachmentId);
+      void discardPreparedAttachments(removed);
+      const next = prev.filter((item) => item.id !== attachmentId);
+      syncDraftComposerState(inputText, next);
+      return next;
+    });
+  }, [discardPreparedAttachments, inputText, syncDraftComposerState]);
+
   const handleSendMessage = async () => {
-    if (!inputText.trim() || isSending) return;
+    if ((!inputText.trim() && pendingAttachments.length === 0) || isSending) return;
+    if (pendingAttachments.some((item) => String(item?.status || '').toLowerCase() === 'preparing')) {
+      setSendError('Attachment processing is still in progress.');
+      return;
+    }
     const text = inputText;
     const replyPrefix = replyTarget
       ? `Replying to "${String(replyTarget.content || '').replace(/\s+/g, ' ').trim().slice(0, 120)}": `
@@ -1566,28 +2037,33 @@ function App() {
     const outboundText = `${replyPrefix}${text}`;
     const tempId = `temp-${Date.now()}`;
     setInputText('');
+    const outboundAttachments = pendingAttachments;
+    setPendingAttachments([]);
     if (isDraftSession) {
-      setLaneDrafts((prev) => ({
-        ...prev,
-        [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
-          draft?.session_id === sessionId
-            ? { ...draft, draftMessage: '', last_message_preview: 'Draft' }
-            : draft
-        )),
-      }));
+      materializeDraftIfNeeded(effectiveLane, sessionId, '', { attachments: [] });
     }
     setSendError('');
     setIsSending(true);
     isSendingRef.current = true;
     const targetSessionId = isDraftSession ? `${effectiveLane}:session-${Date.now()}` : sessionId;
     // Optimistic update: show the user's message immediately
-    setMessages(prev => [...prev, { id: tempId, role: 'user', content: outboundText, pending: true }]);
+    setMessages(prev => [...prev, {
+      id: tempId,
+      role: 'user',
+      content: outboundText,
+      pending: true,
+      message_metadata: {
+        attachments: outboundAttachments.map(({ base64_data, ...rest }) => rest),
+      },
+    }]);
     try {
       await axios.post(`${API}/chat`, {
         role: 'user',
         content: outboundText,
         session_id: targetSessionId,
         preferred_tier: effectiveLane,
+        response_mode: responseMode,
+        attachments: outboundAttachments,
       });
       if (isDraftSession) {
         const draftTitle = String(currentDraft?.title || '').trim();
@@ -1613,15 +2089,9 @@ function App() {
       const message = typeof detail === 'string' ? detail : 'Message failed to send. Please retry.';
       setSendError(message);
       if (isDraftSession) {
-        setLaneDrafts((prev) => ({
-          ...prev,
-          [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
-            draft?.session_id === sessionId
-              ? { ...draft, draftMessage: outboundText, last_message_preview: outboundText }
-              : draft
-          )),
-        }));
+        materializeDraftIfNeeded(effectiveLane, sessionId, outboundText);
         setInputText(outboundText);
+        setPendingAttachments(outboundAttachments);
       }
       setMessages(prev => prev.map(msg => (
         msg.id === tempId ? { ...msg, pending: false, failed: true } : msg
@@ -1657,33 +2127,25 @@ function App() {
     const draftLane = currentScope === 'home' ? chatLane : currentScope;
     const draftsForLane = laneDrafts[draftLane] || [];
     const activeDraft = draftsForLane.find((draft) => draft?.session_id === sessionId) || null;
+    if (isDraftSession && !activeDraft && inputText.trim()) {
+      materializeDraftIfNeeded(draftLane, sessionId, inputText);
+    }
     if (activeDraft && !draftHasContent(activeDraft)) {
       setScopeSessionIds(prev => ({ ...prev, [currentScope]: activeDraft.session_id }));
       setMessages([]);
       setInputText(activeDraft.draftMessage || '');
+      setPendingAttachments(Array.isArray(activeDraft.attachments) ? activeDraft.attachments : []);
       setSendError('');
       return;
     }
     const draftId = draftSessionIdForLane(draftLane);
-    setLaneDrafts((prev) => ({
-      ...prev,
-      [draftLane]: [{
-        session_id: draftId,
-        title: 'New Session',
-        draft: true,
-        draftMessage: '',
-        unread_count: 0,
-        created_at: new Date().toISOString(),
-        last_message_at: null,
-        last_message_preview: 'Draft',
-        session_metadata: {
-          participant_names: { user: 'You', trainer: 'Trainer', agent: 'Agent', system: 'System' },
-        },
-      }, ...(prev[draftLane] || [])],
-    }));
+    if (pendingAttachments.length > 0) {
+      void discardPreparedAttachments(pendingAttachments);
+    }
     setScopeSessionIds(prev => ({ ...prev, [currentScope]: draftId }));
     setMessages([]);
     setInputText('');
+    setPendingAttachments([]);
     setSendError('');
   };
 
@@ -1696,9 +2158,13 @@ function App() {
       }));
       setSessionList(prev => prev.filter((session) => session.session_id !== idToDelete));
       if (sessionId === idToDelete) {
+        if (pendingAttachments.length > 0) {
+          void discardPreparedAttachments(pendingAttachments);
+        }
         setScopeSessionIds(prev => ({ ...prev, [currentScope]: currentScope === 'home' ? null : defaultSessionIdForLane(draftLane) }));
         setMessages([]);
         setInputText('');
+        setPendingAttachments([]);
       }
       return;
     }
@@ -1791,12 +2257,13 @@ function App() {
         content: `Feedback on message "${preview}": ${normalized}`,
         session_id: sessionId,
         preferred_tier: effectiveLane,
+        response_mode: responseMode,
       });
       await fetchData(true);
     } catch (err) {
       console.error('Failed to send typed response.', err);
     }
-  }, [API, effectiveLane, fetchData, sessionId]);
+  }, [API, effectiveLane, fetchData, responseMode, sessionId]);
 
   const handleReplyToMessage = useCallback((message) => {
     setOpenReactionMenuId('');
@@ -1949,29 +2416,10 @@ function App() {
   }, [loadedContext?.budget_tokens, loadedContext?.files, tasksForScope]);
   const scopeHasAnyTasks = tasksForScope.length > 0;
 
-  // Build and sort Task Tree
+  const fullTaskTree = React.useMemo(() => buildTaskTree(tasks), [tasks]);
   const taskTree = React.useMemo(() => {
-    const map = {};
-    const filteredTasks = tasks.filter(t => !archivedTasks.includes(t.id));
-
-    // First pass: create nodes
-    filteredTasks.forEach(t => {
-      map[t.id] = { ...t, children: [] };
-    });
-    
-    const roots = [];
-    // Second pass: link children with cycle detection
-    filteredTasks.forEach(t => {
-      if (t.parent_id && map[t.parent_id] && t.parent_id !== t.id) {
-        map[t.parent_id].children.push(map[t.id]);
-      } else if (!t.parent_id || t.parent_id === t.id) {
-        roots.push(map[t.id]);
-      }
-    });
-
-    roots.sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
-
-    return roots;
+    const filteredTasks = tasks.filter((task) => !archivedTasks.includes(task.id));
+    return buildTaskTree(filteredTasks);
   }, [tasks, archivedTasks]);
 
   useEffect(() => {
@@ -2007,7 +2455,10 @@ function App() {
   const navItems = [
     { id: 'chat',      Icon: MessageSquare,   label: 'Chat'      },
     { id: 'tasks',     Icon: Activity,        label: 'Tasks'     },
+    { id: 'history',   Icon: History,         label: 'History'   },
     { id: 'knowledge', Icon: BookOpen,        label: 'Knowledge' },
+    { id: 'procedures', Icon: GitBranch,      label: 'Procedures' },
+    { id: 'workbench', Icon: Wrench,          label: 'Workbench' },
     { id: 'dashboard', Icon: LayoutDashboard, label: 'Dashboard' },
     { id: 'settings',  Icon: Settings,        label: 'Settings'  },
   ];
@@ -2039,9 +2490,17 @@ function App() {
         return !lane || lane === scopeFilterLane;
       })
     : finishedTaskTree;
+  const scopedQueuedTaskTree = React.useMemo(
+    () => scopedActiveTaskTree.filter((task) => task.status === 'pending'),
+    [scopedActiveTaskTree]
+  );
   const laneVisibleTasks = activeNav === 'chat' && currentScope !== 'home'
     ? scopedActiveTaskTree
     : activeTaskTree;
+  const laneQueuedTasks = React.useMemo(
+    () => laneVisibleTasks.filter((task) => task.status === 'pending'),
+    [laneVisibleTasks]
+  );
   const laneFinishedTasks = activeNav === 'chat' && currentScope !== 'home'
     ? scopedFinishedTaskTree
     : finishedTaskTree;
@@ -2055,6 +2514,7 @@ function App() {
       .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     const persisted = list.filter((session) => {
       if (drafts.some((draft) => draft.session_id === session.session_id)) return false;
+      if (!persistedSessionHasContent(session)) return false;
       if (currentScope === 'home') return Boolean(explicitLaneForSessionId(session.session_id));
       return sessionMatchesLane(session.session_id, effectiveLane);
     });
@@ -2099,8 +2559,22 @@ function App() {
       });
     return ordered[0] || null;
   };
+  const findTaskPathById = (nodes, targetId) => {
+    if (!targetId) return [];
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      if (String(node?.id || '') === String(targetId)) return [node];
+      const childPath = findTaskPathById(node?.children || [], targetId);
+      if (childPath.length) return [node, ...childPath];
+    }
+    return [];
+  };
   const getFocusedTaskPath = (scopeId) => {
     if (scopeId === 'home') return [];
+    const laneTaskId = String(laneDetails?.[scopeId]?.current_task_id || '').trim();
+    if (laneTaskId) {
+      const livePath = findTaskPathById(fullTaskTree, laneTaskId);
+      if (livePath.length) return livePath;
+    }
     const scopedTree = activeTaskTree.filter((task) => {
       const lane = laneForTask(task);
       return !lane || lane === scopeId;
@@ -2144,7 +2618,18 @@ function App() {
       const blocked = tasks.filter((task) => laneForTask(task) === scopeId && task.status === 'blocked').length;
       const laneMode = String(laneDetail?.activity_mode || '').trim().toUpperCase();
       const stalledReason = String(laneDetail?.step_detail || laneDetail?.step_label || '').trim();
-      const laneTaskTitle = String(laneCurrentTaskTitles?.[scopeId] || '').trim();
+      const laneTaskTitle = String(laneCurrentTaskTitles?.[scopeId] || laneDetail?.current_task_title || '').trim();
+      const percent = laneMode === 'STALLED'
+        ? 72
+        : laneMode === 'GENERATING'
+        ? 64
+        : laneMode === 'RUNNING'
+        ? 58
+        : laneMode === 'QUEUED'
+        ? 20
+        : blocked > 0
+        ? 18
+        : 0;
       const stateLabel = laneMode === 'STALLED'
         ? (stalledReason || 'waiting for progress')
         : blocked > 0
@@ -2155,14 +2640,16 @@ function App() {
         ? 'generating'
         : 'idle';
       return {
-        percent: 0,
+        percent,
         summary: '',
         currentTitle: laneTaskTitle || (blocked > 0 ? `${blocked} blocked task${blocked === 1 ? '' : 's'}` : 'No active task'),
         currentStateLabel: stateLabel,
         label: laneTaskTitle || 'No active task',
         countLabel: blocked > 0 ? 'Needs attention' : (laneDetail?.activity_label || 'No active task'),
         pathSegments: [],
-        taskActionable: blocked > 0,
+        taskId: laneDetail?.current_task_id || null,
+        taskPaused: Boolean(laneDetail?.paused),
+        taskActionable: blocked > 0 || Boolean(laneDetail?.current_task_id),
       };
     }
 
@@ -2242,7 +2729,7 @@ function App() {
     if (!path.length) return visibleTaskTree;
     const contextNode = path.length > 1 ? path[path.length - 2] : path[0];
     return contextNode ? [contextNode] : visibleTaskTree;
-  }, [activeNav, currentScope, visibleTaskTree, activeTaskTree]);
+  }, [activeNav, currentScope, visibleTaskTree, activeTaskTree, laneDetails, fullTaskTree]);
   const loopMeta = routingSummary?.supervision?.active_jobs?.length
     ? `${routingSummary.supervision.active_jobs.length} active bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
     : `trainer ${String(laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · agent ${String(laneDetails?.agent?.activity_label || 'Idle').toLowerCase()}`;
@@ -2312,6 +2799,73 @@ function App() {
               </div>
             </div>
           </button>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '6px',
+              borderRadius: '14px',
+              border: '1px solid rgba(255,255,255,0.08)',
+              background: 'rgba(255,255,255,0.03)',
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{
+                fontSize: '10px',
+                fontWeight: 800,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: '#7d8296',
+                padding: '0 6px 0 4px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Throttle
+            </span>
+            {[
+              { id: 'quiet', label: 'Quiet' },
+              { id: 'turbo', label: 'Turbo' },
+            ].map((mode) => {
+              const active = throttleMode === mode.id;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => {
+                    if (mode.id !== throttleMode && !throttleModeSaving) {
+                      void handleSetThrottleMode(mode.id);
+                    }
+                  }}
+                  disabled={throttleModeSaving}
+                  style={{
+                    height: '32px',
+                    padding: '0 12px',
+                    borderRadius: '10px',
+                    border: active
+                      ? '1px solid rgba(232, 190, 130, 0.32)'
+                      : '1px solid rgba(255,255,255,0.08)',
+                    background: active
+                      ? 'linear-gradient(135deg, rgba(214,173,113,0.22), rgba(140,87,45,0.20))'
+                      : 'rgba(255,255,255,0.03)',
+                    color: active ? '#f3ddbf' : '#aaafc2',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: throttleModeSaving ? 'default' : 'pointer',
+                    opacity: throttleModeSaving && !active ? 0.65 : 1,
+                    transition: 'all 0.18s ease',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title={mode.id === 'quiet'
+                    ? 'Favor quieter, more conservative local behavior.'
+                    : 'Favor faster, more aggressive throughput.'}
+                >
+                  {mode.label}
+                </button>
+              );
+            })}
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px', width: '100%', minWidth: 0 }}>
           {topTabs.map((tab) => {
             const active = currentScope === tab.id;
@@ -2319,8 +2873,8 @@ function App() {
             const isLane = tab.id === 'trainer' || tab.id === 'agent';
             const progress = buildScopeTaskProgress(tab.id);
             const agentEnabled = tab.id === 'home'
-              ? (workerStatus !== 'PAUSED' && workerStatus !== 'STOPPED')
-              : !pausedLanes.includes(tab.id);
+              ? desiredGlobalEnabled
+              : desiredLaneEnabled[tab.id];
             const agentSuppressedByGlobal = isLane && globalPaused;
             return (
               <TopModeTab
@@ -2336,10 +2890,25 @@ function App() {
                 agentEnabled={agentEnabled}
                 agentSuppressedByGlobal={agentSuppressedByGlobal}
                 apiStatus={workerApiStatus}
-                showControls={workerApiStatus === 'ok' && (isLane || showGlobalControls)}
+                showControls={isLane || showGlobalControls}
                 progress={progress}
-                onPause={showGlobalControls ? (() => handlePause()) : (isLane ? (() => handlePause(tab.id)) : undefined)}
-                onResume={showGlobalControls ? (() => handleResume()) : (isLane ? (() => handleResume(tab.id)) : undefined)}
+                toggleChecked={Boolean(agentEnabled)}
+                togglePending={tab.id === 'home' ? reconnectingBackend : false}
+                onPause={showGlobalControls ? (() => {
+                  setDesiredGlobalEnabled(false);
+                  void handlePause();
+                }) : (isLane ? (() => {
+                  setDesiredLaneEnabled((prev) => ({ ...prev, [tab.id]: false }));
+                  void handlePause(tab.id);
+                }) : undefined)}
+                onResume={showGlobalControls ? (() => {
+                  setDesiredGlobalEnabled(true);
+                  void handleResume();
+                }) : (isLane ? (() => {
+                  setDesiredLaneEnabled((prev) => ({ ...prev, [tab.id]: true }));
+                  void handleResume(tab.id);
+                }) : undefined)}
+                onReconnect={showGlobalControls ? (() => { void handleReconnect(); }) : undefined}
                 onPauseTask={isLane ? (() => handlePauseTask(progress?.taskId)) : undefined}
                 onResumeTask={isLane ? (() => handleResumeTask(progress?.taskId)) : undefined}
                 onStopTask={isLane ? (() => handleStopTask(progress?.taskId)) : undefined}
@@ -2492,10 +3061,16 @@ function App() {
               <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
                 {activeNav === 'dashboard'
                   ? (currentScope === 'home' ? 'Strata Home' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Dashboard`)
+                  : activeNav === 'history'
+                  ? (currentScope === 'home' ? 'History' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} History`)
                   : activeNav === 'tasks'
                   ? (currentScope === 'home' ? 'Tasks' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Tasks`)
                   : activeNav === 'knowledge'
                   ? (currentScope === 'home' ? 'Knowledge Base' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Knowledge`)
+                : activeNav === 'procedures'
+                  ? (currentScope === 'home' ? 'Procedures' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Procedures`)
+                  : activeNav === 'workbench'
+                  ? (currentScope === 'home' ? 'Workbench' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Workbench`)
                   : 'Settings'}
               </h1>
             )}
@@ -2503,10 +3078,16 @@ function App() {
               <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>
                 {activeNav === 'dashboard'
                 ? (currentScope === 'home' ? 'Shared telemetry, routing, and operator surfaces' : 'Scoped operational telemetry and runtime detail')
+                : activeNav === 'history'
+                ? (currentScope === 'home' ? 'Chronological event log with expandable runtime metadata' : 'Scoped event log and autopsy surface')
                 : activeNav === 'tasks'
                 ? (currentScope === 'home' ? 'Canonical queue, execution, and completion view' : 'Scoped task queue, execution progress, and recent completions')
                 : activeNav === 'knowledge'
                 ? (currentScope === 'home' ? 'Navigable system wiki' : 'Knowledge visible within this scope')
+                : activeNav === 'procedures'
+                ? (currentScope === 'home' ? 'Draft, tested, and vetted workflow registry' : 'Procedures visible within this scope')
+                : activeNav === 'workbench'
+                ? 'Universal debugger and process workbench'
                 : activeNav === 'settings'
                 ? 'Scoped system configuration'
                 : sessionMetaLabel}
@@ -2526,27 +3107,17 @@ function App() {
               </div>
             )}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '18px', flexShrink: 0 }}>
-            {apiStatus === 'error' && (
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ fontSize: '11px', color: '#ff4d4d', fontWeight: 600 }}>API DOWN</span>
-                <button 
-                  onClick={() => {
-                    setApiStatus('connecting');
-                    setWorkerApiStatus('connecting');
-                    void Promise.all([fetchWorkerStatus(), fetchData(true)]);
-                  }}
-                  style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', color: '#8257e5', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 800, cursor: 'pointer' }}
-                >
-                  RECONNECT
-                </button>
-                <button 
-                  onClick={handleReboot}
-                  disabled={rebooting}
-                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', color: '#ccc', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 800, cursor: 'pointer' }}
-                >
-                  {rebooting ? '...' : 'REBOOT'}
-                </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '18px', flexShrink: 0, minWidth: activeNav === 'knowledge' ? 'min(420px, 42vw)' : 0 }}>
+            {activeNav === 'knowledge' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px', padding: '10px 14px', width: '100%' }}>
+                <Search size={15} color="#696a7b" />
+                <input
+                  type="text"
+                  value={knowledgeQuery}
+                  onChange={(event) => setKnowledgeQuery(event.target.value)}
+                  placeholder="Search wiki titles, tags, aliases..."
+                  style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px' }}
+                />
               </div>
             )}
           </div>
@@ -2565,7 +3136,7 @@ function App() {
           </div>
         )}
 
-        {activeNav === 'dashboard' || activeNav === 'knowledge' || activeNav === 'tasks' ? (
+        {activeNav === 'dashboard' || activeNav === 'history' || activeNav === 'knowledge' || activeNav === 'tasks' || activeNav === 'procedures' || activeNav === 'workbench' ? (
           <Suspense
             fallback={(
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8d8ea1', fontSize: '13px' }}>
@@ -2618,6 +3189,7 @@ function App() {
               tasksProps={{
                 currentScope,
                 activeTasks: scopedActiveTaskTree,
+                queuedTasks: scopedQueuedTaskTree,
                 finishedTasks: scopedFinishedTaskTree,
                 workerStatus,
                 laneStatuses,
@@ -2627,6 +3199,89 @@ function App() {
                 scopeAttemptMetrics,
                 onArchiveTask: handleArchiveTask,
                 nowMs: activityNowMs,
+              }}
+              historyProps={{
+                currentScope,
+                activeTasks: scopedActiveTaskTree,
+                finishedTasks: scopedFinishedTaskTree,
+                messages,
+                procedures,
+                specProposals: specProposalSnapshot,
+                evalJobs: evalJobsSnapshot,
+                laneDetails,
+                onOpenTask: () => setActiveNav('tasks'),
+                onOpenProcedure: (procedureId) => {
+                  setSelectedProcedureId(procedureId);
+                  setActiveNav('procedures');
+                },
+                onOpenWorkbench: (target) => {
+                  setWorkbenchTarget(target);
+                  if (target?.procedureId) {
+                    setSelectedProcedureId(target.procedureId);
+                  }
+                  setActiveNav('workbench');
+                },
+                onOpenSession: (nextSessionId) => {
+                  const nextLane = laneForSessionId(nextSessionId);
+                  setCurrentScope(nextLane);
+                  setChatLane(nextLane);
+                  setScopeSessionIds((prev) => ({ ...prev, [nextLane]: nextSessionId }));
+                  setActiveNav('chat');
+                },
+              }}
+              proceduresProps={{
+                procedures,
+                selectedProcedure,
+                selectedProcedureId,
+                onSelectProcedure: setSelectedProcedureId,
+                onQueueProcedure: handleQueueProcedure,
+                onOpenWorkbench: (target) => {
+                  setWorkbenchTarget(target);
+                  if (target?.procedureId) {
+                    setSelectedProcedureId(target.procedureId);
+                  }
+                  setActiveNav('workbench');
+                },
+              }}
+              workbenchProps={{
+                target: workbenchTarget,
+                activeTasks: scopedActiveTaskTree,
+                finishedTasks: scopedFinishedTaskTree,
+                procedures,
+                messages,
+                onOpenTask: () => setActiveNav('tasks'),
+                onOpenProcedure: (procedureId) => {
+                  setSelectedProcedureId(procedureId);
+                  setActiveNav('procedures');
+                },
+                onOpenSession: (nextSessionId) => {
+                  const nextLane = laneForSessionId(nextSessionId);
+                  setCurrentScope(nextLane);
+                  setChatLane(nextLane);
+                  setScopeSessionIds((prev) => ({ ...prev, [nextLane]: nextSessionId }));
+                  setActiveNav('chat');
+                },
+                onSendWorkbenchPrompt: async ({ prompt, responseMode: requestedResponseMode, target, task, procedure }) => {
+                  const linkedSessionId = String(target?.sessionId || '').trim();
+                  const lane = normalizeLaneKey(target?.lane) || effectiveLane;
+                  const targetSessionId = linkedSessionId || sessionId || defaultSessionIdForLane(lane);
+                  await axios.post(`${API}/chat`, {
+                    role: 'user',
+                    content: prompt,
+                    session_id: targetSessionId,
+                    preferred_tier: lane,
+                    response_mode: requestedResponseMode || responseMode,
+                  });
+                  setScopeSessionIds((prev) => ({ ...prev, [lane]: targetSessionId }));
+                  if (task?.id) {
+                    setOperatorNotice(`Workbench prompt sent for task ${task.id}`);
+                  } else if (procedure?.procedure_id) {
+                    setOperatorNotice(`Workbench prompt sent for procedure ${procedure.procedure_id}`);
+                  } else {
+                    setOperatorNotice('Workbench prompt sent');
+                  }
+                  await fetchData(true);
+                },
               }}
             />
           </Suspense>
@@ -2676,7 +3331,7 @@ function App() {
               >
                 <Zap size={32} color="#2a2a35" style={{ margin: '0 auto 16px' }} />
                 <div style={{ fontSize: '15px', fontWeight: 600, color: '#3d3d4d', marginBottom: '6px' }}>No messages yet</div>
-                <div style={{ fontSize: '13px', color: '#2d2d38' }}>Describe a goal to get started</div>
+                <div style={{ fontSize: '13px', color: '#2d2d38' }}>Ask a question or start a conversation</div>
               </MotionDiv>
             )}
 
@@ -2714,7 +3369,7 @@ function App() {
           )}
           <div style={{ position: 'relative', background: '#141418', borderRadius: '12px', padding: '8px 8px 8px 16px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s', minHeight: '52px' }}>
             <AnimatePresence>
-            {replyTarget && (
+            {(replyTarget || pendingAttachments.length > 0) && (
               <MotionDiv
                 initial={{ opacity: 0, y: 4, scale: 0.98 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -2723,11 +3378,12 @@ function App() {
                 style={{
                   position: 'absolute',
                   left: '12px',
-                  top: '-16px',
-                  maxWidth: 'min(360px, calc(100% - 92px))',
+                  top: '-38px',
+                  maxWidth: 'min(560px, calc(100% - 92px))',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
+                  flexWrap: 'wrap',
                   background: 'rgba(10,10,12,0.96)',
                   border: '1px solid rgba(255,255,255,0.08)',
                   borderRadius: '999px',
@@ -2736,25 +3392,71 @@ function App() {
                   zIndex: 5,
                 }}
               >
-                <Reply size={12} color="#afb4c6" />
-                <span style={{ fontSize: '11px', color: '#d6d8e4', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  <span style={{ color: '#afb4c6', fontWeight: 700, marginRight: '4px' }}>
-                    {replyTargetSender}
-                  </span>
-                  <span>
-                    {String(replyTarget.content || '').replace(/\s+/g, ' ').trim().slice(0, 120)}
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setReplyTarget(null)}
-                  style={{ background: 'none', border: 'none', color: '#8b90a5', cursor: 'pointer', display: 'flex', padding: '0', marginLeft: '2px' }}
-                >
-                  <X size={12} />
-                </button>
+                {replyTarget && (
+                  <>
+                    <Reply size={12} color="#afb4c6" />
+                    <span style={{ fontSize: '11px', color: '#d6d8e4', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '280px' }}>
+                      <span style={{ color: '#afb4c6', fontWeight: 700, marginRight: '4px' }}>
+                        {replyTargetSender}
+                      </span>
+                      <span>
+                        {String(replyTarget.content || '').replace(/\s+/g, ' ').trim().slice(0, 120)}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setReplyTarget(null)}
+                      style={{ background: 'none', border: 'none', color: '#8b90a5', cursor: 'pointer', display: 'flex', padding: '0', marginLeft: '2px' }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </>
+                )}
+                {pendingAttachments.map((attachment) => (
+                  <AttachmentPill
+                    key={attachment.id}
+                    attachment={attachment}
+                    compact
+                    onRemove={() => removePendingAttachment(attachment.id)}
+                  />
+                ))}
               </MotionDiv>
             )}
             </AnimatePresence>
+            <input
+              ref={attachmentInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                void addAttachments(event.target.files);
+                event.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => attachmentInputRef.current?.click()}
+              style={{
+                background: pendingAttachments.length > 0
+                  ? 'linear-gradient(135deg, rgba(130,87,229,0.92), rgba(79,70,229,0.92))'
+                  : 'linear-gradient(135deg, rgba(130,87,229,0.82), rgba(79,70,229,0.82))',
+                border: 'none',
+                color: '#ffffff',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '8px',
+                borderRadius: '10px',
+                flexShrink: 0,
+                width: '38px',
+                height: '38px',
+                boxShadow: '0 10px 22px rgba(79,70,229,0.18)',
+              }}
+              title="Attach files"
+            >
+              <Paperclip size={14} />
+            </button>
             {currentScope === 'home' && (!sessionId || isDraftSession) && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, paddingRight: '2px' }}>
                 <span style={{ fontSize: '11px', color: '#8f94a7', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
@@ -2792,6 +3494,44 @@ function App() {
                 </div>
               </div>
             )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              <span style={{ fontSize: '11px', color: '#8f94a7', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                Mode
+              </span>
+              <div style={{ display: 'inline-flex', borderRadius: '999px', padding: '3px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                {[
+                  ['thinking', 'Thinking'],
+                  ['instant', 'Instant'],
+                ].map(([modeId, label]) => {
+                  const active = responseMode === modeId;
+                  return (
+                    <button
+                      key={modeId}
+                      type="button"
+                      onClick={() => setResponseMode(modeId)}
+                      style={{
+                        background: active
+                          ? (modeId === 'instant' ? 'rgba(214,173,113,0.22)' : 'rgba(130,87,229,0.22)')
+                          : 'transparent',
+                        color: active
+                          ? (modeId === 'instant' ? '#f3ddbf' : '#dccfff')
+                          : '#8f94a7',
+                        border: 'none',
+                        borderRadius: '999px',
+                        padding: '6px 10px',
+                        fontSize: '11px',
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        letterSpacing: '0.04em',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             <input
               ref={inputRef}
               type="text"
@@ -2800,32 +3540,35 @@ function App() {
                 const nextValue = e.target.value;
                 setInputText(nextValue);
                 if (isDraftSession) {
-                  setLaneDrafts((prev) => ({
-                    ...prev,
-                    [effectiveLane]: (prev[effectiveLane] || []).map((draft) => (
-                      draft?.session_id === sessionId
-                        ? {
-                            ...draft,
-                            draftMessage: nextValue,
-                            last_message_preview: nextValue.trim() || 'Draft',
-                          }
-                        : draft
-                    )),
-                  }));
+                  if (nextValue.trim() || pendingAttachments.length > 0) {
+                    materializeDraftIfNeeded(effectiveLane, sessionId, nextValue, { attachments: pendingAttachments });
+                  } else if (currentDraft) {
+                    materializeDraftIfNeeded(effectiveLane, sessionId, '', { attachments: [] });
+                  }
+                }
+              }}
+              onPaste={(event) => {
+                const items = Array.from(event.clipboardData?.items || []);
+                const files = items
+                  .map((item) => item.kind === 'file' ? item.getAsFile() : null)
+                  .filter(Boolean);
+                if (files.length > 0) {
+                  event.preventDefault();
+                  void addAttachments(files);
                 }
               }}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-              placeholder="Describe a goal..."
+              placeholder="Ask a question or describe what you need..."
               style={{ flex: 1, background: 'transparent', border: 'none', color: '#edeeef', outline: 'none', fontSize: '14px', lineHeight: 1.5 }}
             />
             <button
               onClick={handleSendMessage}
-              disabled={isSending || !inputText.trim()}
+              disabled={isSending || (!inputText.trim() && pendingAttachments.length === 0) || pendingAttachments.some((item) => String(item?.status || '').toLowerCase() === 'preparing')}
               style={{
-                background: inputText.trim() ? 'linear-gradient(135deg, #8257e5, #4f46e5)' : 'rgba(255,255,255,0.04)',
+                background: (inputText.trim() || pendingAttachments.length > 0) ? 'linear-gradient(135deg, #8257e5, #4f46e5)' : 'rgba(255,255,255,0.04)',
                 border: 'none', borderRadius: '8px', padding: '10px 18px',
-                color: inputText.trim() ? '#fff' : '#444',
-                fontWeight: 600, cursor: inputText.trim() ? 'pointer' : 'default',
+                color: (inputText.trim() || pendingAttachments.length > 0) ? '#fff' : '#444',
+                fontWeight: 600, cursor: (inputText.trim() || pendingAttachments.length > 0) ? 'pointer' : 'default',
                 display: 'flex', alignItems: 'center', gap: '7px', fontSize: '14px',
                 transition: 'all 0.2s', flexShrink: 0
               }}
@@ -2855,6 +3598,7 @@ function App() {
             <TaskPaneContent
               activeNav={activeNav}
               laneFinishedTasks={laneFinishedTasks}
+              laneQueuedTasks={laneQueuedTasks}
               showFinishedTasks={showFinishedTasks}
               setShowFinishedTasks={setShowFinishedTasks}
               focusedTaskPaneTree={focusedTaskPaneTree}
@@ -2869,6 +3613,18 @@ function App() {
               laneDetails={laneDetails}
               laneCurrentTaskTitles={laneCurrentTaskTitles}
               providerTelemetry={providerTelemetry}
+              onOpenProcedure={(procedureId) => {
+                setSelectedProcedureId(procedureId);
+                setActiveNav('procedures');
+              }}
+              onOpenTask={() => {
+                setActiveNav('tasks');
+              }}
+              onOpenWorkbench={(target) => {
+                setWorkbenchTarget(target);
+                if (target?.procedureId) setSelectedProcedureId(target.procedureId);
+                setActiveNav('workbench');
+              }}
             />
           </Suspense>
         </div>
@@ -2914,8 +3670,8 @@ const TickerStrip = ({ text, active }) => {
   const content = String(text || '').trim();
   const containerRef = useRef(null);
   const contentRef = useRef(null);
-  const [shouldScroll, setShouldScroll] = useState(false);
-  const repeated = `${content}   •   ${content}   •   ${content}`;
+  const [metrics, setMetrics] = useState({ shouldScroll: false, distancePx: 0 });
+  const repeated = `${content}   •   ${content}`;
   if (!content) return null;
 
   useEffect(() => {
@@ -2923,7 +3679,12 @@ const TickerStrip = ({ text, active }) => {
       const container = containerRef.current;
       const inner = contentRef.current;
       if (!container || !inner) return;
-      setShouldScroll(inner.scrollWidth > container.clientWidth - 20);
+      const singleWidth = inner.scrollWidth;
+      const overflow = singleWidth > container.clientWidth - 20;
+      setMetrics({
+        shouldScroll: overflow,
+        distancePx: overflow ? singleWidth + 24 : 0,
+      });
     };
     measure();
     if (typeof window !== 'undefined') {
@@ -2931,7 +3692,12 @@ const TickerStrip = ({ text, active }) => {
       return () => window.removeEventListener('resize', measure);
     }
     return undefined;
-  }, [content, repeated]);
+  }, [content]);
+
+  const PIXELS_PER_SECOND = 28;
+  const animationDuration = metrics.shouldScroll && metrics.distancePx > 0
+    ? Math.max(8, metrics.distancePx / PIXELS_PER_SECOND)
+    : 0;
 
   return (
     <div
@@ -2948,9 +3714,8 @@ const TickerStrip = ({ text, active }) => {
       }}
     >
       <MotionDiv
-        ref={contentRef}
-        animate={shouldScroll ? { x: ['0%', '-33.333%'] } : { x: '0%' }}
-        transition={shouldScroll ? { duration: 18, ease: 'linear', repeat: Infinity } : { duration: 0 }}
+        animate={metrics.shouldScroll ? { x: [0, -metrics.distancePx] } : { x: 0 }}
+        transition={metrics.shouldScroll ? { duration: animationDuration, ease: 'linear', repeat: Infinity } : { duration: 0 }}
         style={{
           display: 'inline-flex',
           whiteSpace: 'nowrap',
@@ -2962,7 +3727,8 @@ const TickerStrip = ({ text, active }) => {
           minWidth: 'max-content',
         }}
       >
-        <span>{shouldScroll ? repeated : content}</span>
+        <span ref={contentRef}>{content}</span>
+        {metrics.shouldScroll && <span aria-hidden="true">{repeated}</span>}
       </MotionDiv>
     </div>
   );
@@ -3003,8 +3769,11 @@ const TopModeTab = ({
   apiStatus = 'ok',
   showControls = false,
   progress = null,
+  toggleChecked = false,
+  togglePending = false,
   onPause,
   onResume,
+  onReconnect,
   onPauseTask,
   onResumeTask,
   onStopTask,
@@ -3074,30 +3843,40 @@ const TopModeTab = ({
     .slice(-8)
     .join('   •   ');
   const singleLineObjective = currentObjectiveDisplay || topObjective || 'No active task';
+  const laneToggleDisabled = apiStatus !== 'ok' && label !== 'GLOBAL';
   const agentActivelyRunnable = agentEnabled && !agentSuppressedByGlobal && apiStatus === 'ok';
   const taskControlsEnabled = Boolean(showControls && apiStatus === 'ok' && progress?.taskActionable);
-  const agentToggleTrackBorder = agentSuppressedByGlobal
+  const toggleIsActive = apiStatus === 'ok' ? toggleChecked : (label === 'GLOBAL' ? togglePending : toggleChecked);
+  const agentToggleTrackBorder = apiStatus !== 'ok'
+    ? 'rgba(255,255,255,0.14)'
+    : agentSuppressedByGlobal
     ? 'rgba(255,255,255,0.14)'
     : agentEnabled
     ? accent === 'trainer'
       ? 'rgba(235,141,94,0.28)'
       : 'rgba(146,196,188,0.28)'
     : 'rgba(255,255,255,0.14)';
-  const agentToggleTrackBg = agentSuppressedByGlobal
+  const agentToggleTrackBg = apiStatus !== 'ok'
+    ? 'rgba(255,255,255,0.06)'
+    : agentSuppressedByGlobal
     ? 'rgba(255,255,255,0.08)'
     : agentEnabled
     ? accent === 'trainer'
       ? 'rgba(205,96,52,0.16)'
       : 'rgba(93,131,137,0.16)'
     : 'rgba(255,255,255,0.08)';
-  const agentToggleKnobBg = agentSuppressedByGlobal
+  const agentToggleKnobBg = apiStatus !== 'ok'
+    ? '#a5abbb'
+    : agentSuppressedByGlobal
     ? '#8f94a6'
     : agentEnabled
     ? accent === 'trainer'
       ? '#ffb18c'
       : '#9ad8cd'
     : '#b7bbca';
-  const agentToggleKnobShadow = agentSuppressedByGlobal || !agentEnabled
+  const agentToggleKnobShadow = apiStatus !== 'ok'
+    ? 'none'
+    : agentSuppressedByGlobal || !agentEnabled
     ? 'none'
     : accent === 'trainer'
     ? '0 0 12px rgba(205,96,52,0.28)'
@@ -3138,22 +3917,31 @@ const TopModeTab = ({
           <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '0.08em', color: apiStatus === 'error' ? '#ff4d4d' : statusColor, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
             {displayStatus}
           </span>
-          {showControls && apiStatus === 'ok' && (
+          {showControls && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
               <button
                 type="button"
                 role="switch"
-                aria-checked={agentEnabled}
-                aria-label={`${agentEnabled ? 'Pause' : 'Resume'} ${label} agent`}
+                aria-checked={toggleIsActive}
+                aria-label={`${toggleIsActive ? 'Pause' : 'Resume'} ${label} agent`}
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (agentEnabled) {
+                  if (apiStatus !== 'ok') {
+                    if (label === 'GLOBAL') {
+                      onReconnect?.();
+                    }
+                    return;
+                  }
+                  if (toggleChecked) {
                     onPause?.();
                   } else {
                     onResume?.();
                   }
                 }}
-                title={`${agentEnabled ? 'Pause' : 'Resume'} ${label} agent`}
+                title={apiStatus !== 'ok'
+                  ? (label === 'GLOBAL' ? `Reconnect ${label}` : `${label} unavailable while API is down`)
+                  : `${toggleChecked ? 'Pause' : 'Resume'} ${label} agent`}
+                disabled={laneToggleDisabled}
                 style={{
                   position: 'relative',
                   width: '34px',
@@ -3161,22 +3949,24 @@ const TopModeTab = ({
                   borderRadius: '999px',
                   border: `1px solid ${agentToggleTrackBorder}`,
                   background: agentToggleTrackBg,
-                  cursor: 'pointer',
+                  cursor: laneToggleDisabled ? 'default' : 'pointer',
                   padding: 0,
                   transition: 'background 0.18s ease, border-color 0.18s ease',
+                  opacity: laneToggleDisabled ? 0.6 : 1,
                 }}
               >
                 <span
                   style={{
                     position: 'absolute',
                     top: '2px',
-                    left: agentEnabled ? '16px' : '2px',
+                    left: toggleIsActive ? '16px' : '2px',
                     width: '14px',
                     height: '14px',
                     borderRadius: '999px',
                     background: agentToggleKnobBg,
                     boxShadow: agentToggleKnobShadow,
                     transition: 'left 0.18s ease, background 0.18s ease, box-shadow 0.18s ease',
+                    animation: togglePending ? 'strata-toggle-pulse 1s ease-in-out infinite' : 'none',
                   }}
                 />
               </button>
@@ -3197,7 +3987,7 @@ const TopModeTab = ({
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           {pathSegments.slice(0, -1).length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '3px', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
               {pathSegments.slice(0, -1).map((segment, index) => {
                 const segmentPercent = Math.max(0, Math.min(100, Number(segment?.percent || 0)));
                 const segmentTone = segment?.status === 'blocked'

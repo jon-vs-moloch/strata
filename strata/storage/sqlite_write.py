@@ -9,6 +9,7 @@ from sqlalchemy.exc import OperationalError
 _sqlite_write_lock = Lock()
 _SQLITE_WRITE_RETRIES = 8
 _SQLITE_WRITE_BACKOFF_S = 0.15
+_SQLITE_WRITE_MAX_TOTAL_WAIT_S = 6.0
 
 
 def is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -17,12 +18,21 @@ def is_sqlite_locked_error(exc: BaseException) -> bool:
 
 def _retry_locked(fn, session: Session, *, enabled: bool):
     attempts = 1 if not enabled else _SQLITE_WRITE_RETRIES
+    started_at = time.monotonic()
     for index in range(attempts):
         try:
             return fn()
         except OperationalError as exc:
             if not enabled or not is_sqlite_locked_error(exc) or index >= attempts - 1:
                 raise
+            if (time.monotonic() - started_at) >= _SQLITE_WRITE_MAX_TOTAL_WAIT_S:
+                raise OperationalError(
+                    str(getattr(exc, "statement", "") or "sqlite write timeout"),
+                    getattr(exc, "params", None),
+                    Exception(
+                        f"database is locked and exceeded bounded write wait of {_SQLITE_WRITE_MAX_TOTAL_WAIT_S:.1f}s"
+                    ),
+                ) from exc
             session.rollback()
             time.sleep(_SQLITE_WRITE_BACKOFF_S * (index + 1))
 

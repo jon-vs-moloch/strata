@@ -179,6 +179,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                 cases=payload.get("cases"),
                 run_label=payload.get("run_label") or f"{candidate_change_id}-queued",
                 eval_harness_config_override=payload.get("eval_harness_config_override"),
+                progress_fn=_progress,
             )
             persist_structured_eval_report(
                 storage,
@@ -202,6 +203,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                 source_task_id=task.task_id,
                 spawned_task_ids=payload.get("spawned_task_ids"),
                 associated_task_ids=payload.get("associated_task_ids"),
+                progress_fn=_progress,
             )
             result = experiment_result.model_dump()
         elif kind == "benchmark_gate":
@@ -345,6 +347,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                     },
                     source_task_id=task.task_id,
                     associated_task_ids=[task.task_id, *(payload.get("associated_task_ids") or [])],
+                    progress_fn=_progress,
                 )
                 evaluated.append({"proposal": proposal_to_evaluate, "result": experiment_result.model_dump(), "resolution": resolution})
                 if auto_promote and experiment_result.recommendation == "promote":

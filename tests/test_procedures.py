@@ -2,12 +2,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.procedures.registry import (
+    ensure_draft_procedure_for_task,
     ensure_onboarding_task,
     ensure_startup_smoke_task,
     get_onboarding_status,
     get_procedure,
     get_startup_smoke_status,
     list_procedures,
+    record_procedure_run,
     queue_procedure,
 )
 from strata.orchestrator.user_questions import get_question_for_source
@@ -32,6 +34,7 @@ def test_default_onboarding_procedure_is_available():
     assert any(item["procedure_id"] == "operator_onboarding" for item in procedures)
     assert any(item["procedure_id"] == "startup_sanity_check" for item in procedures)
     assert onboarding["title"] == "Operator Onboarding"
+    assert onboarding["lifecycle_state"] == "vetted"
     assert onboarding["checklist"]
     assert smoke["checklist"]
 
@@ -105,3 +108,50 @@ def test_startup_smoke_status_and_ensure_task_are_idempotent():
     completed = get_startup_smoke_status(storage)
     assert completed["has_completed"] is True
     assert completed["needs_queue"] is False
+
+
+def test_novel_task_can_seed_draft_procedure():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Figure out the launch checklist",
+        description="Discover and retain a reusable launch workflow.",
+        state=TaskState.PENDING,
+        constraints={"lane": "agent"},
+        success_criteria={"deliverables": ["launch checklist"]},
+    )
+    storage.commit()
+
+    procedure = ensure_draft_procedure_for_task(
+        storage,
+        task,
+        checklist=[
+            {"id": "inspect", "title": "Inspect launch surfaces", "description": "Look at the launch entrypoints."},
+            {"id": "verify", "title": "Verify launch health", "description": "Confirm the system comes up."},
+        ],
+    )
+
+    assert procedure["lifecycle_state"] == "draft"
+    assert procedure["procedure_id"].startswith("draft_")
+    assert len(procedure["checklist"]) == 2
+    reloaded = storage.tasks.get_by_id(task.task_id)
+    assert reloaded.constraints["procedure_id"] == procedure["procedure_id"]
+    assert reloaded.constraints["procedure_lifecycle_state"] == "draft"
+
+
+def test_draft_procedure_promotes_to_tested_after_success():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Learn runtime smoke flow",
+        description="Capture a reusable smoke workflow.",
+        state=TaskState.PENDING,
+        constraints={"lane": "agent"},
+        success_criteria={},
+    )
+    storage.commit()
+
+    procedure = ensure_draft_procedure_for_task(storage, task)
+    updated = record_procedure_run(storage, procedure["procedure_id"], outcome="succeeded", source_task_id=task.task_id)
+    assert updated["lifecycle_state"] == "tested"
+    assert updated["stats"]["run_count"] == 1
+    assert updated["stats"]["success_count"] == 1
+    assert updated["stats"]["tested_at"]

@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import desc
+
 from strata.observability.context import record_context_load
 from strata.knowledge.page_access import build_access_state, sanitize_for_audience
 from strata.knowledge.page_payloads import (
@@ -23,7 +25,7 @@ from strata.knowledge.page_payloads import (
     slugify_page_title,
     split_sections,
 )
-from strata.storage.models import ParameterModel, TaskState, TaskType
+from strata.storage.models import ParameterModel, TaskModel, TaskState, TaskType
 
 
 KNOWLEDGE_PAGE_INDEX_KEY = "knowledge_pages:index"
@@ -457,6 +459,49 @@ class KnowledgePageStore:
             description += "\nRelated pages:\n" + "\n".join(f"- {item}" for item in normalized_related[:10])
         if evidence:
             description += "\nEvidence hints:\n" + "\n".join(f"- {hint}" for hint in evidence[:10])
+        existing = None
+        if hasattr(self.storage, "session"):
+            existing = (
+                self.storage.session.query(TaskModel)
+                .filter(TaskModel.title == f"Update Knowledge: {title}")
+                .filter(TaskModel.type == TaskType.RESEARCH)
+                .filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING, TaskState.PUSHED, TaskState.BLOCKED]))
+                .order_by(desc(TaskModel.updated_at))
+                .first()
+            )
+        elif hasattr(self.storage, "tasks") and hasattr(self.storage.tasks, "created"):
+            for candidate in reversed(list(self.storage.tasks.created or [])):
+                candidate_constraints = dict(getattr(candidate, "constraints", {}) or {})
+                candidate_type = getattr(getattr(candidate, "type", None), "value", getattr(candidate, "type", ""))
+                candidate_state = getattr(getattr(candidate, "state", None), "value", getattr(candidate, "state", ""))
+                if (
+                    str(getattr(candidate, "title", "") or "").strip() == f"Update Knowledge: {title}"
+                    and str(candidate_type or "").strip() == TaskType.RESEARCH.value
+                    and str(candidate_state or "").strip().lower() in {
+                        TaskState.PENDING.value.lower(),
+                        TaskState.WORKING.value.lower(),
+                        TaskState.PUSHED.value.lower(),
+                        TaskState.BLOCKED.value.lower(),
+                    }
+                    and str(candidate_constraints.get("knowledge_slug") or "").strip() == normalized_slug
+                    and str(candidate_constraints.get("knowledge_operation") or "").strip() == str(operation or "").strip()
+                ):
+                    existing = candidate
+                    break
+        if existing is not None:
+            existing_constraints = dict(existing.constraints or {})
+            if (
+                str(existing_constraints.get("knowledge_slug") or "").strip() == normalized_slug
+                and str(existing_constraints.get("knowledge_operation") or "").strip() == str(operation or "").strip()
+            ):
+                merged_hints = list(dict.fromkeys([*(existing_constraints.get("evidence_hints") or []), *(evidence or [])]))
+                merged_related = list(dict.fromkeys([*(existing_constraints.get("related_knowledge_slugs") or []), *normalized_related]))
+                existing_constraints["evidence_hints"] = merged_hints
+                existing_constraints["related_knowledge_slugs"] = merged_related
+                existing_constraints["reason"] = reason
+                existing.constraints = existing_constraints
+                existing.description = description
+                return existing
         task = self.storage.tasks.create(
             title=f"Update Knowledge: {title}",
             description=description,

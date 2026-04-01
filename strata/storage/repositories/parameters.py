@@ -8,6 +8,7 @@
 
 from typing import Any, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from strata.storage.models import ParameterModel
 from strata.storage.sqlite_write import flush_with_write_lock
 
@@ -89,6 +90,7 @@ class ParameterRepository:
             })
             
             param.value = {"current": new_value, "history": _bounded_history(history)}
+            flag_modified(param, "value")
             param.mutation_count += 1
             # Reset counters for the new evolutionary epoch
             param.usage_count = 0
@@ -112,3 +114,4 @@ class ParameterRepository:
         param.description = description or param.description
         history = param.value.get("history", []) if isinstance(param.value, dict) else []
         param.value = {"current": value, "history": _bounded_history(history)}
+        flag_modified(param, "value")

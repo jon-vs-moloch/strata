@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { BookOpen, Pencil, Plus, Search } from 'lucide-react';
+import { Activity, BookOpen, GitBranch, Pencil, Plus, Play, Wrench } from 'lucide-react';
 import TaskCard from '../components/TaskCard';
 
 const parseTimestamp = (dateString) => {
@@ -40,6 +40,14 @@ const formatAbsoluteWithRelative = (dateString) => {
   return `${formatAbsoluteTime(dateString)} (${formatRelativeTime(dateString)})`;
 };
 
+const stringifyJson = (value) => {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (err) {
+    return String(value);
+  }
+};
+
 const summarizeBootstrapReasons = (items = []) => {
   const counts = new Map();
   items.forEach((item) => {
@@ -65,6 +73,429 @@ const DashboardPanel = ({ title, children }) => (
     {children}
   </div>
 );
+
+const HistoryEventCard = ({ event, defaultExpanded = false, onOpenTask, onOpenProcedure, onOpenSession, onOpenWorkbench }) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const actionButtons = [];
+  if (event.taskId && onOpenTask) {
+    actionButtons.push(
+      <button
+        key="task"
+        type="button"
+        onClick={() => onOpenTask(event.taskId)}
+        style={{
+          background: 'rgba(255,255,255,0.04)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          color: '#d7d9e6',
+          borderRadius: '999px',
+          padding: '6px 10px',
+          fontSize: '10px',
+          fontWeight: 800,
+          cursor: 'pointer',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        Open Task
+      </button>
+    );
+  }
+  if (event.procedureId && onOpenProcedure) {
+    actionButtons.push(
+      <button
+        key="procedure"
+        type="button"
+        onClick={() => onOpenProcedure(event.procedureId)}
+        style={{
+          background: 'rgba(130,87,229,0.14)',
+          border: '1px solid rgba(130,87,229,0.28)',
+          color: '#ece3ff',
+          borderRadius: '999px',
+          padding: '6px 10px',
+          fontSize: '10px',
+          fontWeight: 800,
+          cursor: 'pointer',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        Open Procedure
+      </button>
+    );
+  }
+  if (event.sessionId && onOpenSession) {
+    actionButtons.push(
+      <button
+        key="session"
+        type="button"
+        onClick={() => onOpenSession(event.sessionId)}
+        style={{
+          background: 'rgba(85,149,255,0.14)',
+          border: '1px solid rgba(85,149,255,0.24)',
+          color: '#e6f0ff',
+          borderRadius: '999px',
+          padding: '6px 10px',
+          fontSize: '10px',
+          fontWeight: 800,
+          cursor: 'pointer',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        Open Session
+      </button>
+    );
+  }
+  if (onOpenWorkbench) {
+    actionButtons.push(
+      <button
+        key="workbench"
+        type="button"
+        onClick={() => onOpenWorkbench(event)}
+        style={{
+          background: 'rgba(214,173,113,0.14)',
+          border: '1px solid rgba(214,173,113,0.24)',
+          color: '#f3ddbf',
+          borderRadius: '999px',
+          padding: '6px 10px',
+          fontSize: '10px',
+          fontWeight: 800,
+          cursor: 'pointer',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+        }}
+      >
+        Open in Workbench
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '14px', padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            <RoutePill label="TYPE" value={event.kind} tone={event.tone || 'neutral'} />
+            {event.scope ? <RoutePill label="SCOPE" value={event.scope} tone="neutral" /> : null}
+            {event.lane ? <RoutePill label="LANE" value={event.lane} tone="neutral" /> : null}
+          </div>
+          <div style={{ color: '#edeeef', fontSize: '14px', fontWeight: 700, lineHeight: 1.4 }}>
+            {event.title}
+          </div>
+          {event.summary ? (
+            <div style={{ color: '#9a9caf', fontSize: '12px', lineHeight: 1.7 }}>
+              {event.summary}
+            </div>
+          ) : null}
+        </div>
+        <div style={{ flexShrink: 0, color: '#7f8091', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace" }}>
+          {formatAbsoluteWithRelative(event.at)}
+        </div>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+          {actionButtons}
+        </div>
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          style={{
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '10px',
+            color: '#d7d9e6',
+            fontSize: '10px',
+            fontWeight: 800,
+            letterSpacing: '0.06em',
+            padding: '6px 10px',
+            cursor: 'pointer',
+            textTransform: 'uppercase',
+          }}
+        >
+          {expanded ? 'Hide' : 'Show'} Details
+        </button>
+      </div>
+      {expanded ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {event.detail ? (
+            <div style={{ color: '#c9cad8', fontSize: '12px', lineHeight: 1.7 }}>
+              {event.detail}
+            </div>
+          ) : null}
+          {event.metadata ? (
+            <pre style={{ margin: 0, padding: '12px', borderRadius: '12px', background: '#0f1014', border: '1px solid rgba(255,255,255,0.06)', color: '#b8bbca', fontSize: '11px', lineHeight: 1.6, overflowX: 'auto', fontFamily: "'JetBrains Mono', monospace" }}>
+              {stringifyJson(event.metadata)}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const flattenTaskTree = (tasks = []) => {
+  const out = [];
+  const visit = (task, depth = 0) => {
+    if (!task) return;
+    out.push({ ...task, __depth: depth });
+    (Array.isArray(task.children) ? task.children : []).forEach((child) => visit(child, depth + 1));
+  };
+  tasks.forEach((task) => visit(task, 0));
+  return out;
+};
+
+const buildHistoryEvents = ({
+  currentScope,
+  activeTasks,
+  finishedTasks,
+  messages,
+  procedures,
+  specProposals,
+  evalJobs,
+  laneDetails,
+}) => {
+  const scopeLabel = currentScope === 'home' ? 'global' : currentScope;
+  const events = [];
+
+  flattenTaskTree([...(activeTasks || []), ...(finishedTasks || [])]).forEach((task) => {
+    events.push({
+      id: `task-${task.id}`,
+      at: task.updated_at || task.created_at,
+      kind: 'task',
+      tone: ['working', 'complete'].includes(String(task.status || '').toLowerCase()) ? 'success' : ['blocked', 'abandoned', 'cancelled'].includes(String(task.status || '').toLowerCase()) ? 'warning' : 'neutral',
+      scope: scopeLabel,
+      lane: task.lane || '',
+      title: task.title || 'Untitled task',
+      summary: task.description || '',
+      detail: `Task status: ${task.status || 'unknown'}${task.parent_id ? ` · spawned from ${task.parent_id}` : ''}`,
+      metadata: {
+        task_id: task.id,
+        status: task.status,
+        lane: task.lane,
+        parent_id: task.parent_id,
+        depth: task.__depth,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        pending_question: task.pending_question || null,
+      },
+      taskId: task.id,
+    });
+    (Array.isArray(task.attempts) ? task.attempts : []).forEach((attempt, index) => {
+      events.push({
+        id: `attempt-${attempt.id || `${task.id}-${index}`}`,
+        at: attempt.ended_at || attempt.started_at || task.updated_at || task.created_at,
+        kind: 'attempt',
+        tone: String(attempt.outcome || '').toLowerCase() === 'succeeded' ? 'success' : String(attempt.outcome || '').toLowerCase() === 'failed' ? 'danger' : 'neutral',
+        scope: scopeLabel,
+        lane: task.lane || '',
+        title: `${task.title || 'Task'} · Attempt ${attempt.label || index + 1}`,
+        summary: attempt.reason || attempt.outcome || 'Attempt metadata available',
+        detail: attempt.reason || '',
+        metadata: {
+          attempt_id: attempt.id,
+          outcome: attempt.outcome,
+          started_at: attempt.started_at,
+          ended_at: attempt.ended_at,
+          resolution: attempt.resolution,
+          reason: attempt.reason,
+          artifacts: attempt.artifacts || null,
+          evidence: attempt.evidence || null,
+          plan_review: attempt.plan_review || null,
+        },
+        taskId: task.id,
+      });
+    });
+  });
+
+  (Array.isArray(messages) ? messages : []).forEach((message, index) => {
+    const metadata = message?.message_metadata || {};
+    events.push({
+      id: `message-${message.id || index}`,
+      at: message.created_at,
+      kind: 'message',
+      tone: message.role === 'user' ? 'neutral' : 'info',
+      scope: scopeLabel,
+      lane: metadata.lane || '',
+      title: `${String(message.role || 'message').toUpperCase()} · ${stripInlineMarkdown(message.content || '').slice(0, 72) || 'Message'}`,
+      summary: stripInlineMarkdown(message.content || '').slice(0, 180),
+      detail: stripInlineMarkdown(message.content || ''),
+      metadata: {
+        message_id: message.id,
+        role: message.role,
+        session_id: message.session_id,
+        created_at: message.created_at,
+        message_metadata: metadata,
+      },
+      sessionId: message.session_id,
+    });
+  });
+
+  (Array.isArray(procedures) ? procedures : []).forEach((procedure) => {
+    const normalized = normalizeProcedureRecord(procedure);
+    if (!normalized) return;
+    events.push({
+      id: `procedure-${normalized.procedure_id}`,
+      at: normalized?.stats?.last_run_at || normalized?.stats?.tested_at,
+      kind: 'procedure',
+      tone: procedureLifecycleTone(normalized.lifecycle_state),
+      scope: scopeLabel,
+      lane: '',
+      title: normalized.title,
+      summary: normalized.summary || `Procedure is ${normalized.lifecycle_state}.`,
+      detail: normalized.description || '',
+      metadata: normalized,
+      procedureId: normalized.procedure_id,
+    });
+  });
+
+  (Array.isArray(specProposals) ? specProposals : []).forEach((proposal) => {
+    events.push({
+      id: `spec-${proposal.proposal_id}`,
+      at: proposal.updated_at || proposal.created_at,
+      kind: 'spec proposal',
+      tone: String(proposal.status || '').toLowerCase().includes('clarification') ? 'warning' : proposal.status === 'approved' ? 'success' : 'neutral',
+      scope: scopeLabel,
+      lane: '',
+      title: `${proposal.scope || 'spec'} · ${proposal.status || 'pending'}`,
+      summary: proposal.summary || proposal.proposed_change || proposal.proposal_id,
+      detail: proposal.proposed_change || '',
+      metadata: proposal,
+    });
+  });
+
+  (Array.isArray(evalJobs) ? evalJobs : []).forEach((job) => {
+    events.push({
+      id: `eval-${job.task_id}`,
+      at: job.updated_at || job.created_at,
+      kind: 'eval job',
+      tone: String(job.state || '').toLowerCase() === 'working' ? 'info' : String(job.state || '').toLowerCase() === 'complete' ? 'success' : 'neutral',
+      scope: scopeLabel,
+      lane: 'trainer',
+      title: job.title || 'Eval job',
+      summary: job.system_job?.kind || '',
+      detail: job.system_job_result?.result ? 'Structured result attached.' : '',
+      metadata: job,
+      taskId: job.task_id,
+    });
+  });
+
+  Object.entries(laneDetails || {}).forEach(([lane, detail]) => {
+    (detail?.recent_steps || []).forEach((step, index) => {
+      events.push({
+        id: `lane-${lane}-${step.at || index}-${step.step || 'step'}`,
+        at: step.at,
+        kind: 'lane step',
+        tone: lane === 'trainer' ? 'warning' : 'neutral',
+        scope: currentScope === 'home' ? 'global' : lane,
+        lane,
+        title: `${lane.toUpperCase()} · ${step.label || 'Step update'}`,
+        summary: step.detail || '',
+        detail: step.detail || '',
+        metadata: {
+          lane,
+          ...detail,
+          step,
+        },
+      });
+    });
+  });
+
+  return events
+    .filter((event) => Boolean(event.at))
+    .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+};
+
+const HistoryView = ({
+  currentScope,
+  activeTasks,
+  finishedTasks,
+  messages,
+  procedures,
+  specProposals,
+  evalJobs,
+  laneDetails,
+  onOpenTask,
+  onOpenProcedure,
+  onOpenSession,
+  onOpenWorkbench,
+}) => {
+  const events = buildHistoryEvents({
+    currentScope,
+    activeTasks,
+    finishedTasks,
+    messages,
+    procedures,
+    specProposals,
+    evalJobs,
+    laneDetails,
+  });
+  const [selectedKind, setSelectedKind] = useState('all');
+  const filteredEvents = selectedKind === 'all'
+    ? events
+    : events.filter((event) => event.kind === selectedKind);
+  const buckets = [
+    ['all', 'All'],
+    ['task', 'Tasks'],
+    ['attempt', 'Attempts'],
+    ['lane step', 'Lane'],
+    ['message', 'Messages'],
+    ['procedure', 'Procedures'],
+    ['eval job', 'Eval'],
+  ];
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+      <DashboardPanel title="HISTORY">
+        <div style={{ color: '#8d8ea1', fontSize: '13px', lineHeight: 1.7 }}>
+          History is the scoped event log for runtime work. It is meant to support autopsies, trace inspection, and operator intervention by showing what happened in chronological order with expandable metadata.
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+          {buckets.map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setSelectedKind(id)}
+              style={{
+                background: selectedKind === id ? 'rgba(130,87,229,0.16)' : 'rgba(255,255,255,0.04)',
+                border: selectedKind === id ? '1px solid rgba(130,87,229,0.28)' : '1px solid rgba(255,255,255,0.08)',
+                color: selectedKind === id ? '#ede4ff' : '#d7d9e6',
+                borderRadius: '999px',
+                padding: '7px 12px',
+                fontSize: '11px',
+                fontWeight: 800,
+                cursor: 'pointer',
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </DashboardPanel>
+
+      {filteredEvents.length ? (
+        filteredEvents.slice(0, 120).map((event, index) => (
+          <HistoryEventCard
+            key={event.id}
+            event={event}
+            defaultExpanded={index < 2}
+            onOpenTask={onOpenTask}
+            onOpenProcedure={onOpenProcedure}
+            onOpenSession={onOpenSession}
+            onOpenWorkbench={onOpenWorkbench}
+          />
+        ))
+      ) : (
+        <DashboardPanel title="NO EVENTS">
+          <div style={{ color: '#8d8ea1', fontSize: '13px', lineHeight: 1.7 }}>
+            No history events are available for this scope and filter yet.
+          </div>
+        </DashboardPanel>
+      )}
+    </div>
+  );
+};
 
 const RoutePill = ({ label, value, tone = 'neutral' }) => {
   const tones = {
@@ -111,9 +542,61 @@ const Sparkline = ({ values, color = '#8257e5' }) => {
   );
 };
 
+const TaskSection = ({ title, subtitle = '', tasks, onArchiveTask, nowMs, laneDetails, emptyLabel, defaultOpen = true }) => {
+  const [expanded, setExpanded] = useState(defaultOpen);
+  return (
+    <DashboardPanel title={title}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+        <div style={{ fontSize: '13px', color: '#8d8ea1', lineHeight: 1.7 }}>
+          {subtitle}
+        </div>
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          style={{
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '10px',
+            color: '#d7d9e6',
+            fontSize: '11px',
+            fontWeight: 800,
+            letterSpacing: '0.06em',
+            padding: '8px 10px',
+            cursor: 'pointer',
+            textTransform: 'uppercase',
+          }}
+        >
+          {expanded ? 'Hide' : 'Show'} {tasks.length}
+        </button>
+      </div>
+      {expanded ? (
+        tasks.length ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {tasks.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                onArchive={() => onArchiveTask(task.id)}
+                nowMs={nowMs}
+                laneDetail={laneDetails?.[task.lane] || null}
+                detailLevel="full"
+              />
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: '13px', color: '#8d8ea1', lineHeight: 1.7 }}>
+            {emptyLabel}
+          </div>
+        )
+      ) : null}
+    </DashboardPanel>
+  );
+};
+
 const TasksView = ({
   currentScope,
   activeTasks,
+  queuedTasks,
   finishedTasks,
   workerStatus,
   laneStatuses,
@@ -124,7 +607,6 @@ const TasksView = ({
   onArchiveTask,
   nowMs,
 }) => {
-  const [showFinished, setShowFinished] = useState(false);
   const scopeLabel = currentScope === 'home' ? 'Global' : currentScope === 'trainer' ? 'Trainer' : 'Agent';
   const scopeLaneDetail = currentScope === 'home' ? null : (laneDetails?.[currentScope] || null);
   const scopeHealth = currentScope === 'home'
@@ -147,6 +629,7 @@ const TasksView = ({
             <RoutePill label="SCOPE" value={scopeLabel} tone="neutral" />
             <RoutePill label="MODE" value={scopeHealth} tone={String(scopeHealth).toUpperCase().includes('GENERATING') ? 'success' : String(scopeHealth).toUpperCase().includes('BLOCKED') || String(scopeHealth).toUpperCase().includes('STALLED') ? 'warning' : 'neutral'} />
             <RoutePill label="ACTIVE" value={String(activeTasks.length)} tone="success" />
+            <RoutePill label="QUEUED" value={String((queuedTasks || []).length)} tone="warning" />
             <RoutePill label="RECENT" value={String(finishedTasks.length)} tone="neutral" />
             <RoutePill label="HEARTBEAT" value={scopeHeartbeat} tone="neutral" />
           </div>
@@ -155,9 +638,9 @@ const TasksView = ({
           </div>
         </DashboardPanel>
 
-        <DashboardPanel title="TASK TELEMETRY">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
-            <TelemetryCell value={scopeOperationalMetrics.working || '—'} label="RUNNING" />
+      <DashboardPanel title="TASK TELEMETRY">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
+          <TelemetryCell value={scopeOperationalMetrics.working || '—'} label="RUNNING" />
             <TelemetryCell value={scopeOperationalMetrics.queued || '—'} label="QUEUED" />
             <TelemetryCell value={scopeOperationalMetrics.blocked || '—'} label="BLOCKED" />
             <TelemetryCell value={scopeOperationalMetrics.needsYou || '—'} label="NEEDS YOU" />
@@ -170,72 +653,37 @@ const TasksView = ({
         </DashboardPanel>
       </div>
 
-      <DashboardPanel title="ACTIVE TASKS">
-        {activeTasks.length ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {activeTasks.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                onArchive={() => onArchiveTask(task.id)}
-                nowMs={nowMs}
-                laneDetail={laneDetails?.[task.lane] || null}
-                detailLevel="full"
-              />
-            ))}
-          </div>
-        ) : (
-          <div style={{ fontSize: '13px', color: '#8d8ea1', lineHeight: 1.7 }}>
-            No active tasks in this scope right now.
-          </div>
-        )}
-      </DashboardPanel>
+      <TaskSection
+        title="PRESENT TASKS"
+        subtitle="Live work stays visible here with its nested attempts and child work."
+        tasks={activeTasks}
+        onArchiveTask={onArchiveTask}
+        nowMs={nowMs}
+        laneDetails={laneDetails}
+        emptyLabel="No active tasks in this scope right now."
+      />
 
-      <DashboardPanel title="RECENT COMPLETIONS">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-          <div style={{ fontSize: '13px', color: '#8d8ea1' }}>
-            Finished, abandoned, and cancelled work stays here until you archive it.
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowFinished((value) => !value)}
-            style={{
-              background: 'rgba(255,255,255,0.04)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: '10px',
-              color: '#d7d9e6',
-              fontSize: '11px',
-              fontWeight: 800,
-              letterSpacing: '0.06em',
-              padding: '8px 10px',
-              cursor: 'pointer',
-              textTransform: 'uppercase',
-            }}
-          >
-            {showFinished ? 'Hide' : 'Show'} {finishedTasks.length}
-          </button>
-        </div>
-        {showFinished ? (
-          finishedTasks.length ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {finishedTasks.map((task) => (
-                <TaskCard
-                  key={task.id}
-                  task={task}
-                  onArchive={() => onArchiveTask(task.id)}
-                  nowMs={nowMs}
-                  laneDetail={laneDetails?.[task.lane] || null}
-                  detailLevel="full"
-                />
-              ))}
-            </div>
-          ) : (
-            <div style={{ fontSize: '13px', color: '#8d8ea1', lineHeight: 1.7 }}>
-              No recent finished tasks yet.
-            </div>
-          )
-        ) : null}
-      </DashboardPanel>
+      <TaskSection
+        title="QUEUED / PENDING"
+        subtitle="Runnable backlog lives here so operator triage does not depend on the chat rail."
+        tasks={queuedTasks || []}
+        onArchiveTask={onArchiveTask}
+        nowMs={nowMs}
+        laneDetails={laneDetails}
+        emptyLabel="No queued tasks in this scope right now."
+        defaultOpen={false}
+      />
+
+      <TaskSection
+        title="RECENTLY COMPLETED"
+        subtitle="Finished, abandoned, and cancelled work stays here until it ages into archival surfaces."
+        tasks={finishedTasks}
+        onArchiveTask={onArchiveTask}
+        nowMs={nowMs}
+        laneDetails={laneDetails}
+        emptyLabel="No recent finished tasks yet."
+        defaultOpen={false}
+      />
     </div>
   );
 };
@@ -367,20 +815,7 @@ const KnowledgeView = ({
       </div>
 
       <div style={{ minWidth: 0, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 'min(460px, 100%)', flex: 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px', padding: '12px 14px', minWidth: 'min(460px, 100%)', flex: 1 }}>
-              <Search size={15} color="#696a7b" />
-              <input
-                type="text"
-                value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
-                placeholder={knowledgeMode === 'wiki' ? 'Search titles, tags, aliases...' : 'Search sources coming soon...'}
-                disabled={knowledgeMode !== 'wiki'}
-                style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px', opacity: knowledgeMode === 'wiki' ? 1 : 0.5 }}
-              />
-            </div>
-          </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', gap: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {knowledgeMode === 'wiki' ? (
               <>
@@ -505,6 +940,600 @@ const KnowledgeView = ({
           </div>
         )}
       </div>
+    </div>
+  );
+};
+
+const ProcedureBadge = ({ label, value, tone = 'neutral' }) => {
+  const tones = {
+    neutral: { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.08)', text: '#c7c8d6' },
+    success: { bg: 'rgba(0,242,148,0.08)', border: 'rgba(0,242,148,0.18)', text: '#9df7d0' },
+    warning: { bg: 'rgba(255,184,77,0.08)', border: 'rgba(255,184,77,0.18)', text: '#ffd39b' },
+    danger: { bg: 'rgba(255,92,92,0.08)', border: 'rgba(255,92,92,0.18)', text: '#ffb3b3' },
+    info: { bg: 'rgba(85,149,255,0.08)', border: 'rgba(85,149,255,0.18)', text: '#b9d5ff' },
+  };
+  const theme = tones[tone] || tones.neutral;
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '6px 10px', borderRadius: '999px', background: theme.bg, border: `1px solid ${theme.border}`, minWidth: 0 }}>
+      <span style={{ fontSize: '10px', letterSpacing: '0.08em', color: '#6f7183', fontWeight: 800 }}>{label}</span>
+      <span style={{ fontSize: '11px', color: theme.text, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</span>
+    </div>
+  );
+};
+
+const procedureLifecycleTone = (state) => {
+  switch (String(state || '').toLowerCase()) {
+    case 'vetted':
+      return 'success';
+    case 'tested':
+      return 'info';
+    case 'draft':
+      return 'warning';
+    case 'retired':
+      return 'danger';
+    default:
+      return 'neutral';
+  }
+};
+
+const groupProceduresByLifecycle = (procedures = []) => {
+  const groups = {
+    draft: [],
+    tested: [],
+    vetted: [],
+    retired: [],
+  };
+  procedures.forEach((procedure) => {
+    const key = String(procedure?.lifecycle_state || 'draft').toLowerCase();
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(procedure);
+  });
+  Object.values(groups).forEach((items) => {
+    items.sort((a, b) => String(b?.stats?.last_run_at || b?.stats?.tested_at || '').localeCompare(String(a?.stats?.last_run_at || a?.stats?.tested_at || '')));
+  });
+  return groups;
+};
+
+const normalizeProcedureChecklistItem = (item, index = 0) => {
+  if (typeof item === 'string') {
+    const title = item.trim();
+    return {
+      id: `step_${index + 1}`,
+      title: title || `Step ${index + 1}`,
+      verification: '',
+    };
+  }
+  if (item && typeof item === 'object') {
+    return {
+      id: String(item.id || `step_${index + 1}`),
+      title: String(item.title || item.label || item.name || `Step ${index + 1}`),
+      verification: String(item.verification || item.description || ''),
+    };
+  }
+  return {
+    id: `step_${index + 1}`,
+    title: `Step ${index + 1}`,
+    verification: '',
+  };
+};
+
+const normalizeProcedureRecord = (procedure) => {
+  if (!procedure || typeof procedure !== 'object') return null;
+  return {
+    ...procedure,
+    procedure_id: String(procedure.procedure_id || ''),
+    title: String(procedure.title || procedure.procedure_id || 'Untitled Procedure'),
+    summary: String(procedure.summary || ''),
+    description: typeof procedure.description === 'string' ? procedure.description : '',
+    lifecycle_state: String(procedure.lifecycle_state || 'draft').toLowerCase(),
+    lineage_id: procedure.lineage_id ? String(procedure.lineage_id) : null,
+    variant_of: procedure.variant_of ? String(procedure.variant_of) : null,
+    mutable: Boolean(procedure.mutable),
+    stats: procedure.stats && typeof procedure.stats === 'object' ? procedure.stats : {},
+    checklist: Array.isArray(procedure.checklist)
+      ? procedure.checklist.map((item, index) => normalizeProcedureChecklistItem(item, index))
+      : [],
+  };
+};
+
+const ProceduresView = ({
+  procedures,
+  selectedProcedure,
+  selectedProcedureId,
+  onSelectProcedure,
+  onQueueProcedure,
+  onOpenWorkbench,
+}) => {
+  const safeProcedures = Array.isArray(procedures)
+    ? procedures.map((procedure) => normalizeProcedureRecord(procedure)).filter(Boolean)
+    : [];
+  const safeSelectedProcedure = normalizeProcedureRecord(selectedProcedure);
+  const groupedProcedures = groupProceduresByLifecycle(safeProcedures);
+  const sections = [
+    { id: 'draft', label: 'Draft Procedures', subtitle: 'Novel or still-being-learned workflows.' },
+    { id: 'tested', label: 'Tested Procedures', subtitle: 'Completed successfully at least once, still evolvable.' },
+    { id: 'vetted', label: 'Vetted Procedures', subtitle: 'Stable operator-facing workflows.' },
+    { id: 'retired', label: 'Retired Procedures', subtitle: 'Historical or superseded workflows kept for lineage.' },
+  ];
+
+  return (
+    <div style={{ flex: 1, overflow: 'hidden', display: 'grid', gridTemplateColumns: '340px minmax(0, 1fr)', gap: '0', minHeight: 0 }}>
+      <div style={{ borderRight: '1px solid rgba(255,255,255,0.05)', background: '#0d0d11', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ padding: '20px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ fontSize: '11px', color: '#7f8091', letterSpacing: '0.12em', fontWeight: 800 }}>PROCEDURES</div>
+          <div style={{ fontSize: '12px', color: '#8d8ea1', lineHeight: 1.6 }}>
+            Strata is always executing a Procedure. This surface makes the draft-to-vetted lifecycle inspectable and queueable.
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {sections.map((section) => {
+            const items = groupedProcedures[section.id] || [];
+            return (
+              <div key={section.id} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ padding: '8px 10px 0' }}>
+                  <div style={{ fontSize: '11px', fontWeight: 800, letterSpacing: '0.1em', color: '#7f8091', textTransform: 'uppercase' }}>
+                    {section.label} · {items.length}
+                  </div>
+                  <div style={{ marginTop: '4px', fontSize: '12px', color: '#666a78', lineHeight: 1.5 }}>
+                    {section.subtitle}
+                  </div>
+                </div>
+                {items.length ? items.map((procedure) => {
+                  const active = procedure.procedure_id === selectedProcedureId;
+                  const checklist = Array.isArray(procedure.checklist) ? procedure.checklist : [];
+                  return (
+                    <button
+                      key={procedure.procedure_id}
+                      type="button"
+                      onClick={() => onSelectProcedure(procedure.procedure_id)}
+                      style={{
+                        width: '100%',
+                        textAlign: 'left',
+                        background: active ? 'rgba(130,87,229,0.14)' : 'transparent',
+                        border: active ? '1px solid rgba(130,87,229,0.28)' : '1px solid rgba(255,255,255,0.05)',
+                        borderRadius: '12px',
+                        padding: '12px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div style={{ color: active ? '#f2ecff' : '#edeeef', fontSize: '13px', fontWeight: 700 }}>
+                        {procedure.title || procedure.procedure_id}
+                      </div>
+                      <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.5 }}>
+                        {procedure.summary || 'No summary available yet.'}
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        <ProcedureBadge label="STATE" value={procedure.lifecycle_state || 'draft'} tone={procedureLifecycleTone(procedure.lifecycle_state)} />
+                        <ProcedureBadge label="STEPS" value={String(checklist.length)} tone="neutral" />
+                        <ProcedureBadge label="RUNS" value={String(procedure?.stats?.run_count || 0)} tone="neutral" />
+                      </div>
+                    </button>
+                  );
+                }) : (
+                  <div style={{ padding: '0 10px 10px', fontSize: '12px', color: '#666a78', lineHeight: 1.6 }}>
+                    No procedures in this lifecycle bucket yet.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{ minWidth: 0, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+        {safeSelectedProcedure ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', minWidth: 0 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  <ProcedureBadge label="STATE" value={safeSelectedProcedure.lifecycle_state || 'draft'} tone={procedureLifecycleTone(safeSelectedProcedure.lifecycle_state)} />
+                  <ProcedureBadge label="ID" value={safeSelectedProcedure.procedure_id || '—'} tone="neutral" />
+                  <ProcedureBadge label="LINEAGE" value={safeSelectedProcedure.lineage_id || '—'} tone="neutral" />
+                  <ProcedureBadge label="VARIANT OF" value={safeSelectedProcedure.variant_of || '—'} tone="neutral" />
+                </div>
+                <div>
+                  <h2 style={{ margin: 0, color: '#edeeef', fontSize: '28px', lineHeight: 1.1 }}>{safeSelectedProcedure.title || safeSelectedProcedure.procedure_id}</h2>
+                  <div style={{ marginTop: '10px', color: '#a9aaba', fontSize: '14px', lineHeight: 1.6 }}>
+                    {safeSelectedProcedure.summary || 'No summary available for this Procedure yet.'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onQueueProcedure(safeSelectedProcedure.procedure_id)}
+                style={{
+                  background: 'rgba(85,149,255,0.16)',
+                  border: '1px solid rgba(85,149,255,0.28)',
+                  color: '#e6f0ff',
+                  borderRadius: '12px',
+                  padding: '10px 14px',
+                  fontSize: '12px',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <Play size={14} />
+                Queue Procedure
+              </button>
+              {onOpenWorkbench ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenWorkbench({
+                    kind: 'procedure',
+                    procedureId: safeSelectedProcedure.procedure_id,
+                    title: safeSelectedProcedure.title,
+                    summary: safeSelectedProcedure.summary,
+                    metadata: safeSelectedProcedure,
+                  })}
+                  style={{
+                    background: 'rgba(214,173,113,0.14)',
+                    border: '1px solid rgba(214,173,113,0.24)',
+                    color: '#f3ddbf',
+                    borderRadius: '12px',
+                    padding: '10px 14px',
+                    fontSize: '12px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                  }}
+                >
+                  <Wrench size={14} />
+                  Open in Workbench
+                </button>
+              ) : null}
+            </div>
+
+            <DashboardPanel title="PROCEDURE METADATA">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '12px' }}>
+                <TelemetryCell value={safeSelectedProcedure?.stats?.run_count ?? '—'} label="RUNS" />
+                <TelemetryCell value={safeSelectedProcedure?.stats?.success_count ?? '—'} label="SUCCESSES" />
+                <TelemetryCell value={safeSelectedProcedure?.stats?.failure_count ?? '—'} label="FAILURES" />
+                <TelemetryCell value={safeSelectedProcedure.mutable ? 'yes' : 'no'} label="MUTABLE" />
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <ProcedureBadge label="TESTED AT" value={formatAbsoluteWithRelative(safeSelectedProcedure?.stats?.tested_at)} tone="neutral" />
+                <ProcedureBadge label="LAST RUN" value={formatAbsoluteWithRelative(safeSelectedProcedure?.stats?.last_run_at)} tone="neutral" />
+                <ProcedureBadge label="SOURCE TASK" value={safeSelectedProcedure?.stats?.last_source_task_id || '—'} tone="neutral" />
+              </div>
+            </DashboardPanel>
+
+            <DashboardPanel title="CHECKLIST">
+              {Array.isArray(safeSelectedProcedure.checklist) && safeSelectedProcedure.checklist.length ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {safeSelectedProcedure.checklist.map((item, index) => (
+                    <div key={`${safeSelectedProcedure.procedure_id}-step-${item.id || index}`} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', padding: '10px 0', borderBottom: index === safeSelectedProcedure.checklist.length - 1 ? 'none' : '1px solid rgba(255,255,255,0.05)' }}>
+                      <div style={{ width: '24px', height: '24px', borderRadius: '999px', background: 'rgba(255,255,255,0.06)', color: '#c7c8d6', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 800, flexShrink: 0 }}>
+                        {index + 1}
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+                        <div style={{ color: '#e7e8ef', fontSize: '13px', lineHeight: 1.6 }}>
+                          {item.title}
+                        </div>
+                        {item.verification ? (
+                          <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.6 }}>
+                            {item.verification}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: '12px', color: '#666a78', lineHeight: 1.6 }}>
+                  No checklist has been recorded for this Procedure yet.
+                </div>
+              )}
+            </DashboardPanel>
+
+            {safeSelectedProcedure.description && (
+              <div style={{ background: '#141418', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '22px' }}>
+                <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.75', color: '#edeeef' }}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {safeSelectedProcedure.description}
+                  </ReactMarkdown>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ margin: 'auto 0', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', textAlign: 'center' }}>
+            <GitBranch size={34} color="#2f3040" />
+            <div style={{ fontSize: '18px', fontWeight: 700, color: '#c7c8d6' }}>Procedure registry is ready</div>
+            <div style={{ maxWidth: '620px', fontSize: '14px', lineHeight: 1.7, color: '#8d8ea1' }}>
+              Select a Procedure to inspect its lifecycle, lineage, checklist, and run history. Draft Procedures represent live work-in-progress search; tested and vetted Procedures are the more stable descendants of that search.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const workbenchActionButtonStyle = {
+  background: 'rgba(255,255,255,0.04)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  color: '#e7e8ef',
+  borderRadius: '999px',
+  padding: '8px 12px',
+  fontSize: '11px',
+  fontWeight: 800,
+  cursor: 'pointer',
+};
+
+const buildWorkbenchPrompt = (action, target, taskMatch, procedureMatch) => {
+  const label = target?.taskTitle || target?.title || taskMatch?.title || procedureMatch?.title || 'this target';
+  const taskId = target?.taskId || taskMatch?.id || '';
+  const procedureId = target?.procedureId || procedureMatch?.procedure_id || '';
+  const sessionId = target?.sessionId || '';
+  const contextBits = [
+    taskId ? `task_id=${taskId}` : '',
+    procedureId ? `procedure_id=${procedureId}` : '',
+    sessionId ? `session_id=${sessionId}` : '',
+  ].filter(Boolean);
+  const contextLine = contextBits.length ? `Context: ${contextBits.join(' · ')}.` : '';
+
+  switch (action) {
+    case 'explain':
+      return `Explain what ${label} is doing, what inputs it depends on, and what downstream state or outputs it affects.\n\n${contextLine}`.trim();
+    case 'verify':
+      return `Verify ${label}. Tell me whether its current behavior is correct, what evidence supports that, and what should change if it is not.\n\n${contextLine}`.trim();
+    case 'audit':
+      return `Audit ${label} end-to-end. Focus on hidden risks, observability gaps, regressions, and anything that could make the system lie about its own state.\n\n${contextLine}`.trim();
+    case 'fix':
+      return `Help fix ${label}. First identify the most likely source of the problem from the current context, then propose and, if appropriate, make the smallest concrete change that moves it forward.\n\n${contextLine}`.trim();
+    default:
+      return '';
+  }
+};
+
+const WorkbenchView = ({
+  target,
+  activeTasks,
+  finishedTasks,
+  procedures,
+  messages,
+  onOpenTask,
+  onOpenProcedure,
+  onOpenSession,
+  onSendWorkbenchPrompt,
+}) => {
+  const [draftPrompt, setDraftPrompt] = useState('');
+  const [sendingPrompt, setSendingPrompt] = useState(false);
+  const [responseMode, setResponseMode] = useState('thinking');
+  const allTasks = flattenTaskTree([...(activeTasks || []), ...(finishedTasks || [])]);
+  const taskMatch = target?.taskId ? allTasks.find((task) => String(task.id) === String(target.taskId)) : null;
+  const procedureMatch = target?.procedureId
+    ? (Array.isArray(procedures) ? procedures.map((procedure) => normalizeProcedureRecord(procedure)).find((procedure) => procedure?.procedure_id === target.procedureId) : null)
+    : null;
+  const sessionMatch = target?.sessionId
+    ? (Array.isArray(messages) ? messages.filter((message) => String(message.session_id) === String(target.sessionId)).slice(-5) : [])
+    : [];
+  const title = target?.title || taskMatch?.title || procedureMatch?.title || 'Workbench target';
+  const summary = target?.summary || taskMatch?.description || procedureMatch?.summary || 'Inspect, replay, and branch this flow from here.';
+  const metadata = target?.metadata || taskMatch || procedureMatch || null;
+  const hasTarget = Boolean(target || taskMatch || procedureMatch);
+
+  const applyWorkbenchAction = (action) => {
+    setDraftPrompt(buildWorkbenchPrompt(action, target, taskMatch, procedureMatch));
+  };
+
+  const handleSendPrompt = async () => {
+    const normalized = String(draftPrompt || '').trim();
+    if (!normalized || !onSendWorkbenchPrompt) return;
+    setSendingPrompt(true);
+    try {
+      await onSendWorkbenchPrompt({
+        prompt: normalized,
+        responseMode,
+        target,
+        task: taskMatch,
+        procedure: procedureMatch,
+      });
+      setDraftPrompt('');
+    } finally {
+      setSendingPrompt(false);
+    }
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+      <DashboardPanel title="WORKBENCH">
+        <div style={{ color: '#8d8ea1', fontSize: '13px', lineHeight: 1.7 }}>
+          Workbench is the universal debugger surface for Strata. This first slice focuses on target-oriented inspection and cross-linking so you can jump directly from Procedures, History, and runtime artifacts into a dedicated experimentation surface.
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+          <RoutePill label="TARGET" value={String(target?.kind || 'none')} tone="neutral" />
+          {target?.taskId ? <RoutePill label="TASK" value={String(target.taskId)} tone="neutral" /> : null}
+          {target?.procedureId ? <RoutePill label="PROCEDURE" value={String(target.procedureId)} tone="success" /> : null}
+          {target?.sessionId ? <RoutePill label="SESSION" value={String(target.sessionId)} tone="neutral" /> : null}
+        </div>
+      </DashboardPanel>
+
+      <DashboardPanel title="FOCUSED TARGET">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ color: '#edeeef', fontSize: '22px', fontWeight: 700, lineHeight: 1.2 }}>
+            {title}
+          </div>
+          <div style={{ color: '#a9aaba', fontSize: '14px', lineHeight: 1.7 }}>
+            {summary}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {taskMatch && onOpenTask ? (
+              <button type="button" onClick={() => onOpenTask(taskMatch.id)} style={workbenchActionButtonStyle}>
+                Open Task
+              </button>
+            ) : null}
+            {procedureMatch && onOpenProcedure ? (
+              <button type="button" onClick={() => onOpenProcedure(procedureMatch.procedure_id)} style={{ ...workbenchActionButtonStyle, background: 'rgba(130,87,229,0.16)', border: '1px solid rgba(130,87,229,0.28)', color: '#f1e8ff' }}>
+                Open Procedure
+              </button>
+            ) : null}
+            {target?.sessionId && onOpenSession ? (
+              <button type="button" onClick={() => onOpenSession(target.sessionId)} style={{ ...workbenchActionButtonStyle, background: 'rgba(85,149,255,0.16)', border: '1px solid rgba(85,149,255,0.28)', color: '#e6f0ff' }}>
+                Open Session
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </DashboardPanel>
+
+      <DashboardPanel title="WORKBENCH ACTIONS">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {[
+              ['explain', 'Explain'],
+              ['verify', 'Verify'],
+              ['audit', 'Audit'],
+              ['fix', 'Fix'],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => applyWorkbenchAction(id)}
+                disabled={!hasTarget}
+                style={{
+                  ...workbenchActionButtonStyle,
+                  opacity: hasTarget ? 1 : 0.45,
+                  cursor: hasTarget ? 'pointer' : 'default',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <div style={{ color: '#8d8ea1', fontSize: '11px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+              Response Mode
+            </div>
+            <div style={{ display: 'inline-flex', borderRadius: '999px', padding: '3px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              {[
+                ['thinking', 'Thinking'],
+                ['instant', 'Instant'],
+              ].map(([modeId, label]) => {
+                const active = responseMode === modeId;
+                return (
+                  <button
+                    key={modeId}
+                    type="button"
+                    onClick={() => setResponseMode(modeId)}
+                    style={{
+                      background: active
+                        ? (modeId === 'instant' ? 'rgba(214,173,113,0.22)' : 'rgba(130,87,229,0.22)')
+                        : 'transparent',
+                      color: active
+                        ? (modeId === 'instant' ? '#f3ddbf' : '#dccfff')
+                        : '#8f94a7',
+                      border: 'none',
+                      borderRadius: '999px',
+                      padding: '6px 10px',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      letterSpacing: '0.04em',
+                      textTransform: 'uppercase',
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.6 }}>
+            Use Workbench to generate a scoped prompt for the selected node, then send it into chat with the current target context attached implicitly by session, task, and procedure lineage. Instant mode skips tool use and asks for a direct answer from current context.
+          </div>
+          <textarea
+            value={draftPrompt}
+            onChange={(event) => setDraftPrompt(event.target.value)}
+            placeholder={hasTarget ? 'Ask Workbench to explain, verify, audit, or fix this target...' : 'Open a task, procedure, or history event in Workbench to begin.'}
+            style={{
+              minHeight: '120px',
+              borderRadius: '14px',
+              border: '1px solid rgba(255,255,255,0.08)',
+              background: '#101116',
+              color: '#ececf2',
+              padding: '14px',
+              fontSize: '13px',
+              lineHeight: 1.6,
+              resize: 'vertical',
+            }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <div style={{ color: '#7f8091', fontSize: '11px' }}>
+              {target?.sessionId
+                ? 'This will send through the linked session so follow-up context stays attached.'
+                : 'If no session is linked, Workbench sends through the currently selected chat lane.'}
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSendPrompt()}
+              disabled={!String(draftPrompt || '').trim() || !onSendWorkbenchPrompt || sendingPrompt}
+              style={{
+                background: String(draftPrompt || '').trim() && onSendWorkbenchPrompt && !sendingPrompt
+                  ? 'linear-gradient(135deg, #d6ad71, #9e6d38)'
+                  : 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(214,173,113,0.24)',
+                color: String(draftPrompt || '').trim() && onSendWorkbenchPrompt && !sendingPrompt ? '#18120b' : '#6f6a63',
+                borderRadius: '999px',
+                padding: '10px 14px',
+                fontSize: '11px',
+                fontWeight: 800,
+                cursor: String(draftPrompt || '').trim() && onSendWorkbenchPrompt && !sendingPrompt ? 'pointer' : 'default',
+              }}
+            >
+              {sendingPrompt ? 'Sending…' : 'Send to Chat'}
+            </button>
+          </div>
+        </div>
+      </DashboardPanel>
+
+      <DashboardPanel title="TARGET METADATA">
+        {metadata ? (
+          <pre style={{ margin: 0, padding: '12px', borderRadius: '12px', background: '#0f1014', border: '1px solid rgba(255,255,255,0.06)', color: '#b8bbca', fontSize: '11px', lineHeight: 1.6, overflowX: 'auto', fontFamily: "'JetBrains Mono', monospace" }}>
+            {stringifyJson(metadata)}
+          </pre>
+        ) : (
+          <div style={{ color: '#8d8ea1', fontSize: '13px', lineHeight: 1.7 }}>
+            No explicit target is selected yet. “Open in Workbench” from History or Procedures to seed this surface with a real node.
+          </div>
+        )}
+      </DashboardPanel>
+
+      <DashboardPanel title="NEXT CAPABILITIES">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', color: '#a9aaba', fontSize: '13px', lineHeight: 1.7 }}>
+          <div>1. Warm a process up to a selected node so real inputs, outputs, and handoff context are inspectable.</div>
+          <div>2. Replay and regenerate outputs from an intermediate node.</div>
+          <div>3. Branch from edited context, tool choices, model choices, or verification policies and compare downstream outcomes.</div>
+          <div>4. Drill into verification, audit, and other child processes as first-class subflows.</div>
+          <div>5. Reflect all the way down into Strata’s own tools, Procedures, Knowledge artifacts, runtime policy, and UI.</div>
+        </div>
+      </DashboardPanel>
+
+      {sessionMatch.length ? (
+        <DashboardPanel title="RECENT SESSION MESSAGES">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {sessionMatch.map((message, index) => (
+              <div key={`${message.id || index}`} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px' }}>
+                <div style={{ color: '#8d8ea1', fontSize: '11px', marginBottom: '6px' }}>
+                  {String(message.role || 'message').toUpperCase()} · {formatAbsoluteWithRelative(message.created_at)}
+                </div>
+                <div style={{ color: '#e7e8ef', fontSize: '13px', lineHeight: 1.7 }}>
+                  {stripInlineMarkdown(message.content || '') || 'No content'}
+                </div>
+              </div>
+            ))}
+          </div>
+        </DashboardPanel>
+      ) : null}
     </div>
   );
 };
@@ -948,15 +1977,27 @@ export default function NonChatContent({
   dashboardProps,
   knowledgeProps,
   tasksProps,
+  proceduresProps,
+  historyProps,
+  workbenchProps,
 }) {
   if (activeNav === 'dashboard') {
     return <DashboardView {...dashboardProps} />;
+  }
+  if (activeNav === 'history') {
+    return <HistoryView {...historyProps} />;
   }
   if (activeNav === 'knowledge') {
     return <KnowledgeView {...knowledgeProps} />;
   }
   if (activeNav === 'tasks') {
     return <TasksView {...tasksProps} />;
+  }
+  if (activeNav === 'procedures') {
+    return <ProceduresView {...proceduresProps} />;
+  }
+  if (activeNav === 'workbench') {
+    return <WorkbenchView {...workbenchProps} />;
   }
   return null;
 }

@@ -31,13 +31,16 @@ class ModelAdapter:
         provider_name = provider.__class__.__name__
         is_local = provider_name == "LocalProvider"
         is_cloud = provider_name == "CloudProvider"
-        if self.context.mode == "agent" and not is_local:
+        pool = self.registry.pools.get(self.context.mode)
+        allow_local = bool(getattr(pool, "allow_local", True)) if pool is not None else True
+        allow_cloud = bool(getattr(pool, "allow_cloud", True)) if pool is not None else True
+        if is_local and not allow_local:
             raise RuntimeError(
-                "Agent lane transport violation: agent execution attempted to use a non-local provider."
+                f"{self.context.mode.title()} lane transport violation: local transport is disabled for this pool."
             )
-        if self.context.mode == "trainer" and not is_cloud:
+        if is_cloud and not allow_cloud:
             raise RuntimeError(
-                "Trainer lane transport violation: trainer execution attempted to use a non-cloud provider."
+                f"{self.context.mode.title()} lane transport violation: cloud transport is disabled for this pool."
             )
 
     def _resolve_endpoint(self):

@@ -7,6 +7,19 @@ import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity,
 
 const MotionDiv = motion.div;
 
+const contextButtonStyle = {
+  background: 'rgba(255,255,255,0.04)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: '999px',
+  color: '#d7d9e6',
+  fontSize: '10px',
+  fontWeight: 800,
+  letterSpacing: '0.06em',
+  padding: '6px 10px',
+  cursor: 'pointer',
+  textTransform: 'uppercase',
+};
+
 const STATUS_MAP = {
   complete:            { bg: 'rgba(0,242,148,0.1)',   color: '#00f294', label: 'Completed',   progress: '100%' },
   working:             { bg: 'rgba(0,217,255,0.1)',   color: '#00d9ff', label: 'Working',     progress: '65%'  },
@@ -94,7 +107,59 @@ function stripInlineMarkdown(content) {
     .trim();
 }
 
-const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs, laneDetail = null, detailLevel = 'compact' }) => {
+function buildTaskContext(task) {
+  const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
+  const pendingQuestion = task?.pending_question;
+  const procedureId = String(constraints.procedure_id || '').trim();
+  const sourceTaskId = String(constraints.source_task_id || task?.parent_id || '').trim();
+  const originLane = String(constraints.origin_lane || '').trim();
+  const sourceTitle = String(task?.source_title || constraints.source_title || '').trim();
+  const itemId = String(constraints.procedure_item_id || '').trim();
+  const draftProcedure = String(constraints.draft_procedure_id || '').trim();
+  const sourceHints = constraints.source_hints && typeof constraints.source_hints === 'object' ? constraints.source_hints : {};
+  const preferredPaths = Array.isArray(sourceHints.preferred_paths) ? sourceHints.preferred_paths.filter(Boolean) : [];
+  const route = [];
+
+  if (procedureId) route.push({ label: 'Procedure', value: procedureId, tone: 'procedure' });
+  if (itemId) route.push({ label: 'Checklist', value: itemId, tone: 'neutral' });
+  if (draftProcedure) route.push({ label: 'Draft', value: draftProcedure, tone: 'neutral' });
+  if (originLane) route.push({ label: 'Origin Lane', value: originLane, tone: 'neutral' });
+  if (sourceTaskId) route.push({ label: 'Parent', value: sourceTaskId, tone: 'neutral' });
+  if (sourceTitle) route.push({ label: 'Source', value: sourceTitle, tone: 'neutral' });
+  if (preferredPaths.length) route.push({ label: 'Inspect', value: preferredPaths.slice(0, 2).join(' · '), tone: 'neutral' });
+  if (pendingQuestion) route.push({ label: 'Needs You', value: 'operator input', tone: 'warning' });
+
+  return { procedureId, sourceTaskId, route };
+}
+
+const ContextPill = ({ label, value, tone = 'neutral' }) => {
+  const tones = {
+    neutral: { bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.08)', color: '#c8cbda' },
+    procedure: { bg: 'rgba(130,87,229,0.14)', border: 'rgba(130,87,229,0.28)', color: '#ece3ff' },
+    warning: { bg: 'rgba(255,184,77,0.12)', border: 'rgba(255,184,77,0.26)', color: '#ffe1ad' },
+  };
+  const style = tones[tone] || tones.neutral;
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '6px',
+      padding: '4px 8px',
+      borderRadius: '999px',
+      fontSize: '10px',
+      lineHeight: 1,
+      background: style.bg,
+      border: `1px solid ${style.border}`,
+      color: style.color,
+      maxWidth: '100%',
+    }}>
+      <span style={{ opacity: 0.72, fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase' }}>{label}</span>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
+    </span>
+  );
+};
+
+const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs, laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
   if (tasks.length === 0) return null;
 
@@ -120,7 +185,20 @@ const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs, la
             exit={{ height: 0, opacity: 0 }}
             style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
           >
-            {tasks.map(t => <TaskCard key={t.id} task={t} onArchive={onArchive} isNested={true} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />)}
+            {tasks.map((t) => (
+              <TaskCard
+                key={t.id}
+                task={t}
+                onArchive={onArchive}
+                isNested={true}
+                nowMs={nowMs}
+                laneDetail={laneDetail}
+                detailLevel={detailLevel}
+                onOpenProcedure={onOpenProcedure}
+                onOpenTask={onOpenTask}
+                onOpenWorkbench={onOpenWorkbench}
+              />
+            ))}
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -358,7 +436,82 @@ const StepHistoryRow = ({ step, defaultExpanded = false }) => {
   );
 };
 
-const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact' }) => {
+const MetadataChip = ({ label, value, accent = '#8dcfff' }) => (
+  <div style={{
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3px',
+    padding: '8px 10px',
+    borderRadius: '8px',
+    background: 'rgba(255,255,255,0.02)',
+    border: '1px solid rgba(255,255,255,0.05)',
+    minWidth: '120px',
+  }}>
+    <div style={{ fontSize: '9px', color: '#6f758a', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+      {label}
+    </div>
+    <div style={{ fontSize: '11px', color: accent, fontFamily: "'JetBrains Mono', monospace", wordBreak: 'break-word' }}>
+      {value}
+    </div>
+  </div>
+);
+
+const StructuredArtifactPanel = ({ artifactDisplay }) => {
+  if (!artifactDisplay || typeof artifactDisplay !== 'object') return null;
+  const usage = artifactDisplay.usage && typeof artifactDisplay.usage === 'object' ? artifactDisplay.usage : null;
+  const usageDetails = usage?.completion_tokens_details && typeof usage.completion_tokens_details === 'object'
+    ? usage.completion_tokens_details
+    : null;
+  const chips = [];
+  if (artifactDisplay.provider) chips.push({ label: 'Provider', value: String(artifactDisplay.provider) });
+  if (artifactDisplay.model) chips.push({ label: 'Model', value: String(artifactDisplay.model) });
+  if (artifactDisplay.job_kind) chips.push({ label: 'Job', value: String(artifactDisplay.job_kind) });
+  if (artifactDisplay.duration_s != null) chips.push({ label: 'Duration', value: `${Number(artifactDisplay.duration_s).toFixed(1)}s` });
+  if (usage?.prompt_tokens != null) chips.push({ label: 'Prompt Tokens', value: String(usage.prompt_tokens) });
+  if (usage?.completion_tokens != null) chips.push({ label: 'Completion Tokens', value: String(usage.completion_tokens) });
+  if (usage?.total_tokens != null) chips.push({ label: 'Total Tokens', value: String(usage.total_tokens) });
+  if (usageDetails?.reasoning_tokens != null) chips.push({ label: 'Reasoning Tokens', value: String(usageDetails.reasoning_tokens) });
+
+  const leftover = { ...artifactDisplay };
+  delete leftover.step_history;
+  delete leftover.provider;
+  delete leftover.model;
+  delete leftover.job_kind;
+  delete leftover.duration_s;
+  delete leftover.usage;
+  const hasLeftover = Object.keys(leftover).length > 0;
+
+  if (!chips.length && !hasLeftover) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      {chips.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+          {chips.map((chip) => (
+            <MetadataChip key={`${chip.label}:${chip.value}`} label={chip.label} value={chip.value} />
+          ))}
+        </div>
+      )}
+      {hasLeftover && (
+        <div style={{
+          fontSize: '10px',
+          color: '#8b8d9e',
+          fontFamily: "'JetBrains Mono', monospace",
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          background: 'rgba(255,255,255,0.02)',
+          border: '1px solid rgba(255,255,255,0.05)',
+          borderRadius: '8px',
+          padding: '10px 12px',
+        }}>
+          {JSON.stringify(leftover, null, 2)}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench }) => {
   const defaultExpanded = useMemo(() => !TERMINAL_STATUSES.has(task.status), [task.status]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
@@ -382,6 +535,8 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
   const presentTasks = children.filter(c => !pastStatuses.includes(c.status) && !futureStatuses.includes(c.status));
   
   const hasChildren = children.length > 0 || attempts.length > 0;
+  const taskContext = buildTaskContext(task);
+  const compactRoute = taskContext.route.slice(0, isExpanded ? taskContext.route.length : 3);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -453,6 +608,13 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
 
         <div>
           <h3 style={{ fontWeight: 600, fontSize: '14px', color: '#edeeef', lineHeight: 1.3 }}>{displayTitle}</h3>
+          {compactRoute.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
+              {compactRoute.map((item) => (
+                <ContextPill key={`${item.label}:${item.value}`} label={item.label} value={item.value} tone={item.tone} />
+              ))}
+            </div>
+          )}
           {(isExpanded || !isNested) && task.description && (
             <div>
               <div
@@ -515,11 +677,9 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
           </div>
         )}
 
-        {!isExpanded && (
-          <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden' }}>
-            <div style={{ height: '100%', width: style.progress, background: accentColor, borderRadius: '10px' }} />
-          </div>
-        )}
+        <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: style.progress, background: accentColor, borderRadius: '10px' }} />
+        </div>
       </MotionDiv>
 
       <AnimatePresence>
@@ -531,6 +691,64 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
             style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '8px', paddingLeft: '12px' }}
           >
             {/* Attempts */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>TASK CONTEXT</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {taskContext.procedureId && onOpenProcedure ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenProcedure(taskContext.procedureId);
+                    }}
+                    style={contextButtonStyle}
+                  >
+                    Open Procedure
+                  </button>
+                ) : null}
+                {onOpenTask ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenTask(task.id);
+                    }}
+                    style={contextButtonStyle}
+                  >
+                    Focus Task
+                  </button>
+                ) : null}
+                {onOpenWorkbench ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenWorkbench({
+                        kind: 'task',
+                        taskId: task.id,
+                        taskTitle: displayTitle,
+                        lane: task.lane,
+                        procedureId: taskContext.procedureId || '',
+                        parentTaskId: task.parent_id || '',
+                        sessionId: task.session_id || '',
+                        detailLevel,
+                      });
+                    }}
+                    style={contextButtonStyle}
+                  >
+                    Open in Workbench
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {taskContext.route.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginLeft: '12px' }}>
+                {taskContext.route.map((item) => (
+                  <ContextPill key={`${task.id}-${item.label}-${item.value}`} label={item.label} value={item.value} tone={item.tone} />
+                ))}
+              </div>
+            )}
+
             {attempts.length > 0 && (
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>ATTEMPTS</div>
@@ -564,9 +782,9 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
             )}
             
             {/* Grouped Child Tasks */}
-            <TaskGroup title="Present" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />
-            <TaskGroup title="Past" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />
-            <TaskGroup title="Future" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} />
+            <TaskGroup title="Present Children" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} onOpenProcedure={onOpenProcedure} onOpenTask={onOpenTask} onOpenWorkbench={onOpenWorkbench} />
+            <TaskGroup title="Recently Completed" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} onOpenProcedure={onOpenProcedure} onOpenTask={onOpenTask} onOpenWorkbench={onOpenWorkbench} />
+            <TaskGroup title="Queued / Pending" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} onOpenProcedure={onOpenProcedure} onOpenTask={onOpenTask} onOpenWorkbench={onOpenWorkbench} />
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -717,11 +935,7 @@ const AttemptRow = ({ attempt, taskId, index, totalAttempts, taskUpdatedAt, defa
                 detailLevel={detailLevel}
                 defaultExpanded={detailLevel === 'full' && Boolean(stepHistory.length)}
               />
-              {artifactDisplay && Object.keys(artifactDisplay).length > 0 && (
-                <div style={{ fontSize: '10px', color: '#8b8d9e', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                  {JSON.stringify(artifactDisplay, null, 2)}
-                </div>
-              )}
+              <StructuredArtifactPanel artifactDisplay={artifactDisplay} />
               {!attempt.reason && (!artifactDisplay || Object.keys(artifactDisplay).length === 0) && !stepHistory.length && (
                 <div style={{ fontSize: '10px', color: '#666' }}>
                   No detailed trace captured yet.
@@ -740,7 +954,10 @@ const TaskCard = memo(TaskCardComponent, (prev, next) => (
   prev.isNested === next.isNested &&
   prev.nowMs === next.nowMs &&
   prev.laneDetail === next.laneDetail &&
-  prev.detailLevel === next.detailLevel
+  prev.detailLevel === next.detailLevel &&
+  prev.onOpenProcedure === next.onOpenProcedure &&
+  prev.onOpenTask === next.onOpenTask &&
+  prev.onOpenWorkbench === next.onOpenWorkbench
 ));
 
 export default TaskCard;

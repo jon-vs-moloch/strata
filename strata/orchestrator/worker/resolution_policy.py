@@ -464,6 +464,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 recovery_title = f"Recovery: {sub_proto.title}"
                 sub = _matching_pending_child(title=recovery_title, task_type=TaskType.IMPL)
                 if sub is None:
+                    sub_constraints = {"lane": task_lane} if task_lane else {}
                     sub = storage.tasks.create(
                         parent_task_id=task.task_id,
                         title=recovery_title,
@@ -471,11 +472,13 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                         session_id=task.session_id,
                         state=TaskState.PENDING,
                         depth=task.depth + 1,
-                        constraints={"lane": task_lane} if task_lane else None,
+                        constraints=sub_constraints,
                     )
                     sub.type = TaskType.IMPL
                     # Mandatory policy check
                     if requires_validator(sub):
+                        if not isinstance(sub.constraints, dict):
+                            sub.constraints = dict(sub.constraints or {})
                         sub.constraints["validator_required"] = True
                         logger.warning(f"Task {sub.task_id} requires a validator per system policy.")
                 spawned_child_ids.append(sub.task_id)

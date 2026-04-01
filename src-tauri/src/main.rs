@@ -5,7 +5,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use semver::Version;
 use tauri::{AppHandle, Manager, RunEvent};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri_plugin_updater::UpdaterExt;
@@ -17,6 +18,27 @@ struct DesktopUpdateRuntime(Mutex<Option<String>>);
 #[derive(Clone, Debug)]
 struct DesktopUpdateConfig {
     channel: String,
+    endpoint: Option<String>,
+    pubkey: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ChannelManifestPlatform {
+    url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ChannelManifest {
+    version: Option<String>,
+    notes: Option<String>,
+    #[serde(alias = "pub_date")]
+    pub_date: Option<String>,
+    platforms: Option<std::collections::HashMap<String, ChannelManifestPlatform>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PersistedDesktopUpdateConfig {
+    channel: Option<String>,
     endpoint: Option<String>,
     pubkey: Option<String>,
 }
@@ -35,6 +57,16 @@ struct DesktopUpdateStatus {
     notes: Option<String>,
     published_at: Option<String>,
     download_url: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ManualManifestCheck {
+    version: Option<String>,
+    notes: Option<String>,
+    published_at: Option<String>,
+    download_url: Option<String>,
+    update_available: bool,
     error: Option<String>,
 }
 
@@ -195,27 +227,140 @@ fn setup_backend(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn kill_managed_backend(app: &AppHandle) {
+    if let Some(state) = app.try_state::<BackendChild>() {
+        if let Ok(mut child_guard) = state.0.lock() {
+            if let Some(child) = child_guard.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            *child_guard = None;
+        }
+    }
+}
+
+fn persisted_desktop_update_config() -> Option<PersistedDesktopUpdateConfig> {
+    let root_dir = resolve_project_root().ok()?;
+    let config_path = root_dir.join("strata").join("runtime").join("desktop-updater.json");
+    let raw = std::fs::read_to_string(config_path).ok()?;
+    serde_json::from_str::<PersistedDesktopUpdateConfig>(&raw).ok()
+}
+
 fn desktop_update_config() -> DesktopUpdateConfig {
+    let persisted = persisted_desktop_update_config().unwrap_or_default();
     let channel = std::env::var("STRATA_DESKTOP_UPDATE_CHANNEL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .or_else(|| persisted.channel.clone().filter(|value| !value.trim().is_empty()))
         .unwrap_or_else(|| "alpha".to_string());
 
     let endpoint = std::env::var("STRATA_DESKTOP_UPDATE_ENDPOINT")
         .ok()
         .map(|value| value.trim().replace("{channel}", &channel))
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            persisted.endpoint.as_ref().map(|value| value.trim().replace("{channel}", &channel))
+        })
         .filter(|value| !value.is_empty());
 
     let pubkey = std::env::var("STRATA_DESKTOP_UPDATE_PUBKEY")
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .or_else(|| persisted.pubkey.clone().filter(|value| !value.trim().is_empty()));
 
     DesktopUpdateConfig {
         channel,
         endpoint,
         pubkey,
+    }
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let candidate = candidate.trim();
+    let current = current.trim();
+    match (Version::parse(candidate), Version::parse(current)) {
+        (Ok(candidate_version), Ok(current_version)) => candidate_version > current_version,
+        _ => false,
+    }
+}
+
+fn fetch_channel_manifest(endpoint: &str) -> Result<ChannelManifest, String> {
+    let url = Url::parse(endpoint).map_err(|err| format!("Invalid desktop updater endpoint: {err}"))?;
+    if url.scheme() != "http" {
+        return Err("Manual desktop update manifest fallback currently supports only http endpoints.".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Desktop updater endpoint is missing a host.".to_string())?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let mut path = url.path().to_string();
+    if path.is_empty() {
+        path = "/".to_string();
+    }
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+
+    let mut stream = std::net::TcpStream::connect((host, port))
+        .map_err(|err| format!("Failed to connect to desktop updater endpoint: {err}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("Failed to request desktop update manifest: {err}"))?;
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|err| format!("Failed to read desktop update manifest: {err}"))?;
+    let response_text = String::from_utf8_lossy(&response);
+    let mut parts = response_text.splitn(2, "\r\n\r\n");
+    let headers = parts.next().unwrap_or_default();
+    let body = parts.next().unwrap_or_default();
+    if !headers.starts_with("HTTP/1.1 200") && !headers.starts_with("HTTP/1.0 200") {
+        return Err(format!("Desktop updater endpoint returned a non-200 response: {}", headers.lines().next().unwrap_or_default()));
+    }
+    serde_json::from_str::<ChannelManifest>(body)
+        .map_err(|err| format!("Failed to parse desktop update manifest: {err}"))
+}
+
+fn manual_manifest_check(config: &DesktopUpdateConfig, current_version: &str) -> ManualManifestCheck {
+    let Some(endpoint) = config.endpoint.as_deref() else {
+        return ManualManifestCheck {
+            error: Some("Desktop updater endpoint is not configured.".to_string()),
+            ..ManualManifestCheck::default()
+        };
+    };
+
+    match fetch_channel_manifest(endpoint) {
+        Ok(manifest) => {
+            let version = manifest.version.as_ref().map(|value| value.trim().to_string());
+            let manifest_version = version.clone().unwrap_or_default();
+            let update_available = version_is_newer(&manifest_version, current_version);
+            let download_url = manifest.platforms.as_ref().and_then(|platforms| {
+                platforms.values().find_map(|platform| platform.url.clone())
+            });
+
+            ManualManifestCheck {
+                version,
+                notes: manifest.notes,
+                published_at: manifest.pub_date,
+                download_url,
+                update_available,
+                error: None,
+            }
+        }
+        Err(err) => ManualManifestCheck {
+            error: Some(err),
+            ..ManualManifestCheck::default()
+        },
     }
 }
 
@@ -256,6 +401,7 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
 async fn desktop_update_status(app: AppHandle) -> Result<DesktopUpdateStatus, String> {
     let config = desktop_update_config();
     let current_version = app.package_info().version.to_string();
+    let manual_manifest = manual_manifest_check(&config, &current_version);
     let installed_version = app
         .try_state::<DesktopUpdateRuntime>()
         .and_then(|state| state.0.lock().ok().and_then(|pending| pending.clone()));
@@ -301,11 +447,70 @@ async fn desktop_update_status(app: AppHandle) -> Result<DesktopUpdateStatus, St
             });
         }
 
-        let updater = configured_updater(&app, &config)?;
-        let update = updater
-            .check()
-            .await
-            .map_err(|err| format!("Failed to check for desktop updates: {err}"))?;
+        let updater = match configured_updater(&app, &config) {
+            Ok(updater) => updater,
+            Err(err) => {
+                return Ok(DesktopUpdateStatus {
+                    desktop: true,
+                    configured: true,
+                    channel: config.channel,
+                    endpoint: config.endpoint,
+                    current_version,
+                    update_available: false,
+                    latest_version: None,
+                    installed_version,
+                    restart_required,
+                    notes: None,
+                    published_at: None,
+                    download_url: None,
+                    error: Some(match manual_manifest.error {
+                        Some(manifest_err) => format!("{err} Manual manifest check also failed: {manifest_err}"),
+                        None => err,
+                    }),
+                });
+            }
+        };
+        let update = match updater.check().await {
+            Ok(update) => update,
+            Err(err) => {
+                if manual_manifest.update_available {
+                    return Ok(DesktopUpdateStatus {
+                        desktop: true,
+                        configured: true,
+                        channel: config.channel,
+                        endpoint: config.endpoint,
+                        current_version,
+                        update_available: true,
+                        latest_version: manual_manifest.version,
+                        installed_version,
+                        restart_required,
+                        notes: manual_manifest.notes,
+                        published_at: manual_manifest.published_at,
+                        download_url: manual_manifest.download_url,
+                        error: Some(format!("Updater plugin check failed, but local channel manifest shows a newer version: {err}")),
+                    });
+                }
+
+                return Ok(DesktopUpdateStatus {
+                    desktop: true,
+                    configured: true,
+                    channel: config.channel,
+                    endpoint: config.endpoint,
+                    current_version,
+                    update_available: false,
+                    latest_version: manual_manifest.version,
+                    installed_version,
+                    restart_required,
+                    notes: manual_manifest.notes,
+                    published_at: manual_manifest.published_at,
+                    download_url: manual_manifest.download_url,
+                    error: Some(match manual_manifest.error {
+                        Some(manifest_err) => format!("Failed to check for desktop updates: {err}. Manual manifest check also failed: {manifest_err}"),
+                        None => format!("Failed to check for desktop updates: {err}"),
+                    }),
+                });
+            }
+        };
 
         if let Some(update) = update {
             return Ok(DesktopUpdateStatus {
@@ -325,6 +530,24 @@ async fn desktop_update_status(app: AppHandle) -> Result<DesktopUpdateStatus, St
             });
         }
 
+        if manual_manifest.update_available {
+            return Ok(DesktopUpdateStatus {
+                desktop: true,
+                configured: true,
+                channel: config.channel,
+                endpoint: config.endpoint,
+                current_version,
+                update_available: true,
+                latest_version: manual_manifest.version,
+                installed_version,
+                restart_required,
+                notes: manual_manifest.notes,
+                published_at: manual_manifest.published_at,
+                download_url: manual_manifest.download_url,
+                error: None,
+            });
+        }
+
         Ok(DesktopUpdateStatus {
             desktop: true,
             configured: true,
@@ -332,13 +555,13 @@ async fn desktop_update_status(app: AppHandle) -> Result<DesktopUpdateStatus, St
             endpoint: config.endpoint,
             current_version,
             update_available: false,
-            latest_version: None,
+            latest_version: manual_manifest.version,
             installed_version,
             restart_required,
-            notes: None,
-            published_at: None,
-            download_url: None,
-            error: None,
+            notes: manual_manifest.notes,
+            published_at: manual_manifest.published_at,
+            download_url: manual_manifest.download_url,
+            error: manual_manifest.error,
         })
     }
 }
@@ -404,6 +627,26 @@ async fn desktop_restart(app: AppHandle) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+async fn desktop_reconnect_backend(app: AppHandle) -> Result<bool, String> {
+    let root_dir = resolve_project_root()?;
+
+    if localhost_port_open(8000) && backend_health_ok(8000) {
+        return Ok(true);
+    }
+
+    kill_managed_backend(&app);
+
+    let child = start_backend(&root_dir)?;
+    if let Some(state) = app.try_state::<BackendChild>() {
+        if let Ok(mut child_guard) = state.0.lock() {
+            *child_guard = child;
+        }
+    }
+
+    Ok(localhost_port_open(8000) && backend_health_ok(8000))
+}
+
 fn main() {
     desktop_builder()
         .manage(DesktopUpdateRuntime(Mutex::new(None)))
@@ -414,19 +657,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             desktop_update_status,
             desktop_install_update,
-            desktop_restart
+            desktop_restart,
+            desktop_reconnect_backend
         ])
         .build(tauri::generate_context!())
         .expect("error while building Strata desktop shell")
         .run(|app_handle, event| {
             if let RunEvent::Exit = event {
-                if let Some(state) = app_handle.try_state::<BackendChild>() {
-                    if let Ok(mut child_guard) = state.0.lock() {
-                        if let Some(child) = child_guard.as_mut() {
-                            let _ = child.kill();
-                        }
-                    }
-                }
+                kill_managed_backend(&app_handle);
             }
         });
 }

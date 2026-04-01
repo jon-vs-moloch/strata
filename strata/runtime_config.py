@@ -27,6 +27,9 @@ GLOBAL_SETTINGS: Dict[str, Any] = {
             },
         },
     },
+    "model_catalog_policy": {
+        "auto_swap_local_missing": True,
+    },
 }
 SETTINGS_PARAMETER_KEY = "orchestrator_global_settings"
 SETTINGS_PARAMETER_DESCRIPTION = (
@@ -59,4 +62,3 @@ def normalized_settings(
         merged_policy["operator_comfort"] = merged_comfort
         normalized["inference_throttle_policy"] = merged_policy
     return normalized
-

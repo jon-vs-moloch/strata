@@ -84,6 +84,7 @@ async def run_structured_eval(
     cases: Optional[List[Dict[str, Any]]] = None,
     run_label: Optional[str] = None,
     eval_harness_config_override: Optional[Dict[str, Any]] = None,
+    progress_fn=None,
 ) -> Dict[str, Any]:
     """
     @summary Run a structured eval suite and return aggregate accuracy/latency.
@@ -93,6 +94,16 @@ async def run_structured_eval(
     run_label = run_label or f"run-{int(time.time() * 1000)}"
     adapter = ModelAdapter()
     samples: List[StructuredEvalSample] = []
+    total_cases = len(eval_cases)
+
+    def _progress(label: str, detail: str = "", progress_label: str = "structured eval") -> None:
+        if progress_fn:
+            progress_fn(
+                step="system_job",
+                label=label,
+                detail=detail,
+                progress_label=progress_label,
+            )
 
     for idx, case in enumerate(eval_cases, start=1):
         case_id = str(case["id"])
@@ -100,12 +111,20 @@ async def run_structured_eval(
         expected = str(case["expected_answer"])
         grading = str(case.get("grading", "exact_match"))
 
-        baseline_response, baseline_latency = await _run_direct_baseline(adapter, prompt)
-        harness_response, harness_latency, _ = await run_harness_response(
-            prompt,
-            run_id=f"structured-{run_label}-{case_id}-{idx}",
-            config_override=eval_harness_config_override,
-            profile="harness_no_capes",
+        _progress("Running structured eval case", f"{idx}/{total_cases} · {case_id} · baseline", f"case {idx}/{total_cases}")
+        baseline_response, baseline_latency = await asyncio.wait_for(
+            _run_direct_baseline(adapter, prompt),
+            timeout=180.0,
+        )
+        _progress("Running structured eval case", f"{idx}/{total_cases} · {case_id} · harness", f"case {idx}/{total_cases}")
+        harness_response, harness_latency, _ = await asyncio.wait_for(
+            run_harness_response(
+                prompt,
+                run_id=f"structured-{run_label}-{case_id}-{idx}",
+                config_override=eval_harness_config_override,
+                profile="harness_no_capes",
+            ),
+            timeout=180.0,
         )
 
         samples.append(
@@ -120,6 +139,11 @@ async def run_structured_eval(
                 baseline_latency_s=round(baseline_latency, 2),
                 harness_latency_s=round(harness_latency, 2),
             )
+        )
+        _progress(
+            "Completed structured eval case",
+            f"{idx}/{total_cases} · {case_id} · baseline={'ok' if samples[-1].baseline_correct else 'miss'} · harness={'ok' if samples[-1].harness_correct else 'miss'}",
+            f"case {idx}/{total_cases}",
         )
 
     case_count = len(samples)

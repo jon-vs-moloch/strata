@@ -39,11 +39,15 @@ The system consists of:
   A record of one concrete invocation or step, whether deterministic or non-deterministic.
 - `Procedure`
   A durable, reusable, mutable workflow artifact that can instantiate tasks and preserve how a class of work should be done.
+- `Kit`
+  A durable, reusable bundle artifact that groups multiple first-class artifacts such as `Procedure`s, tools, evals, knowledge artifacts, policies, or other `Kit`s into one named unit.
 
 ### 2.2 Key principles
 
 - Tasks persist. Attempts end.
 - Procedures persist across many tasks and can be refined as the system learns better decompositions.
+- nontrivial work should always be understood as executing a `Procedure`, even when that Procedure is still draft and being discovered live
+- Kits persist across many tasks too, but as composition/bundling artifacts rather than execution artifacts; they package reusable capabilities that should travel and evolve together
 - A task should be oneshottable at its own abstraction level.
 - If progress requires a second semantically different non-deterministic step, the task was underspecified and should decompose.
 - Deterministic work may surround an attempt, but does not become a new attempt just by taking time.
@@ -175,6 +179,25 @@ In other words:
 - tasks are the live work instances
 - attempts are the variance-bearing shots on those tasks
 - Procedures are the durable memory of how similar work should be structured in the future
+
+### 4.6 Procedure lifecycle
+
+Procedures should have an explicit lifecycle:
+
+- `draft`
+  work-in-progress Procedure inferred from live execution or decomposition; not yet proven
+- `tested`
+  Procedure has completed successfully at least once and is now eligible for reuse as a known-good baseline
+- `vetted`
+  intentionally curated or promoted Procedure trusted for default use
+- `retired`
+  lineage-visible but no longer preferred by default
+
+Draft Procedures matter because they preserve partial progress:
+
+- interrupted or restarted work can resume from a known proto-workflow
+- live search leaves behind reusable structure instead of disappearing into task lineage
+- successful draft Procedures can promote into `tested`, then continue evolving through lineage, variants, and evaluation
 
 ### 4.3 Attempt fields
 

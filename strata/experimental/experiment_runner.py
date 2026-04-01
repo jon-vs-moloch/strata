@@ -454,11 +454,22 @@ class ExperimentRunner:
         source_task_id: Optional[str] = None,
         spawned_task_ids: Optional[List[str]] = None,
         associated_task_ids: Optional[List[str]] = None,
+        progress_fn=None,
     ) -> ExperimentResult:
         """
         @summary Run repeated benchmark and structured-eval passes, then compare against baseline.
         """
         safe_runs = max(1, run_count)
+        def _progress(label: str, detail: str = "", progress_label: str = "full eval") -> None:
+            if progress_fn:
+                progress_fn(
+                    step="system_job",
+                    label=label,
+                    detail=detail,
+                    progress_label=progress_label,
+                )
+
+        _progress("Preparing eval gate", str(candidate_change_id or "candidate"), "prepare eval gate")
         variant_assignment = self._resolve_eval_variant_pair(
             candidate_change_id=candidate_change_id,
             baseline_change_id=baseline_change_id,
@@ -468,6 +479,8 @@ class ExperimentRunner:
         benchmark_reports: List[Dict[str, Any]] = []
         structured_reports: List[Dict[str, Any]] = []
         for run_index in range(safe_runs):
+            run_label = f"run {run_index + 1}/{safe_runs}"
+            _progress("Running benchmark", run_label, "benchmark")
             benchmark_report = await run_benchmark(
                 api_url=api_url,
                 run_label=f"{candidate_change_id}-benchmark-{run_index + 1}",
@@ -482,11 +495,13 @@ class ExperimentRunner:
                 model_id="benchmark/harness",
                 variant_assignment=variant_assignment,
             )
+            _progress("Running structured eval", run_label, "structured eval")
             structured_report = await run_structured_eval(
                 api_url=api_url,
                 suite_name=suite_name,
                 run_label=f"{candidate_change_id}-structured-{run_index + 1}",
                 eval_harness_config_override=eval_harness_config_override,
+                progress_fn=progress_fn,
             )
             structured_reports.append(structured_report)
             persist_structured_eval_report(
@@ -497,9 +512,11 @@ class ExperimentRunner:
                 model_id="structured_eval/harness",
                 variant_assignment=variant_assignment,
             )
+        _progress("Calculating metrics", str(candidate_change_id or "candidate"), "metrics")
         candidate_metrics = self._gather_metrics(candidate_change_id)
         baseline_metrics = self._gather_metrics(baseline_change_id)
         deltas = self._calculate_deltas(baseline_metrics, candidate_metrics)
+        _progress("Assessing promotion readiness", suite_name, "promotion readiness")
         promotion_readiness = build_promotion_readiness(
             self.storage,
             evaluation_kind="full_eval",
@@ -507,6 +524,7 @@ class ExperimentRunner:
             structured_reports=structured_reports,
         )
         recommendation = decide_benchmark_promotion(deltas, promotion_readiness)
+        _progress("Reviewing eval trace", suite_name, "trace review")
         diagnostic_review = await review_eval_trace(
             self.model,
             candidate_change_id=candidate_change_id,
@@ -515,6 +533,7 @@ class ExperimentRunner:
             structured_reports=structured_reports,
             suite_name=suite_name,
         )
+        _progress("Scoring calibration", str(candidate_change_id or "candidate"), "calibration")
         prediction_record = normalize_prediction(diagnostic_review)
         prediction_record["judge_tier"] = str(diagnostic_review.get("reviewer_tier") or "trainer")
         prediction_record["failure_family"] = str(diagnostic_review.get("failure_family") or "")
@@ -539,6 +558,7 @@ class ExperimentRunner:
             prediction=prediction_record,
             calibration_record=calibration_record,
         )
+        _progress("Recording eval evidence", recommendation, "persist evidence")
         attention_signal = emit_eval_attention_signal(
             self.storage,
             candidate_change_id=candidate_change_id,
@@ -562,6 +582,7 @@ class ExperimentRunner:
             benchmark_reports=benchmark_reports,
             structured_reports=structured_reports,
         )
+        _progress("Persisting full eval report", recommendation, "persist report")
         result = ExperimentResult(
             success=True,
             valid=True,
@@ -596,6 +617,7 @@ class ExperimentRunner:
             spawned_task_ids=spawned_task_ids,
             associated_task_ids=associated_task_ids,
         )
+        _progress("Full eval complete", recommendation, "full eval complete")
         return result
 
     def record_tool_promotion_result(

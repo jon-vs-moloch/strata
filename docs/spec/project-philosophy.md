@@ -178,6 +178,19 @@ Branch structure matters here too:
 - parallel work should merge through a coordination node
 - replanning should consider the whole active child set, including partial successes and still-running siblings
 
+### 7. UI semantics should communicate actionability
+
+Strata should use visual language consistently enough that the operator can tell, at a glance, what can be acted on and what is merely informational.
+
+In practice, this means:
+
+- colored controls indicate actionable or active system affordances
+- gray controls or gray labels indicate unavailable, non-functional, disabled, or purely informational surfaces
+- the UI should acknowledge user intent immediately, even when the system is still working to satisfy it
+- user intent and system state should be represented separately when they can diverge
+
+This matters because Strata is not a static dashboard. It is an operational surface for a live system, and ambiguity about what is clickable, queued, unavailable, or still spinning up becomes a real usability failure.
+
 ## Agent/Trainer Separation
 
 The trainer/agent split is intentional and foundational.

@@ -6,10 +6,12 @@
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 from strata.communication.primitives import build_communication_decision, deliver_communication_decision
 from strata.core.lanes import infer_lane_from_task
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
+from strata.procedures.registry import STARTUP_SMOKE_PROCEDURE_ID, ensure_draft_procedure_for_task, record_procedure_run
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.orchestrator.research import ResearchModule
 from strata.orchestrator.decomposition import DecompositionModule
@@ -328,6 +330,12 @@ def _procedure_checklist_subtasks(storage, task):
     checklist = list(constraints.get("procedure_checklist") or [])
     if not checklist:
         return []
+    procedure = ensure_draft_procedure_for_task(storage, focus, checklist=checklist)
+    constraints["procedure_id"] = procedure["procedure_id"]
+    constraints["procedure_title"] = procedure["title"]
+    constraints["procedure_lifecycle_state"] = procedure["lifecycle_state"]
+    constraints["procedure_lineage_id"] = procedure["lineage_id"]
+    focus.constraints = constraints
     procedure_title = str(constraints.get("procedure_title") or getattr(focus, "title", "") or "Procedure").strip()
     created = []
     for item in checklist:
@@ -352,6 +360,8 @@ def _procedure_checklist_subtasks(storage, task):
                     "lane": dict(getattr(task, "constraints", {}) or {}).get("lane"),
                     "procedure_id": constraints.get("procedure_id"),
                     "procedure_title": procedure_title,
+                    "procedure_lifecycle_state": constraints.get("procedure_lifecycle_state"),
+                    "procedure_lineage_id": constraints.get("procedure_lineage_id"),
                     "procedure_parent_task_id": getattr(focus, "task_id", None),
                     "execution_mode": "parallel",
                     "source_hints": source_hints,
@@ -371,6 +381,12 @@ def _procedure_checklist_subtasks(storage, task):
 def _procedure_item_recovery_subtasks(storage, task):
     focus = _recoverable_focus_task(storage, task)
     constraints = dict(getattr(focus, "constraints", {}) or {})
+    procedure = ensure_draft_procedure_for_task(storage, focus)
+    constraints["procedure_id"] = procedure["procedure_id"]
+    constraints["procedure_title"] = procedure["title"]
+    constraints["procedure_lifecycle_state"] = procedure["lifecycle_state"]
+    constraints["procedure_lineage_id"] = procedure["lineage_id"]
+    focus.constraints = constraints
     checklist_item = dict(constraints.get("procedure_checklist_item") or {})
     item_id = str(checklist_item.get("id") or "").strip()
     item_title = str(checklist_item.get("title") or getattr(focus, "title", "") or "Procedure item").strip()
@@ -393,25 +409,37 @@ def _procedure_item_recovery_subtasks(storage, task):
         "execution_mode": "serial",
         "recovered_from_decomposition_failure": True,
     }
-    return [
-        {
-            "proto_id": "inspect_sources",
-            "title": f"Inspect sources for {item_title}",
-            "description": (
-                f"Inspect only the most relevant sources for checklist item [{item_id}] {item_title}. "
-                f"Verification target: {verification}. "
-                f"{guidance}".strip()
-            ),
-            "task_type": TaskType.RESEARCH,
-            "constraints": {
-                **base_constraints,
-                "target_files": preferred_paths,
-                "preferred_start_paths": preferred_paths,
-                "disallow_broad_repo_scan": True,
-                "recovery_phase": "inspect",
-            },
-            "dependencies": [],
-        },
+    subtasks = []
+    inspect_dependencies = []
+    inspect_targets = preferred_paths or [f"[{item_id}] {item_title}"]
+    for index, path in enumerate(inspect_targets, start=1):
+        normalized_path = str(path).strip()
+        proto_id = f"inspect_{index}"
+        inspect_dependencies.append(proto_id)
+        subtasks.append(
+            {
+                "proto_id": proto_id,
+                "title": f"Inspect {normalized_path} for {item_title}",
+                "description": (
+                    f"Inspect exactly one source for checklist item [{item_id}] {item_title}. "
+                    f"Focus only on '{normalized_path}'. "
+                    f"Verification target: {verification}. "
+                    f"{guidance}".strip()
+                ),
+                "task_type": TaskType.RESEARCH,
+                "constraints": {
+                    **base_constraints,
+                    "target_files": [normalized_path],
+                    "preferred_start_paths": [normalized_path],
+                    "disallow_broad_repo_scan": True,
+                    "recovery_phase": "inspect",
+                    "inspect_target_path": normalized_path,
+                },
+                "dependencies": [],
+            }
+        )
+
+    subtasks.extend([
         {
             "proto_id": "decide_status",
             "title": f"Decide status for {item_title}",
@@ -428,7 +456,7 @@ def _procedure_item_recovery_subtasks(storage, task):
                 "disallow_broad_repo_scan": True,
                 "recovery_phase": "decide",
             },
-            "dependencies": ["inspect_sources"],
+            "dependencies": inspect_dependencies,
         },
         {
             "proto_id": "cash_out",
@@ -447,7 +475,134 @@ def _procedure_item_recovery_subtasks(storage, task):
             },
             "dependencies": ["decide_status"],
         },
-    ]
+    ])
+    return subtasks
+
+
+def _read_text_if_available(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _startup_smoke_repo_root() -> Path:
+    cwd = Path.cwd()
+    if (cwd / "strata").is_dir() and (cwd / "strata_ui").is_dir():
+        return cwd
+    for candidate in [cwd, *cwd.parents]:
+        if (candidate / "strata").is_dir() and (candidate / "strata_ui").is_dir():
+            return candidate
+    return cwd
+
+
+def _run_startup_smoke_check(task: TaskModel) -> Dict[str, Any] | None:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    if str(constraints.get("procedure_id") or "").strip() != STARTUP_SMOKE_PROCEDURE_ID:
+        return None
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    item_id = str(checklist_item.get("id") or "").strip()
+    if not item_id:
+        return None
+
+    root_dir = _startup_smoke_repo_root()
+    source_hints = dict(constraints.get("source_hints") or _procedure_checklist_item_source_hints(item_id))
+    preferred_paths = [str(path).strip() for path in list(source_hints.get("preferred_paths") or []) if str(path).strip()]
+    existing_paths = []
+    missing_paths = []
+    unreadable_paths = []
+    path_checks = []
+
+    for rel_path in preferred_paths:
+        abs_path = root_dir / rel_path
+        exists = abs_path.exists()
+        readable = abs_path.is_file() and bool(_read_text_if_available(abs_path))
+        if exists:
+            existing_paths.append(rel_path)
+        else:
+            missing_paths.append(rel_path)
+        if exists and abs_path.is_file() and not readable:
+            unreadable_paths.append(rel_path)
+        path_checks.append(
+            {
+                "path": rel_path,
+                "exists": exists,
+                "readable": readable if abs_path.is_file() else exists,
+            }
+        )
+
+    if item_id == "spec_presence":
+        satisfied = not missing_paths and not unreadable_paths
+        summary = (
+            "Verified canonical spec files are present and readable."
+            if satisfied
+            else "Canonical spec files are missing or unreadable."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "missing_paths": missing_paths,
+                "unreadable_paths": unreadable_paths,
+            },
+        }
+
+    if item_id == "runtime_wiring":
+        runtime_ipc_text = _read_text_if_available(root_dir / "strata/orchestrator/worker/runtime_ipc.py")
+        api_main_text = _read_text_if_available(root_dir / "strata/api/main.py")
+        wiring_markers = {
+            "runtime_ipc_present": bool(runtime_ipc_text),
+            "api_external_worker_mode": "STRATA_API_EMBED_WORKER" in api_main_text or "external-worker mode" in api_main_text,
+        }
+        satisfied = not missing_paths and wiring_markers["runtime_ipc_present"] and wiring_markers["api_external_worker_mode"]
+        summary = (
+            "Verified separate API and worker runtime wiring surfaces are present."
+            if satisfied
+            else "Split API/worker runtime wiring could not be verified deterministically."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "markers": wiring_markers,
+                "missing_paths": missing_paths,
+            },
+        }
+
+    if item_id == "desktop_surface":
+        app_text = _read_text_if_available(root_dir / "strata_ui/src/App.jsx")
+        settings_text = _read_text_if_available(root_dir / "strata_ui/src/views/SettingsView.jsx")
+        desktop_text = _read_text_if_available(root_dir / "src-tauri/src/main.rs")
+        surface_markers = {
+            "settings_has_updater_surface": "desktop_update_status" in settings_text,
+            "desktop_has_update_command": "desktop_update_status" in desktop_text,
+            "app_has_lane_status_surface": "TopModeTab" in app_text and "laneDetails" in app_text,
+        }
+        satisfied = not missing_paths and all(surface_markers.values())
+        summary = (
+            "Verified desktop runtime status/update surfaces are present."
+            if satisfied
+            else "Desktop runtime status/update surfaces could not be verified deterministically."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "markers": surface_markers,
+                "missing_paths": missing_paths,
+            },
+        }
+
+    return None
 
 
 async def _expand_root_procedure_task(task, storage, enqueue_fn, *, progress_fn=None, attempt_id=None):
@@ -552,6 +707,37 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             storage.commit()
             await notify_fn(task.task_id, task.state.value)
             return True, None, attempt
+        startup_smoke_check = _run_startup_smoke_check(task) if task.type == TaskType.RESEARCH else None
+        if startup_smoke_check is not None:
+            _record_progress(
+                step="deterministic_check",
+                label="Running deterministic check",
+                detail=startup_smoke_check.get("summary", ""),
+                progress_label="deterministic check",
+                attempt_id=attempt.attempt_id,
+            )
+            if not startup_smoke_check.get("satisfied"):
+                raise RuntimeError(startup_smoke_check.get("summary") or "Deterministic startup smoke check did not satisfy its verification target.")
+            storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
+            deterministic_evidence = dict(startup_smoke_check.get("evidence") or {})
+            attempt.artifacts = {
+                **dict(getattr(attempt, "artifacts", {}) or {}),
+                "duration_s": round(time.perf_counter() - started_at, 4),
+                "step_history": list(step_history),
+                "deterministic_check": deterministic_evidence,
+            }
+            attempt.evidence = {
+                **dict(getattr(attempt, "evidence", {}) or {}),
+                "deterministic_check": deterministic_evidence,
+            }
+            _update_parent_branch_state(storage, task, attempt)
+            task.state = TaskState.COMPLETE
+            procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+            if procedure_id:
+                record_procedure_run(storage, procedure_id, outcome="succeeded", source_task_id=task.task_id)
+            storage.commit()
+            await notify_fn(task.task_id, task.state.value)
+            return True, None, attempt
         if task.type == TaskType.RESEARCH:
             await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.DECOMP:
@@ -576,6 +762,9 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         _update_parent_branch_state(storage, task, attempt)
             
         task.state = TaskState.COMPLETE
+        procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+        if procedure_id:
+            record_procedure_run(storage, procedure_id, outcome="succeeded", source_task_id=task.task_id)
         storage.commit()
         await notify_fn(task.task_id, task.state.value)
         return True, None, attempt
@@ -619,6 +808,9 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
                 )
                 if should_flush:
                     flush_observability_writes()
+            procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+            if procedure_id:
+                record_procedure_run(storage, procedure_id, outcome="failed", source_task_id=task.task_id)
             attempt = failed_attempt
         else:
             attempt.artifacts = {**dict(getattr(attempt, "artifacts", {}) or {}), **artifacts}

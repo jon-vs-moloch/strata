@@ -10,7 +10,11 @@ operator plumbing.
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
+import os
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, HTTPException
@@ -35,6 +39,7 @@ from strata.messages.metadata import (
     initialize_message_metadata,
     mark_message_seen_by_system,
     mark_messages_read,
+    set_message_metadata,
 )
 from strata.prioritization.feedback import classify_feedback_priority
 from strata.sessions.metadata import (
@@ -47,6 +52,126 @@ from strata.sessions.metadata import (
     resolve_session_title,
     set_session_metadata,
 )
+
+_TEXTY_EXTENSIONS = {
+    ".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".toml", ".py", ".js", ".ts",
+    ".tsx", ".jsx", ".html", ".htm", ".css", ".sql", ".csv", ".xml",
+}
+_MAX_PARSED_ATTACHMENT_CHARS = 12000
+
+
+def _runtime_attachment_dir() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "runtime",
+        "chat_attachments",
+    )
+
+
+def _sanitize_filename(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "").strip())
+    return cleaned or "attachment"
+
+
+def _looks_textual(name: str, media_type: str) -> bool:
+    normalized_media = str(media_type or "").strip().lower()
+    if normalized_media.startswith("text/"):
+        return True
+    suffix = os.path.splitext(str(name or ""))[1].lower()
+    return suffix in _TEXTY_EXTENSIONS
+
+
+def _summarize_text(text: str, limit: int = 280) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: max(0, limit - 1)].rstrip()}…"
+
+
+def _process_incoming_attachments(message_id: str, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    os.makedirs(_runtime_attachment_dir(), exist_ok=True)
+    processed: List[Dict[str, Any]] = []
+    for index, item in enumerate(list(attachments or []), start=1):
+        if not isinstance(item, dict):
+            continue
+        existing_storage_path = str(item.get("storage_path") or "").strip()
+        existing_storage_key = str(item.get("storage_key") or "").strip()
+        if existing_storage_key and existing_storage_path and os.path.exists(existing_storage_path):
+            processed.append(
+                {
+                    "id": str(item.get("id") or f"{message_id}:attachment:{index}"),
+                    "title": str(item.get("title") or item.get("name") or existing_storage_key),
+                    "name": str(item.get("name") or item.get("title") or existing_storage_key),
+                    "media_type": str(item.get("media_type") or "application/octet-stream"),
+                    "size_bytes": int(item.get("size_bytes") or 0),
+                    "description": str(item.get("description") or "").strip(),
+                    "summary": str(item.get("summary") or "").strip(),
+                    "parsed_text": str(item.get("parsed_text") or ""),
+                    "storage_key": existing_storage_key,
+                    "storage_path": existing_storage_path,
+                }
+            )
+            continue
+        name = str(item.get("name") or f"attachment-{index}").strip() or f"attachment-{index}"
+        media_type = str(item.get("media_type") or mimetypes.guess_type(name)[0] or "application/octet-stream").strip()
+        size_bytes = int(item.get("size_bytes") or 0)
+        base64_data = str(item.get("base64_data") or "").strip()
+        if not base64_data:
+            continue
+        raw = base64.b64decode(base64_data)
+        suffix = os.path.splitext(name)[1]
+        storage_name = f"{message_id}-{index:02d}-{_sanitize_filename(os.path.splitext(name)[0])}{suffix}"
+        storage_path = os.path.join(_runtime_attachment_dir(), storage_name)
+        with open(storage_path, "wb") as handle:
+            handle.write(raw)
+
+        parsed_text = ""
+        if _looks_textual(name, media_type):
+            for encoding in ("utf-8", "utf-16", "latin-1"):
+                try:
+                    parsed_text = raw.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        if parsed_text and len(parsed_text) > _MAX_PARSED_ATTACHMENT_CHARS:
+            parsed_text = f"{parsed_text[:_MAX_PARSED_ATTACHMENT_CHARS].rstrip()}\n\n[truncated]"
+        title = name
+        description_bits = [media_type]
+        if size_bytes > 0:
+            description_bits.append(f"{size_bytes} bytes")
+        summary = _summarize_text(parsed_text) if parsed_text else ""
+        processed.append(
+            {
+                "id": f"{message_id}:attachment:{index}",
+                "title": title,
+                "name": name,
+                "media_type": media_type,
+                "size_bytes": size_bytes,
+                "description": " • ".join(description_bits),
+                "summary": summary,
+                "parsed_text": parsed_text,
+                "storage_key": storage_name,
+                "storage_path": storage_path,
+            }
+        )
+    return processed
+
+
+def _discard_prepared_attachments(attachments: List[Dict[str, Any]]) -> int:
+    removed = 0
+    for item in list(attachments or []):
+        if not isinstance(item, dict):
+            continue
+        storage_path = str(item.get("storage_path") or "").strip()
+        if not storage_path:
+            continue
+        try:
+            if os.path.exists(storage_path):
+                os.remove(storage_path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def register_chat_task_routes(
@@ -134,6 +259,20 @@ def register_chat_task_routes(
             }
             for m in history
         ]
+
+    @app.post("/chat/attachments/prepare")
+    async def prepare_chat_attachments(payload: Dict[str, Any], storage=Depends(get_storage)):
+        attachments = list(payload.get("attachments") or [])
+        prepared = _process_incoming_attachments(
+            str(payload.get("draft_id") or f"draft-{os.getpid()}-{len(attachments)}"),
+            attachments,
+        )
+        return {"status": "ok", "attachments": prepared}
+
+    @app.post("/chat/attachments/discard")
+    async def discard_chat_attachments(payload: Dict[str, Any], storage=Depends(get_storage)):
+        removed = _discard_prepared_attachments(list(payload.get("attachments") or []))
+        return {"status": "ok", "removed": removed}
 
     @app.post("/messages/{message_id}/react")
     async def react_to_message(message_id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
@@ -367,6 +506,9 @@ def register_chat_task_routes(
         preferred_tier = str(payload.get("preferred_tier") or "trainer").strip().lower()
         if preferred_tier not in {"trainer", "agent"}:
             preferred_tier = "trainer"
+        response_mode = str(payload.get("response_mode") or "thinking").strip().lower()
+        if response_mode not in {"thinking", "instant"}:
+            response_mode = "thinking"
         session_id = canonical_session_id_for_lane(preferred_tier, payload.get("session_id", "default"))
         content = payload.get("content", "")
         ensure_session_metadata(
@@ -379,6 +521,10 @@ def register_chat_task_routes(
         )
 
         message = storage.messages.create(role=payload["role"], content=content, session_id=session_id)
+        attachment_metadata = _process_incoming_attachments(
+            message.message_id,
+            list(payload.get("attachments") or []),
+        )
         initialize_message_metadata(
             storage,
             message_id=message.message_id,
@@ -387,8 +533,12 @@ def register_chat_task_routes(
             source_kind="user",
             source_actor="user_opened",
             communicative_act="message",
-            tags=["chat", "user"],
+            tags=["chat", "user", *(["attachment"] if attachment_metadata else [])],
         )
+        if attachment_metadata:
+            current_metadata = get_message_metadata(storage, message.message_id)
+            current_metadata["attachments"] = attachment_metadata
+            set_message_metadata(storage, message.message_id, current_metadata)
         mark_message_seen_by_system(storage, message_id=message.message_id, actor="chat_runtime")
         storage.commit()
 
@@ -401,6 +551,7 @@ def register_chat_task_routes(
             session_id=session_id,
             content=content,
             preferred_tier=preferred_tier,
+            response_mode=response_mode,
         )
         try:
             await ensure_generated_session_title(storage, session_id=session_id, model_adapter=model_adapter)

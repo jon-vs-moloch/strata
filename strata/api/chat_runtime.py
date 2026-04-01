@@ -457,8 +457,19 @@ Available Tools:
         await self.deps["broadcast_event"]({"type": "message", "session_id": session_id})
         return result
 
-    async def run_chat_tool_loop(self, storage, *, session_id: str, content: str, preferred_tier: str = "trainer"):
+    async def run_chat_tool_loop(
+        self,
+        storage,
+        *,
+        session_id: str,
+        content: str,
+        preferred_tier: str = "trainer",
+        response_mode: str = "thinking",
+    ):
         preferred_tier = str(preferred_tier or "trainer").lower()
+        response_mode = str(response_mode or "thinking").strip().lower()
+        if response_mode not in {"thinking", "instant"}:
+            response_mode = "thinking"
         chat_context = (
             AgentExecutionContext(run_id=f"chat:{session_id}")
             if preferred_tier == "agent"
@@ -474,6 +485,18 @@ Available Tools:
         messages, active_tools, knowledge_pages, pending_question = self.build_chat_messages(
             storage, session_id=session_id, content=content, pending_question=pending_question
         )
+        if response_mode == "instant":
+            active_tools = []
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Respond in instant mode. Do not use tools. Do not narrate internal reasoning. "
+                        "Answer directly from available context, keep it concise, and if you are missing key information, "
+                        "say what is missing plainly instead of guessing."
+                    ),
+                }
+            )
         if pending_question and pending_question.get("status") == "pending":
             active_tools = []
         max_iters = self.deps["global_settings"].get("max_sync_tool_iterations", 3)

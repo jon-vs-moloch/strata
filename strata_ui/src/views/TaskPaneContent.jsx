@@ -15,6 +15,7 @@ const TelemetryCell = ({ value, label }) => (
 export default function TaskPaneContent({
   activeNav,
   laneFinishedTasks,
+  laneQueuedTasks,
   showFinishedTasks,
   setShowFinishedTasks,
   focusedTaskPaneTree,
@@ -29,6 +30,9 @@ export default function TaskPaneContent({
   laneDetails,
   laneCurrentTaskTitles,
   providerTelemetry,
+  onOpenProcedure,
+  onOpenTask,
+  onOpenWorkbench,
 }) {
   const scopeLaneDetail = currentScope === 'home' ? null : (laneDetails?.[currentScope] || null);
   const scopeModeLabel = currentScope === 'home'
@@ -51,6 +55,10 @@ export default function TaskPaneContent({
   const scopeStepDetail = currentScope === 'home'
     ? ''
     : [scopeLaneDetail?.step_detail, scopeLaneDetail?.progress_label].filter(Boolean).join(' · ');
+  const presentTaskRoots = Array.isArray(focusedTaskPaneTree)
+    ? focusedTaskPaneTree.filter((task) => task.status !== 'pending')
+    : [];
+  const queuedTaskRoots = Array.isArray(laneQueuedTasks) ? laneQueuedTasks : [];
   return (
     <>
       {activeNav !== 'dashboard' && laneFinishedTasks.length > 0 && (
@@ -73,7 +81,7 @@ export default function TaskPaneContent({
               textTransform: 'uppercase'
             }}
           >
-            <span>Recent Finished · {laneFinishedTasks.length}</span>
+            <span>Recently Completed · {laneFinishedTasks.length}</span>
             {showFinishedTasks ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
           <AnimatePresence>
@@ -92,6 +100,9 @@ export default function TaskPaneContent({
                     nowMs={activityNowMs}
                     laneDetail={laneDetails?.[task.lane] || null}
                     detailLevel="compact"
+                    onOpenProcedure={onOpenProcedure}
+                    onOpenTask={onOpenTask}
+                    onOpenWorkbench={onOpenWorkbench}
                   />
                 ))}
               </MotionDiv>
@@ -99,20 +110,53 @@ export default function TaskPaneContent({
           </AnimatePresence>
         </div>
       )}
-      <AnimatePresence>
-        {focusedTaskPaneTree.map((task) => (
-          <TaskCard
-            key={task.id}
-            task={task}
-            onArchive={() => handleArchiveTask(task.id)}
-            nowMs={activityNowMs}
-            laneDetail={laneDetails?.[task.lane] || null}
-            detailLevel="compact"
-          />
-        ))}
-      </AnimatePresence>
+      {presentTaskRoots.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>
+            PRESENT TASKS
+          </div>
+          <AnimatePresence>
+            {presentTaskRoots.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                onArchive={() => handleArchiveTask(task.id)}
+                nowMs={activityNowMs}
+                laneDetail={laneDetails?.[task.lane] || null}
+                detailLevel="compact"
+                onOpenProcedure={onOpenProcedure}
+                onOpenTask={onOpenTask}
+                onOpenWorkbench={onOpenWorkbench}
+              />
+            ))}
+          </AnimatePresence>
+        </div>
+      )}
 
-      {focusedTaskPaneTree.length === 0 && (
+      {queuedTaskRoots.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>
+            QUEUED / PENDING
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {queuedTaskRoots.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                onArchive={() => handleArchiveTask(task.id)}
+                nowMs={activityNowMs}
+                laneDetail={laneDetails?.[task.lane] || null}
+                detailLevel="compact"
+                onOpenProcedure={onOpenProcedure}
+                onOpenTask={onOpenTask}
+                onOpenWorkbench={onOpenWorkbench}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {presentTaskRoots.length === 0 && queuedTaskRoots.length === 0 && (
         <div style={{ textAlign: 'center', color: '#2d2d38', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
           <Terminal size={28} color="#222228" />
           <div style={{ fontSize: '13px', color: '#333' }}>

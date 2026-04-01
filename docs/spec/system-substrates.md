@@ -15,6 +15,7 @@ Strata uses proper nouns for first-class architectural artifacts and subsystems.
 Examples:
 
 - `Procedure`
+- `Kit`
 - `Verifier`
 - `Audit`
 
@@ -40,6 +41,8 @@ Owns:
 
 - reusable workflow identity
 - checklist structure
+- lifecycle state such as `draft`, `tested`, `vetted`, or `retired`
+- lineage and variant identity for workflow evolution
 - startup/onboarding seeding
 - eventual promotion target for successful repeated decompositions
 
@@ -57,7 +60,42 @@ Current status:
 
 - real and active
 - still biased toward seeding top-level tasks plus checklist structure
+- now supports explicit draft Procedures for novel live work, plus promotion from `draft` to `tested` after a successful run
 - not yet fully learning and rewriting itself from successful branches
+- still wants a dedicated operator-facing `Procedures` surface so durable workflows are visible, inspectable, and eventually steerable
+
+### `Kit`
+
+Purpose:
+
+- represent a durable bundle of related system artifacts that should travel, evolve, and be inspected together
+- let the system package coordinated tools, Procedures, evals, knowledge, policies, or other reusable assets as one named unit
+- support recursive composition so larger bundles can be built from smaller bundles
+
+Owns:
+
+- bundle identity and human-facing label
+- membership over other first-class artifacts such as `Procedure`, tool, eval, knowledge artifact, or other `Kit`
+- versioning, lineage, and variant identity for bundled artifact families
+- bundle-level metadata such as purpose, compatibility, and promotion state
+
+Does not own:
+
+- execution of the artifacts it contains
+- the internal implementation details of member artifacts
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/.knowledge/specs/project_spec.md](/Users/jon/Projects/strata/.knowledge/specs/project_spec.md)
+- [/Users/jon/Projects/strata/docs/spec/product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md)
+- [/Users/jon/Projects/strata/docs/spec/bug-tracker.md](/Users/jon/Projects/strata/docs/spec/bug-tracker.md)
+
+Current status:
+
+- specified as a first-class substrate
+- intended working name is `Kit`
+- should support recursive nesting (`Kit` containing other `Kit`s)
+- not yet implemented as a durable registry, runtime surface, or operator-facing view
 
 ### `Verifier`
 
@@ -249,6 +287,69 @@ Current status:
 
 - much stronger than before
 - now a core learning substrate rather than just logging
+- still wants richer operator-native presentations so structured traces, usage metadata, and child-work relationships are rendered as legible UI rather than raw blobs
+
+### History
+
+Purpose:
+
+- provide a chronological event log of what the system did, when, and why
+- support operator inspection, system querying, and later summarization/archive flows
+
+Owns:
+
+- append-only chronological runtime history views
+- event-level provenance and timestamp ordering
+- history summaries and archive rollups
+
+Does not own:
+
+- live task execution state itself
+- long-term semantic synthesis on its own
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/strata/observability/writer.py](/Users/jon/Projects/strata/strata/observability/writer.py)
+- [/Users/jon/Projects/strata/strata/api/runtime_admin.py](/Users/jon/Projects/strata/strata/api/runtime_admin.py)
+- [/Users/jon/Projects/strata/docs/spec/product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md)
+
+Current status:
+
+- partially present in logs, attempt artifacts, and observability tables
+- now beginning to surface as a first-class operator/system `History` view
+- still wants richer drilldown, query, archive, and action affordances
+
+### Workbench
+
+Purpose:
+
+- provide a universal debugger-like operator surface for any Strata process
+- let the operator step through execution node-by-node with real inputs, outputs, context, and handoff behavior visible
+- support branching, replay, regeneration, and substitution of tools/models/context from arbitrary intermediate nodes
+
+Owns:
+
+- replay and warm-up of process state up to a selected node
+- node-level input/output inspection
+- editable branch context and re-run surfaces
+- alternate-path comparison across tool/model/context variants
+- drilldown into verification, audit, and other child processes as first-class subflows
+
+Does not own:
+
+- the canonical source of runtime truth itself
+- policy decisions about what an operator profile is allowed to edit or invoke
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/docs/spec/product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md)
+- [/Users/jon/Projects/strata/.knowledge/specs/project_spec.md](/Users/jon/Projects/strata/.knowledge/specs/project_spec.md)
+
+Current status:
+
+- not implemented yet
+- now a first-class architectural target rather than an ad hoc debugging wish
+- should evolve into the deepest reflection surface in the system, eventually allowing inspection and bounded editing of Strata's own tools, Procedures, runtime behavior, source, and UI
 
 ### `Context Pressure`
 
@@ -382,6 +483,7 @@ Current status:
 
 - real and now usable
 - still wants explicit close/adopt/background-mode policy and cleaner process housekeeping semantics
+- still wants capability/profile-aware presentation so the same shell can serve simple chat-first use, deeper operator/developer use, and future managed/enterprise restrictions
 
 ## Current Gaps
 

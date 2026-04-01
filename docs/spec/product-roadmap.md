@@ -122,6 +122,48 @@ Near-term implementation standard:
 - emitters should provide rich metadata such as source kind, tags, topic summary, and urgency
 - session metadata should be maintained as routing substrate, not only UI state
 - the right-rail task pane should stay an at-a-glance surface; a dedicated full `Tasks` view should eventually own deep task inspection, failure forensics, attempt history, and archive navigation
+- operator-facing work surfaces should show all active work, including verification, audits, reviews, and other child work; there should be no invisible work
+- non-blocking operator observations and UX pain points should feed durable alignment/backlog surfaces so the system can consume them as real work instead of leaving them stranded in thread history
+
+## Cross-Cutting Operator Work Surfaces
+
+The next UI/product iteration should make runtime work legible without asking the user to perform housekeeping.
+
+Near-term product backlog:
+
+- redesign the `Tasks` surface around present work, queued work, recently completed work, legacy work, and archived work
+- keep task progress visible even when a task is expanded and keep lane progress visible even when another scope is focused
+- show task provenance explicitly: why the task exists, who/what spawned it, and what caused retries, decomposition, review, or verification
+- render attempts as expandable context -> result narratives rather than only status chips, while still keeping concise attempt metadata visible when collapsed
+- nest verification, audits, reviews, and other spawned child work under the task or attempt that created it
+- let operators invoke internal machinery from task/attempt surfaces, including things like verification, audit, retry, decomposition, pause, resume, or other bounded control actions where policy allows
+- add a scoped chronological `History` view that acts as a queryable event log for both operators and the system
+- add a first-class operator `Workbench` surface (working title; effectively a universal debugger) that can step through any Strata process end-to-end, pause at arbitrary nodes, inspect exact inputs/context/tool results, regenerate outputs from a chosen node, branch from modified context, and run downstream consequences side-by-side
+- add a first-class `Tools` view
+- add a first-class `Procedures` view so durable workflows are visible, inspectable, and eventually editable/promotable
+- add a first-class `Kits` surface for bundled artifact groups such as tool packs, procedure bundles, eval suites, or higher-level capability bundles
+- treat all of these work surfaces as interactive operator tooling rather than passive dashboards; `History`, `Tasks`, `Procedures`, `Tools`, and `Knowledge` should all be able to grow bounded edit/control actions over time
+- extend that same interactive rule to the `Workbench`: it should not only replay or inspect flows, but also let the operator substitute tools, models, context, and branching decisions, then observe how downstream execution changes
+- replace raw structured metadata blobs with purpose-built displays wherever the structure is known
+- age completed work automatically from recent -> legacy -> archived without requiring user cleanup
+- summarize and archive stale message/task clutter automatically rather than expecting user housekeeping
+- eventually support capability/profile gating across shells, including simplified user modes, power-user/developer modes, and stricter enterprise-managed visibility/control profiles
+- maintain a first-class bug tracker so runtime defects and truthfulness gaps become durable system work rather than ephemeral thread-local observations; see [bug-tracker.md](/Users/jon/Projects/strata/docs/spec/bug-tracker.md)
+- make reflection arbitrarily deep: operator surfaces should eventually drill all the way down into Strata's own source, so tools, Procedures, Knowledge artifacts, runtime policies, and even the UI itself can be inspected and edited from inside Strata
+
+## Cross-Cutting Chat Latency
+
+Chat should feel responsive even when the real work is multi-step or long-running.
+
+Near-term product backlog:
+
+- emit a fast conversational acknowledgement before long-running work begins, so the user immediately knows the system accepted the request and what it is about to do
+- treat non-thinking responses as `instant` responses throughout the system vocabulary and UI
+- add an explicit fast routing decision for `instant` vs thinking responses, with the option to skip the router entirely when a flow is already known to be safely `instant`
+- narrate tool use conversationally in user-facing chat when the model is performing a lookup, inspection, or other multi-step process
+- emit periodic progress updates for longer chat work so silence is never confused with idleness
+- push long-running or backgroundable chat work onto the background worker instead of holding the foreground request open unnecessarily
+- let latency policy apply outside chat too, so internal routing, verification, review, and other system flows can choose `instant` vs thinking behavior deliberately rather than implicitly
 
 ## Cross-Cutting Observability and Self-Evaluation Follow-Up
 
@@ -141,6 +183,7 @@ Follow-up work remains and should stay on the roadmap:
 - continue shaping raw observability into ergonomic summary surfaces that weak models can use without reconstructing state by hand
 - keep sharpening lane/runtime visibility so labels like `stalled`, `queued`, and `children in progress` always resolve to an explicit reason such as transport wait, database contention, missing progress heartbeat, or child-task handoff
 - keep refining `Procedure` execution so successful decompositions and reusable partial progress can fold back into durable `Procedure` artifacts instead of staying one-off runtime branches
+- add a durable `Kit` substrate so the system can package coordinated artifact groups, including nested Kits, instead of treating multi-artifact capability bundles as ad hoc conventions
 - treat mutable config fields as a first-class evolutionary search surface so bootstrap can explore deterministic config mutations before falling back to prompt or code mutation
 - add explicit inference-throttle postures (`hard` and `greedy`) and provider-limit probing so the system can distinguish strict ceilings from adaptive best-effort operation
 - add operator-comfort sensing and policy loops for local inference, including comfort-oriented targets such as fan-noise avoidance, memory-pressure avoidance, and other "not annoying" runtime constraints
