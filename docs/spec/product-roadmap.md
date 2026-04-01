@@ -202,6 +202,7 @@ Scope:
 - model-path/config registration
 - health checks, restarts, and timeout handling
 - operator-visible runtime telemetry
+- aggressive prompt caching: manage KV cache reuse across requests with shared prefixes (system prompts, tools, common context)
 - safe fallback when local runtime is unavailable
 
 Candidate engines:

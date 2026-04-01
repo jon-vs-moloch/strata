@@ -10,11 +10,13 @@
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import json
+from datetime import datetime, timezone
 from strata.knowledge.pages import KnowledgePageStore
 from strata.core.lanes import infer_lane_from_session_id
 from strata.feedback.signals import register_feedback_signal
 from strata.orchestrator.tool_health import record_tool_execution, should_throttle_tool
 from strata.schemas.core import ResearchReport
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 
 
 DEFAULT_REPO_ANCHORS = [
@@ -653,6 +655,27 @@ class ResearchModule:
                 progress_label="model thinking",
             )
         print(f"Starting single-shot research attempt for: {task_description[:50]}...")
+        
+        # Phase 3.3: Attempt Context Snapshot
+        if attempt_id:
+            should_flush = enqueue_attempt_observability_artifact({
+                "task_id": research_task_id,
+                "attempt_id": attempt_id,
+                "session_id": (task_context or {}).get("session_id"),
+                "artifact_kind": "context_snapshot",
+                "payload": {
+                    "messages": messages,
+                    "tools": RESEARCH_TOOLS,
+                    "target_scope": target_scope,
+                    "task_description": task_description,
+                    "handoff_context": handoff_context,
+                    "repo_snapshot": repo_snapshot if len(repo_snapshot) < 50000 else "TRUNCATED_SNAPSHOT",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            })
+            if should_flush:
+                flush_observability_writes()
+
         response = await self.model.chat(messages, tools=RESEARCH_TOOLS)
 
         if response.get("status") == "error":

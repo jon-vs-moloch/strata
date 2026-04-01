@@ -112,6 +112,21 @@ Suggested severity labels:
 - Why it matters:
   - makes update/debug state harder to reason about
 
+### `P2` Settings UI model/pool management is too restrictive
+
+- Status: active
+- Area: Settings UI / Model Registry
+- Symptoms:
+  - UI does not allow adding multiple models to a single pool (pools are currently restricted to a single model selection in the UI, even if the backend supports lists).
+  - UI does not allow binding a specific pool to a specific agent role (e.g., cannot explicitly bind a custom "strong pool" to the `Trainer` agent).
+- Proposed Direction:
+  - Implement a provider/model registry where individual endpoints can be saved to a list.
+  - Allow pools to be populated by selecting one or more models from this saved list.
+  - Enable explicit binding between pools and agent roles (Agent/Trainer).
+- Why it matters:
+  - Prevents the operator from configuring robust fallback or specialty routing within a pool via the UI.
+  - Hardcodes the relationship between pools and roles, making it difficult to experiment with different capability tiers for the Agent vs. Trainer without code changes.
+
 ## Recently Resolved
 
 ### Recovery-path `NoneType` crash on child validator constraints

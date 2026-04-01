@@ -840,6 +840,7 @@ class BackgroundWorker:
         state: Optional[TaskState] = None,
         attempt_outcome: Optional[AttemptOutcome] = None,
         reason: Optional[str] = None,
+        extra_constraints: Optional[Dict[str, Any]] = None,
     ) -> bool:
         storage = self._storage_factory()
         try:
@@ -853,6 +854,8 @@ class BackgroundWorker:
                 constraints["paused"] = True
             elif paused is False:
                 constraints.pop("paused", None)
+            if extra_constraints:
+                constraints.update(extra_constraints)
             task.constraints = constraints
             if state is not None and task.state not in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
                 task.state = state
@@ -1421,6 +1424,20 @@ class BackgroundWorker:
                 logger.info("Cancelled task %s triggered %s dependent cancellation(s).", task_id, cascades)
         finally:
             storage.close()
+        return True
+
+    async def replay_task(self, task_id: str, overrides: Optional[Dict[str, Any]] = None) -> bool:
+        updated = self._update_task_control_state(
+            task_id,
+            paused=False,
+            state=TaskState.PENDING,
+            attempt_outcome=AttemptOutcome.CANCELLED if task_id in {item for item in self._current_task_ids.values() if item} else None,
+            reason="Replayed by operator.",
+            extra_constraints=overrides,
+        )
+        if not updated:
+            return False
+        await self.enqueue(task_id)
         return True
 
     def lane_status(self, lane: str) -> str:

@@ -105,3 +105,7 @@ class ExternalWorkerHandle:
         append_worker_command("stop_task", task_id=str(task_id))
         return True
 
+    async def replay_task(self, task_id: str) -> bool:
+        append_worker_command("replay_task", task_id=str(task_id))
+        return True
+

@@ -1238,6 +1238,7 @@ function App() {
   const [procedures, setProcedures] = useState([]);
   const [selectedProcedureId, setSelectedProcedureId] = useState('');
   const [workbenchTarget, setWorkbenchTarget] = useState(null);
+  const [workbenchHistory, setWorkbenchHistory] = useState([]);
   const [selectedProcedure, setSelectedProcedure] = useState(null);
   const [retentionSnapshot, setRetentionSnapshot] = useState(null);
   const [variantRatingsSnapshot, setVariantRatingsSnapshot] = useState(null);
@@ -1338,6 +1339,22 @@ function App() {
     });
     return created;
   }, [upsertLaneDraft]);
+
+  const handleInspectWorkbenchTarget = useCallback((target) => {
+    if (!target) return;
+    setWorkbenchHistory(prev => {
+      // Don't add duplicate top entries
+      if (prev[0]?.taskId === target.taskId && 
+          prev[0]?.procedureId === target.procedureId && 
+          prev[0]?.sessionId === target.sessionId) return prev;
+      return [target, ...prev].slice(0, 10);
+    });
+    setWorkbenchTarget(target);
+    if (target?.procedureId) {
+      setSelectedProcedureId(target.procedureId);
+    }
+    setActiveNav('workbench');
+  }, []);
 
   useEffect(() => {
     sessionListRef.current = sessionList;
@@ -1501,6 +1518,40 @@ function App() {
     try {
       await axios.post(`${API}/admin/tasks/${taskId}/stop`);
       await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+    } catch (e) { console.error(e); }
+  };
+
+  const handleReplayTask = async (taskId, overrides = {}) => {
+    if (!taskId) return;
+    try {
+      await axios.post(`${API}/admin/tasks/${taskId}/replay`, overrides);
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+    } catch (e) { console.error(e); }
+  };
+  const handleBranchTask = async (taskId, payload = {}) => {
+    if (!taskId) return;
+    try {
+      const resp = await axios.post(`${API}/admin/tasks/${taskId}/branch`, payload);
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+      return resp.data;
+    } catch (e) { console.error(e); }
+  };
+
+  const handleMutateTask = async (taskId, payload = {}) => {
+    if (!taskId) return;
+    try {
+      const resp = await axios.post(`${API}/admin/tasks/${taskId}/mutate`, payload);
+      await Promise.all([fetchWorkerStatus(), fetchData(true)]);
+      return resp.data;
+    } catch (e) { console.error(e); }
+  };
+
+  const handleMutateProcedure = async (procedureId, payload = {}) => {
+    if (!procedureId) return;
+    try {
+      const resp = await axios.post(`${API}/admin/registry/procedures/${procedureId}/mutate`, payload);
+      await Promise.all([fetchData(true)]);
+      return resp.data;
     } catch (e) { console.error(e); }
   };
 
@@ -3214,13 +3265,7 @@ function App() {
                   setSelectedProcedureId(procedureId);
                   setActiveNav('procedures');
                 },
-                onOpenWorkbench: (target) => {
-                  setWorkbenchTarget(target);
-                  if (target?.procedureId) {
-                    setSelectedProcedureId(target.procedureId);
-                  }
-                  setActiveNav('workbench');
-                },
+                onOpenWorkbench: handleInspectWorkbenchTarget,
                 onOpenSession: (nextSessionId) => {
                   const nextLane = laneForSessionId(nextSessionId);
                   setCurrentScope(nextLane);
@@ -3244,16 +3289,30 @@ function App() {
                 },
               }}
               workbenchProps={{
+                apiBase: API,
                 target: workbenchTarget,
+                history: workbenchHistory,
                 activeTasks: scopedActiveTaskTree,
                 finishedTasks: scopedFinishedTaskTree,
                 procedures,
                 messages,
-                onOpenTask: () => setActiveNav('tasks'),
+                onOpenTask: (taskId) => {
+                  setWorkbenchTarget({ kind: 'task', taskId });
+                  setActiveNav('workbench');
+                },
                 onOpenProcedure: (procedureId) => {
                   setSelectedProcedureId(procedureId);
-                  setActiveNav('procedures');
+                  setWorkbenchTarget({ kind: 'procedure', procedureId });
+                  setActiveNav('workbench');
                 },
+                onInspectTarget: handleInspectWorkbenchTarget,
+                onPauseTask: handlePauseTask,
+                onResumeTask: handleResumeTask,
+                onStopTask: handleStopTask,
+                onReplayTask: handleReplayTask,
+                onBranchTask: handleBranchTask,
+                onMutateTask: handleMutateTask,
+                onMutateProcedure: handleMutateProcedure,
                 onOpenSession: (nextSessionId) => {
                   const nextLane = laneForSessionId(nextSessionId);
                   setCurrentScope(nextLane);

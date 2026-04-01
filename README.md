@@ -116,6 +116,7 @@ The current repository is still a local-first prototype, but two medium-term pro
 
 - Desktop app shell: package Strata as a real desktop application that can live in the taskbar/menu bar, open its own window, and manage the existing local web UI/backend lifecycle without rewriting the product around a desktop-only architecture.
 - Strata-managed local inference: move beyond depending on LM Studio as the operator-managed inference host and teach Strata to launch and supervise a local inference runtime itself while still reusing established engines rather than implementing low-level inference from scratch.
+- Aggressive prompt caching: once inference is managed, maximize KV cache reuse for shared system prompts, tool definitions, and common context structures to reduce latency and resource load during orchestration.
 
 These roadmap items come with two constraints:
 

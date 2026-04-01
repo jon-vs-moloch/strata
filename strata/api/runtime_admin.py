@@ -549,12 +549,137 @@ def register_runtime_admin_routes(
             raise HTTPException(status_code=404, detail="task not found or not resumable")
         return {"status": "running", "task_id": task_id}
 
-    @app.post("/admin/tasks/{task_id}/stop")
-    async def stop_task(task_id: str):
-        stopped = worker.stop_task(task_id)
-        if not stopped:
-            raise HTTPException(status_code=404, detail="task not found or not stoppable")
-        return {"status": "cancelled", "task_id": task_id}
+    @app.post("/admin/tasks/{task_id}/replay")
+    async def replay_task(task_id: str, payload: Dict[str, Any] | None = None):
+        replayed = await worker.replay_task(task_id, overrides=payload)
+        if not replayed:
+            raise HTTPException(status_code=404, detail="task not found or not replayable")
+        return {"status": "replayed", "task_id": task_id}
+
+    @app.post("/admin/tasks/{task_id}/branch")
+    async def branch_task(task_id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
+        from strata.storage.models import TaskModel
+        original = storage.tasks.get_by_id(task_id)
+        if not original:
+            raise HTTPException(status_code=404, detail="original task not found")
+            
+        new_title = payload.get("title") or f"[BRANCH] {original.title}"
+        new_desc = payload.get("description") or original.description
+        new_constraints = dict(original.constraints or {})
+        new_constraints.update(payload.get("constraints") or {})
+        
+        branch = storage.tasks.create(
+            title=new_title,
+            description=new_desc,
+            type=original.type,
+            session_id=original.session_id,
+            parent_task_id=original.parent_task_id,
+            depth=original.depth,
+            constraints=new_constraints,
+        )
+        storage.commit()
+        await worker.enqueue(branch.task_id)
+        return {"status": "branched", "original": task_id, "branch": branch.task_id}
+
+    @app.post("/admin/tasks/{task_id}/mutate")
+    async def mutate_task(task_id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
+        task = storage.tasks.get_by_id(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+            
+        if "title" in payload: task.title = payload["title"]
+        if "description" in payload: task.description = payload["description"]
+        if "constraints" in payload:
+            c = dict(task.constraints or {})
+            c.update(payload["constraints"])
+            task.constraints = c
+            
+        storage.commit()
+        return {"status": "mutated", "task_id": task_id}
+
+    @app.post("/admin/registry/procedures/{id}/mutate")
+    async def mutate_procedure(id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
+        from strata.procedures.registry import get_procedure, save_procedure
+        try:
+            procedure = get_procedure(storage, id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="procedure not found")
+            
+        updated = {**procedure, **payload}
+        save_procedure(storage, updated)
+        storage.commit()
+        return {"status": "mutated", "procedure_id": id}
+
+    @app.get("/admin/tasks/{task_id}/detail")
+    async def get_task_detail(task_id: str, storage=Depends(get_storage)):
+        from strata.storage.models import TaskModel, AttemptModel
+        from strata.procedures.registry import get_procedure
+
+        task = storage.session.query(TaskModel).filter(TaskModel.task_id == task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+
+        attempts = storage.session.query(AttemptModel).filter(AttemptModel.task_id == task_id).all()
+        children = storage.session.query(TaskModel).filter(TaskModel.parent_task_id == task_id).all()
+
+        parent = None
+        if task.parent_task_id:
+            parent = storage.session.query(TaskModel).filter(TaskModel.task_id == task.parent_task_id).first()
+
+        artifacts = list_attempt_observability_artifacts(storage, task_id=task_id)
+
+        procedure = None
+        procedure_id = (task.constraints or {}).get("procedure_id")
+        if procedure_id:
+            try:
+                procedure = get_procedure(storage, procedure_id)
+            except KeyError:
+                pass
+
+        return {
+            "status": "ok",
+            "task": {
+                "id": task.task_id,
+                "title": task.title,
+                "description": task.description,
+                "state": task_state_api_value(task.state),
+                "type": task.type.value if task.type else None,
+                "depth": task.depth,
+                "lane": (task.constraints or {}).get("lane") or "trainer",
+                "parent_id": task.parent_task_id,
+                "active_child_ids": task.active_child_ids,
+                "constraints": task.constraints,
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+            },
+            "attempts": [
+                {
+                    "attempt_id": a.attempt_id,
+                    "task_id": a.task_id,
+                    "outcome": a.outcome.value if a.outcome else "working",
+                    "started_at": a.started_at.isoformat() if a.started_at else None,
+                    "ended_at": a.ended_at.isoformat() if a.ended_at else None,
+                    "artifacts": a.artifacts,
+                    "evidence": a.evidence,
+                }
+                for a in attempts
+            ],
+            "children": [
+                {
+                    "task_id": c.task_id,
+                    "title": c.title,
+                    "state": task_state_api_value(c.state),
+                }
+                for c in children
+            ],
+            "parent": {
+                "task_id": parent.task_id,
+                "title": parent.title,
+                "state": task_state_api_value(parent.state),
+            } if parent else None,
+            "observability": artifacts,
+            "procedure": procedure,
+        }
 
     @app.get("/events")
     async def sse_events(request: Request):
@@ -601,6 +726,14 @@ def register_runtime_admin_routes(
             "pause_worker": pause_worker,
             "resume_worker": resume_worker,
             "stop_worker": stop_worker,
+            "pause_task": pause_task,
+            "resume_task": resume_task,
+            "stop_task": stop_task,
+            "replay_task": replay_task,
+            "branch_task": branch_task,
+            "mutate_task": mutate_task,
+            "mutate_procedure": mutate_procedure,
+            "get_task_detail": get_task_detail,
             "sse_events": sse_events,
         }
     )

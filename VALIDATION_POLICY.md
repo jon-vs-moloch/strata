@@ -10,11 +10,11 @@ Every code candidate must pass the `EvaluationPipeline`.
 
 ### Mandatory Validators
 Validators are **REQUIRED** for the following task types:
-- `IMPL` (Implementation)
+- `IMPL`
 - `BUG_FIX`
 - `REFACTOR`
-- `improve_tooling`
-- `feature`
+- `JUDGE`
+- `RESEARCH` (optional but recommended for context sanity)
 
 If a task of these types lacks a declared validator, or if the validator fails, the candidate is **INVALID**.
 
@@ -25,6 +25,7 @@ If a task of these types lacks a declared validator, or if the validator fails, 
 ### Available Validators
 - `python_import_only`: Verifies the file can be imported without syntax errors.
 - `python_pytest`: Executes a designated test file against the candidate in an isolated temporary workspace.
+- `json_schema`: Validates that the output is a valid JSON string.
 - `custom_script:<path>`: Executes a custom shell script for specialized validation.
 
 ---

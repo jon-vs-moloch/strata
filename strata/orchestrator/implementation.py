@@ -12,6 +12,8 @@ from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchR
 import os
 import json
 import httpx
+from datetime import datetime, timezone
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
 from strata.experimental.variants import build_stage_scope, build_variant_execution_plan, classify_pool_pruning
 from strata.orchestrator.research import TaskBoundaryViolationError
@@ -248,6 +250,29 @@ class ImplementationModule:
                     attempt_id=attempt_id,
                     progress_label="model generating",
                 )
+
+            # Phase 3.3: Attempt Context Snapshot
+            if attempt_id:
+                should_flush = enqueue_attempt_observability_artifact({
+                    "task_id": task_id,
+                    "attempt_id": attempt_id,
+                    "session_id": task.session_id,
+                    "artifact_kind": "context_snapshot",
+                    "payload": {
+                        "messages": variant_messages,
+                        "tools": IMPLEMENTATION_META_TOOLS,
+                        "variant_id": str(variant.get("variant_id") or "generic"),
+                        "task_description": task.description,
+                        "local_research": {
+                            "gathered": local_research.context_gathered,
+                            "constraints": local_research.key_constraints_discovered,
+                        },
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                })
+                if should_flush:
+                    flush_observability_writes()
+
             response = await self.model.chat(variant_messages, tools=IMPLEMENTATION_META_TOOLS)
             content = response.get("content", "")
             tool_calls = response.get("tool_calls") or []
