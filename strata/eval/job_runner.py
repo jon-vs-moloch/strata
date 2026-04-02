@@ -162,6 +162,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                 api_url=payload.get("api_url", "http://127.0.0.1:8000"),
                 run_label=payload.get("run_label") or f"{candidate_change_id}-queued",
                 eval_harness_config_override=payload.get("eval_harness_config_override"),
+                progress_fn=_progress,
             )
             persist_benchmark_report(
                 storage,
@@ -220,6 +221,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                 source_task_id=task.task_id,
                 spawned_task_ids=payload.get("spawned_task_ids"),
                 associated_task_ids=payload.get("associated_task_ids"),
+                progress_fn=_progress,
             )
             result = experiment_result.model_dump()
         elif kind == "bootstrap_cycle":

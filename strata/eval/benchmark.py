@@ -155,6 +155,7 @@ async def run_benchmark(
     prompts: List[Dict[str, str]] | None = None,
     run_label: Optional[str] = None,
     eval_harness_config_override: Optional[Dict[str, Any]] = None,
+    progress_fn=None,
 ) -> Dict[str, Any]:
     """
     @summary Execute the benchmark suite and return a structured report.
@@ -173,17 +174,33 @@ async def run_benchmark(
     baseline_wins = 0
     ties = 0
 
+    def _progress(label: str, detail: str = "", progress_label: str = "benchmark") -> None:
+        if progress_fn:
+            progress_fn(
+                step="system_job",
+                label=label,
+                detail=detail,
+                progress_label=progress_label,
+            )
+
     for idx, prompt_def in enumerate(prompts, start=1):
         prompt = prompt_def["prompt"]
         prompt_id = prompt_def["id"]
-        baseline_response, baseline_latency = await _run_direct_baseline(baseline_adapter, prompt)
-        harness_response, harness_latency, _ = await run_harness_response(
-            prompt,
-            run_id=f"benchmark-{run_label}-{prompt_id}-{idx}",
-            config_override=eval_harness_config_override,
-            profile="harness_no_capes",
-        )
-        judgment = await _judge_pair(judge_adapter, prompt, baseline_response, harness_response)
+        sample_label = f"{idx}/{len(prompts)} · {prompt_id}"
+        try:
+            _progress("Running benchmark sample", f"{sample_label} · baseline", f"sample {idx}/{len(prompts)}")
+            baseline_response, baseline_latency = await _run_direct_baseline(baseline_adapter, prompt)
+            _progress("Running benchmark sample", f"{sample_label} · harness", f"sample {idx}/{len(prompts)}")
+            harness_response, harness_latency, _ = await run_harness_response(
+                prompt,
+                run_id=f"benchmark-{run_label}-{prompt_id}-{idx}",
+                config_override=eval_harness_config_override,
+                profile="harness_no_capes",
+            )
+            _progress("Running benchmark sample", f"{sample_label} · judge", f"sample {idx}/{len(prompts)}")
+            judgment = await _judge_pair(judge_adapter, prompt, baseline_response, harness_response)
+        except Exception as exc:
+            raise RuntimeError(f"Benchmark sample failed at {sample_label}: {exc}") from exc
 
         winner = judgment.get("winner", "tie")
         if winner == "harness":
@@ -206,6 +223,11 @@ async def run_benchmark(
                 harness_score=float(judgment.get("harness_score", 0.0)),
                 rationale=str(judgment.get("rationale", "")),
             )
+        )
+        _progress(
+            "Completed benchmark sample",
+            f"{sample_label} · winner={winner}",
+            f"sample {idx}/{len(prompts)}",
         )
 
     average_baseline_score = sum(sample.baseline_score for sample in samples) / len(samples)

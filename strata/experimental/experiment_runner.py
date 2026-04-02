@@ -318,12 +318,21 @@ class ExperimentRunner:
         source_task_id: Optional[str] = None,
         spawned_task_ids: Optional[List[str]] = None,
         associated_task_ids: Optional[List[str]] = None,
+        progress_fn=None,
     ) -> ExperimentResult:
         """
         @summary Compare a labeled candidate benchmark run against the stored baseline benchmark.
         """
         logger.info(f"Running benchmark gate for candidate change {candidate_change_id}...")
         safe_runs = max(1, run_count)
+        def _progress(label: str, detail: str = "", progress_label: str = "benchmark gate") -> None:
+            if progress_fn:
+                progress_fn(
+                    step="system_job",
+                    label=label,
+                    detail=detail,
+                    progress_label=progress_label,
+                )
         variant_assignment = self._resolve_eval_variant_pair(
             candidate_change_id=candidate_change_id,
             baseline_change_id=baseline_change_id,
@@ -332,10 +341,13 @@ class ExperimentRunner:
         )
         benchmark_reports: List[Dict[str, Any]] = []
         for run_index in range(safe_runs):
+            run_label = f"run {run_index + 1}/{safe_runs}"
+            _progress("Running benchmark", run_label, "benchmark")
             report = await run_benchmark(
                 api_url=api_url,
                 run_label=f"{candidate_change_id}-benchmark-{run_index + 1}",
                 eval_harness_config_override=eval_harness_config_override,
+                progress_fn=progress_fn,
             )
             benchmark_reports.append(report)
             persist_benchmark_report(
@@ -485,6 +497,7 @@ class ExperimentRunner:
                 api_url=api_url,
                 run_label=f"{candidate_change_id}-benchmark-{run_index + 1}",
                 eval_harness_config_override=eval_harness_config_override,
+                progress_fn=progress_fn,
             )
             benchmark_reports.append(benchmark_report)
             persist_benchmark_report(

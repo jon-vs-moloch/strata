@@ -173,6 +173,7 @@ def test_run_eval_job_task_completes_benchmark_job(monkeypatch):
     storage.commit()
 
     async def fake_run_benchmark(**_kwargs):
+        assert callable(_kwargs.get("progress_fn"))
         return {
             "run_label": "queued-run",
             "prompt_count": 1,
@@ -224,6 +225,7 @@ def test_run_eval_job_task_supersedes_prior_open_attempts(monkeypatch):
     storage.commit()
 
     async def fake_run_benchmark(**_kwargs):
+        assert callable(_kwargs.get("progress_fn"))
         return {
             "run_label": "queued-run",
             "prompt_count": 1,
