@@ -1348,6 +1348,18 @@ class BackgroundWorker:
                         ),
                     )
                     if verification:
+                        attempt.artifacts = {
+                            **dict(getattr(attempt, "artifacts", {}) or {}),
+                            "verifier": {
+                                "recorded_at": verification.get("recorded_at"),
+                                "verification_kind": verification.get("verification_kind"),
+                                "verdict": verification.get("verdict"),
+                                "confidence": verification.get("confidence"),
+                                "recommended_action": verification.get("recommended_action"),
+                                "failure_modes": list(verification.get("failure_modes") or []),
+                                "policy": dict(verification.get("policy") or {}),
+                            },
+                        }
                         verifier_signal = emit_verifier_attention_signal(
                             storage,
                             task=task,

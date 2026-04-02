@@ -17,7 +17,7 @@ from strata.core.lanes import infer_lane_from_task
 from strata.experimental.trace_review import build_task_trace_summary
 from strata.feedback.signals import register_feedback_signal
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
-from strata.storage.models import AttemptModel, AttemptOutcome, TaskModel
+from strata.storage.models import AttemptModel, AttemptOutcome, AttemptObservabilityArtifactModel, TaskModel
 
 
 VERIFIER_REGISTRY_KEY = "output_verifier_registry"
@@ -80,6 +80,51 @@ def _default_registry() -> Dict[str, Any]:
     }
 
 
+def _apply_registry_artifact(registry: Dict[str, Any], *, mode: str, artifact: Dict[str, Any]) -> Dict[str, Any]:
+    registry.setdefault("by_mode", {})
+    registry.setdefault("overall", {})
+    mode_bucket = dict(registry["by_mode"].get(mode) or {})
+    overall_bucket = dict(registry.get("overall") or {})
+
+    def _apply(bucket: Dict[str, Any]) -> Dict[str, Any]:
+        bucket["verified_count"] = int(bucket.get("verified_count", 0) or 0) + 1
+        verdict = str(artifact.get("verdict") or "uncertain").strip().lower()
+        if verdict == "flawed":
+            bucket["flawed_count"] = int(bucket.get("flawed_count", 0) or 0) + 1
+        if verdict == "uncertain":
+            bucket["uncertain_count"] = int(bucket.get("uncertain_count", 0) or 0) + 1
+        if artifact.get("deterministic_contradictions"):
+            bucket["deterministic_contradictions"] = int(bucket.get("deterministic_contradictions", 0) or 0) + 1
+        if artifact.get("verification_kind") == "model":
+            bucket["model_verification_count"] = int(bucket.get("model_verification_count", 0) or 0) + 1
+        return bucket
+
+    registry["by_mode"][mode] = _apply(mode_bucket)
+    registry["overall"] = _apply(overall_bucket)
+    return registry
+
+
+def _bootstrap_registry_from_observability(storage, *, limit: int = 500) -> Dict[str, Any]:
+    registry = _default_registry()
+    if storage is None:
+        return registry
+    try:
+        rows = (
+            storage.session.query(AttemptObservabilityArtifactModel)
+            .filter(AttemptObservabilityArtifactModel.artifact_kind == "verifier_review")
+            .order_by(AttemptObservabilityArtifactModel.created_at.asc())
+            .limit(max(1, int(limit or 500)))
+            .all()
+        )
+    except Exception:
+        return registry
+    for row in rows:
+        payload = dict(getattr(row, "payload", {}) or {})
+        mode = str(payload.get("mode") or "unknown").strip().lower() or "unknown"
+        registry = _apply_registry_artifact(registry, mode=mode, artifact=payload)
+    return registry
+
+
 def _clone_registry(registry: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "by_mode": {
@@ -101,6 +146,8 @@ def _get_registry(storage=None) -> Dict[str, Any]:
             loaded = storage.parameters.peek_parameter(VERIFIER_REGISTRY_KEY, default_value=_default_registry()) or _default_registry()
         except Exception:
             loaded = _default_registry()
+        if not dict((loaded or {}).get("by_mode") or {}) and not dict((loaded or {}).get("overall") or {}).get("verified_count"):
+            loaded = _bootstrap_registry_from_observability(storage)
     registry = _clone_registry(loaded or _default_registry())
     with _VERIFIER_REGISTRY_LOCK:
         if _VERIFIER_REGISTRY_STATE is None:
@@ -140,26 +187,7 @@ def _persist_registry_if_due() -> None:
 def _record_registry_result(storage, *, mode: str, artifact: Dict[str, Any]) -> Dict[str, Any]:
     global _VERIFIER_REGISTRY_STATE, _VERIFIER_REGISTRY_DIRTY
     registry = _get_registry(storage)
-    registry.setdefault("by_mode", {})
-    registry.setdefault("overall", {})
-    mode_bucket = dict(registry["by_mode"].get(mode) or {})
-    overall_bucket = dict(registry.get("overall") or {})
-
-    def _apply(bucket: Dict[str, Any]) -> Dict[str, Any]:
-        bucket["verified_count"] = int(bucket.get("verified_count", 0) or 0) + 1
-        verdict = str(artifact.get("verdict") or "uncertain").strip().lower()
-        if verdict == "flawed":
-            bucket["flawed_count"] = int(bucket.get("flawed_count", 0) or 0) + 1
-        if verdict == "uncertain":
-            bucket["uncertain_count"] = int(bucket.get("uncertain_count", 0) or 0) + 1
-        if artifact.get("deterministic_contradictions"):
-            bucket["deterministic_contradictions"] = int(bucket.get("deterministic_contradictions", 0) or 0) + 1
-        if artifact.get("verification_kind") == "model":
-            bucket["model_verification_count"] = int(bucket.get("model_verification_count", 0) or 0) + 1
-        return bucket
-
-    registry["by_mode"][mode] = _apply(mode_bucket)
-    registry["overall"] = _apply(overall_bucket)
+    registry = _apply_registry_artifact(registry, mode=mode, artifact=artifact)
     with _VERIFIER_REGISTRY_LOCK:
         _VERIFIER_REGISTRY_STATE = _clone_registry(registry)
         _VERIFIER_REGISTRY_DIRTY = True
@@ -454,6 +482,7 @@ Verification summary:
         if should_flush:
             flush_observability_writes()
     _record_registry_result(storage, mode=normalized_mode, artifact=artifact)
+    _persist_registry_if_due()
     return artifact
 
 

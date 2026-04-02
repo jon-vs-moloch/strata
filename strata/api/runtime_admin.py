@@ -749,10 +749,12 @@ def register_runtime_admin_routes(
                     "attempt_id": a.attempt_id,
                     "task_id": a.task_id,
                     "outcome": a.outcome.value if a.outcome else "working",
+                    "resolution": a.resolution.value if a.resolution else None,
                     "started_at": a.started_at.isoformat() if a.started_at else None,
                     "ended_at": a.ended_at.isoformat() if a.ended_at else None,
                     "artifacts": a.artifacts,
                     "evidence": a.evidence,
+                    "plan_review": a.plan_review,
                 }
                 for a in attempts
             ],
