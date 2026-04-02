@@ -54,6 +54,11 @@ Research, implementation, decomposition, and tool repair should all fit the same
 
 This means Research is not a special exception to the ontology; it is a Procedure/task family with its own toolset and prompts.
 
+Current implementation note:
+
+- decomposition now preserves discovered workflow structure by minting or refreshing a draft `Procedure` in the main decomposition path, then binding the resulting child tasks back to that `Procedure`
+- audit-style system jobs now bind to a canonical `Audit Trace Review` Procedure identity instead of existing only as anonymous `trace_review` runtime work
+
 ## Self-Modification Direction
 
 The same runtime model should apply to Strata's own machinery:

@@ -14,6 +14,7 @@ from strata.observability.writer import enqueue_attempt_observability_artifact, 
 from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.procedures.registry import STARTUP_SMOKE_PROCEDURE_ID, ensure_draft_procedure_for_task, record_procedure_run
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 from strata.orchestrator.research import ResearchModule
 from strata.orchestrator.decomposition import DecompositionModule
 from strata.orchestrator.implementation import ImplementationModule
@@ -184,7 +185,7 @@ async def _queue_trace_review_guardrail(
         parent_task_id=task.task_id,
         state=TaskState.PENDING,
         flush=False,
-        constraints={
+        constraints=bind_system_procedure({
             "lane": "trainer",
             "provenance": dict(payload.get("provenance") or {}),
             "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
@@ -193,6 +194,9 @@ async def _queue_trace_review_guardrail(
                 "payload": payload,
             },
         },
+        procedure_id=canonical_system_procedure_id(system_job_kind="trace_review"),
+        capability_kind="process",
+        capability_name="audit"),
     )
     judge.type = TaskType.JUDGE
     judge.depth = int(getattr(task, "depth", 0) or 0) + 1
@@ -1344,9 +1348,48 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
         raise RuntimeError(
             "Decomposition produced no actionable subtasks. Treat this as a recoverable planning failure and generate a more concrete recovery plan instead of escalating by default."
         )
+    draft_procedure = ensure_draft_procedure_for_task(
+        storage,
+        task,
+        checklist=[
+            {
+                "id": str(tid),
+                "title": str(getattr(proto, "title", "") or "").strip(),
+                "description": str(getattr(proto, "description", "") or "").strip(),
+                "verification": (
+                    f"Edit type: {str(getattr(proto, 'edit_type', '') or '').strip()} | "
+                    f"Validator: {str(getattr(proto, 'validator', '') or '').strip()} | "
+                    f"Targets: {', '.join(list(getattr(proto, 'target_files', []) or []))}"
+                ).strip(),
+            }
+            for tid, proto in actionable
+        ],
+    )
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    task.constraints = bind_system_procedure(
+        {
+            **constraints,
+            "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
+        },
+        procedure_id=str(draft_procedure.get("procedure_id") or canonical_system_procedure_id(task_type="DECOMP")).strip(),
+        capability_kind="procedure",
+        capability_name="decomposition",
+    )
     spawned_ids = []
     spawned_by_proto_id = {}
     for tid, proto in actionable:
+        child_constraints = bind_system_procedure(
+            {
+                "target_files": proto.target_files,
+                "edit_type": proto.edit_type,
+                "validator": proto.validator,
+                "max_diff_size": proto.max_diff_size,
+                "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
+            },
+            procedure_id=str(draft_procedure.get("procedure_id") or "").strip(),
+            capability_kind="procedure",
+            capability_name="decomposition",
+        )
         sub = storage.tasks.create(
             title=proto.title,
             description=proto.description,
@@ -1354,12 +1397,7 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             parent_task_id=task.task_id,
             state=TaskState.PENDING,
             flush=False,
-            constraints={
-                "target_files": proto.target_files,
-                "edit_type": proto.edit_type,
-                "validator": proto.validator,
-                "max_diff_size": proto.max_diff_size
-            }
+            constraints=child_constraints,
         )
         sub.type = TaskType.IMPL
         sub.depth = task.depth + 1

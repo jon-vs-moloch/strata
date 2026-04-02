@@ -65,6 +65,7 @@ from strata.runtime_config import (
     SETTINGS_PARAMETER_KEY,
     normalized_settings as _normalized_settings,
 )
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 from strata.orchestrator.user_questions import (
     enqueue_user_question,
     get_active_question,
@@ -436,7 +437,7 @@ async def _queue_eval_system_job(
                 session_id=resolved_session_id,
                 state=TaskState.PENDING,
                 type=TaskType.JUDGE,
-                constraints={
+                constraints=bind_system_procedure({
                     "lane": lane,
                     "provenance": dict(payload.get("provenance") or {}),
                     "system_job": {
@@ -444,6 +445,9 @@ async def _queue_eval_system_job(
                         "payload": payload,
                     }
                 },
+                procedure_id=canonical_system_procedure_id(system_job_kind=kind),
+                capability_kind="process",
+                capability_name=f"system_job:{kind}"),
             )
             storage.commit()
             await _worker.enqueue(task.task_id)

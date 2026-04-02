@@ -14,6 +14,12 @@ from uuid import uuid4
 from strata.core.lanes import canonical_session_id_for_lane, normalize_lane
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.storage.models import TaskModel, TaskState, TaskType
+from strata.system_capabilities import (
+    AUDIT_TRACE_REVIEW_PROCEDURE_ID,
+    PROCESS_REPAIR_PROCEDURE_ID,
+    TASK_DECOMPOSITION_PROCEDURE_ID,
+    VERIFICATION_REVIEW_PROCEDURE_ID,
+)
 
 
 PROCEDURE_REGISTRY_KEY = "procedure_registry"
@@ -21,6 +27,114 @@ DEFAULT_PROCEDURE_LANE = "agent"
 STARTUP_SMOKE_PROCEDURE_ID = "startup_sanity_check"
 ONBOARDING_PROCEDURE_ID = "operator_onboarding"
 DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
+    AUDIT_TRACE_REVIEW_PROCEDURE_ID: {
+        "procedure_id": AUDIT_TRACE_REVIEW_PROCEDURE_ID,
+        "title": "Audit Trace Review",
+        "summary": "Review a task, session, or branch trace, diagnose what happened, and route follow-up supervision, repair, or re-greening decisions.",
+        "repeatable": True,
+        "lifecycle_state": "tested",
+        "lineage_id": AUDIT_TRACE_REVIEW_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
+        "target_lane": "trainer",
+        "task_type": "JUDGE",
+        "instructions": (
+            "Treat this as the canonical Audit Procedure for reviewing traces. Build a compact summary, assess the branch, "
+            "identify damaged machinery vs ordinary task failure, and emit explicit follow-up actions."
+        ),
+        "checklist": [
+            {"id": "trace_summary", "title": "Build the compact trace summary", "verification": "The summary includes the relevant tasks, attempts, artifacts, and provenance."},
+            {"id": "audit_assessment", "title": "Assess the branch or artifact", "verification": "The review distinguishes healthy output, branch failure, and damaged machinery."},
+            {"id": "followup_routing", "title": "Route follow-up work", "verification": "The audit emits explicit follow-up actions such as re-green, repair, question, or attention."},
+        ],
+        "success_criteria": {
+            "deliverables": [
+                "A durable audit review artifact",
+                "Explicit follow-up routing or re-greening evidence",
+            ],
+        },
+    },
+    TASK_DECOMPOSITION_PROCEDURE_ID: {
+        "procedure_id": TASK_DECOMPOSITION_PROCEDURE_ID,
+        "title": "Task Decomposition",
+        "summary": "Break a non-oneshottable task into bounded, dependency-aware leaf work and preserve the resulting workflow structure as a draft Procedure when useful.",
+        "repeatable": True,
+        "lifecycle_state": "tested",
+        "lineage_id": TASK_DECOMPOSITION_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
+        "target_lane": DEFAULT_PROCEDURE_LANE,
+        "task_type": "DECOMP",
+        "instructions": (
+            "Treat decomposition as a canonical Procedure. Produce actionable leaf work, preserve successful structure, "
+            "and fold reusable decomposition into a draft Procedure when possible."
+        ),
+        "checklist": [
+            {"id": "frame_task", "title": "Frame the task and success criteria", "verification": "The decomposition reflects the real goal, constraints, and oneshottable boundary rules."},
+            {"id": "emit_leaf_tasks", "title": "Emit actionable leaf tasks", "verification": "Each subtask is oneshottable and includes concrete routing metadata such as files, validator, and dependencies."},
+            {"id": "preserve_workflow", "title": "Preserve reusable workflow structure", "verification": "Useful decomposition is captured into Procedure metadata instead of remaining branch-local only."},
+        ],
+        "success_criteria": {
+            "deliverables": [
+                "A bounded subtask DAG",
+                "A Procedure-linked decomposition lineage",
+            ],
+        },
+    },
+    PROCESS_REPAIR_PROCEDURE_ID: {
+        "procedure_id": PROCESS_REPAIR_PROCEDURE_ID,
+        "title": "Process Repair",
+        "summary": "Repair a degraded reusable internal process and record the evidence needed to trust it again.",
+        "repeatable": True,
+        "lifecycle_state": "draft",
+        "lineage_id": PROCESS_REPAIR_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
+        "target_lane": DEFAULT_PROCEDURE_LANE,
+        "task_type": "BUG_FIX",
+        "instructions": (
+            "Treat this as bounded repair work on reusable internal machinery. Inspect the degraded process, patch the owning artifact, "
+            "and leave evidence that later audit can use to re-green it."
+        ),
+        "checklist": [
+            {"id": "inspect_incident", "title": "Inspect the incident and degraded capability", "verification": "The repair understands what failed, when, and under what authority."},
+            {"id": "patch_owner", "title": "Patch the owning artifact", "verification": "The actual Procedure, tool, or runtime primitive is repaired directly."},
+            {"id": "leave_repair_evidence", "title": "Leave repair evidence", "verification": "The branch records enough evidence for later verification or audit to re-green the capability."},
+        ],
+        "success_criteria": {
+            "deliverables": [
+                "A direct repair to the owning artifact",
+                "Durable evidence supporting later re-greening",
+            ],
+        },
+    },
+    VERIFICATION_REVIEW_PROCEDURE_ID: {
+        "procedure_id": VERIFICATION_REVIEW_PROCEDURE_ID,
+        "title": "Verification Review",
+        "summary": "Diagnose verification machinery failures and restore the Verifier to a trustworthy state.",
+        "repeatable": True,
+        "lifecycle_state": "draft",
+        "lineage_id": VERIFICATION_REVIEW_PROCEDURE_ID,
+        "variant_of": PROCESS_REPAIR_PROCEDURE_ID,
+        "mutable": True,
+        "target_lane": DEFAULT_PROCEDURE_LANE,
+        "task_type": "BUG_FIX",
+        "instructions": (
+            "Treat repeated verification machinery failure as degraded reusable system capability. Repair the Verifier path, "
+            "separate mechanism failure from substantive uncertainty, and leave evidence for later audit."
+        ),
+        "checklist": [
+            {"id": "classify_failure", "title": "Classify the verifier failure mode", "verification": "The repair distinguishes parse/transport/mechanism failure from a genuine uncertain verdict."},
+            {"id": "repair_verifier", "title": "Repair the verifier path", "verification": "The broken verifier logic or dependency path is patched directly."},
+            {"id": "support_re_green", "title": "Support later re-greening", "verification": "The repair leaves explicit evidence supporting later verifier or audit confirmation."},
+        ],
+        "success_criteria": {
+            "deliverables": [
+                "A repaired verification path",
+                "Cleaner verifier incident evidence",
+            ],
+        },
+    },
     STARTUP_SMOKE_PROCEDURE_ID: {
         "procedure_id": STARTUP_SMOKE_PROCEDURE_ID,
         "title": "Startup Sanity Check",

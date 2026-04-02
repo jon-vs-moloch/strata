@@ -61,6 +61,7 @@ Does not own:
 Primary surfaces:
 
 - [/Users/jon/Projects/strata/strata/procedures/registry.py](/Users/jon/Projects/strata/strata/procedures/registry.py)
+- [/Users/jon/Projects/strata/strata/system_capabilities.py](/Users/jon/Projects/strata/strata/system_capabilities.py)
 - [/Users/jon/Projects/strata/docs/spec/task-attempt-ontology.md](/Users/jon/Projects/strata/docs/spec/task-attempt-ontology.md)
 
 Current status:
@@ -68,6 +69,7 @@ Current status:
 - real and active
 - still biased toward seeding top-level tasks plus checklist structure
 - now supports explicit draft Procedures for novel live work, plus promotion from `draft` to `tested` after a successful run
+- core system machinery now also has canonical Procedure identities such as `Audit Trace Review`, `Task Decomposition`, `Process Repair`, and `Verification Review`
 - not yet fully learning and rewriting itself from successful branches
 - still wants a dedicated operator-facing `Procedures` surface so durable workflows are visible, inspectable, and eventually steerable
 - still needs explicit cycle-detection and loop-governance for Procedure <-> tool relationships so circular recommended/mandatory flows remain visible and bounded rather than implicit
@@ -165,6 +167,7 @@ Current status:
 
 - tool health is real and already supports `healthy`, `degraded`, and `broken`
 - process degradation is now beginning to appear for verification machinery
+- degraded process and audit-style system jobs now bind back to canonical system Procedure identities instead of floating as anonymous runtime work
 - the architecture still needs unification so internal machinery is represented as normal `Procedure` or tool artifacts instead of ad hoc runtime branches
 - repeated failures should be treated as an obvious repair trigger across both tools and higher-level reusable processes
 - degradation should eventually become sticky and version-aware: a later audit should be able to inspect the incident-time state of a tool/process and explicitly decide whether to re-green it or blame the earlier review
@@ -197,6 +200,7 @@ Primary surfaces:
 Current status:
 
 - philosophically defined and partially embodied through trace review
+- canonical `Audit Trace Review` Procedure identity now exists and is attached to the main trace-review queueing paths
 - still missing a dedicated implementation spec that cleanly distinguishes `Audit` from `Verifier`
 - should ultimately be built from ordinary Strata primitives: a proper `Procedure`, explicit tools, explicit provenance, and explicit repair/re-green outputs rather than a forever-special hardcoded branch
 

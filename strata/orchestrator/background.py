@@ -35,6 +35,7 @@ from strata.experimental.verifier import (
     emit_verifier_attention_signal,
     verify_task_output,
 )
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 
 logger = logging.getLogger(__name__)
 LANE_NAMES = ("trainer", "agent")
@@ -617,7 +618,7 @@ async def queue_process_repair_task(
         type=TaskType.BUG_FIX,
         depth=task.depth + 1,
         priority=float(task.priority or 0.0),
-        constraints={
+        constraints=bind_system_procedure({
             "lane": lane,
             "target_scope": "tooling",
             "source_task_id": task.task_id,
@@ -646,6 +647,9 @@ async def queue_process_repair_task(
             "capability_incident_id": incident_id,
             "degraded_process_metadata": dict(metadata or {}),
         },
+        procedure_id=canonical_system_procedure_id(process_name=target),
+        capability_kind="process",
+        capability_name=target),
     )
     storage.commit()
     storage.tasks.add_dependency(task.task_id, repair_task.task_id)
