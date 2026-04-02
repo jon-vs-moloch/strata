@@ -3,7 +3,7 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock, Signal } from 'lucide-react';
+import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock, Signal, Split, Scale } from 'lucide-react';
 import SegmentedProgressRail from './SegmentedProgressRail';
 
 const MotionDiv = motion.div;
@@ -39,6 +39,8 @@ const OUTCOME_MAP = {
 
 const TYPE_MAP = {
   research: { color: '#00e5cc', label: 'RESEARCH', Icon: FlaskConical },
+  decomp: { color: '#ffb84d', label: 'DECOMP', Icon: Split },
+  judge: { color: '#7dd3fc', label: 'JUDGE', Icon: Scale },
 };
 
 const TERMINAL_STATUSES = new Set(['complete', 'abandoned', 'cancelled']);
@@ -164,12 +166,16 @@ function buildTaskContext(task) {
   const itemId = String(constraints.procedure_item_id || '').trim();
   const draftProcedure = String(constraints.draft_procedure_id || '').trim();
   const sourceHints = constraints.source_hints && typeof constraints.source_hints === 'object' ? constraints.source_hints : {};
+  const inlineProcessKind = String(constraints.inline_process_kind || '').trim();
+  const decompositionPhaseId = String(constraints.decomposition_phase_id || '').trim();
   const preferredPaths = Array.isArray(sourceHints.preferred_paths) ? sourceHints.preferred_paths.filter(Boolean) : [];
   const route = [];
 
   if (procedureId) route.push({ label: 'Procedure', value: procedureId, tone: 'procedure' });
   if (itemId) route.push({ label: 'Checklist', value: itemId, tone: 'neutral' });
   if (draftProcedure) route.push({ label: 'Draft', value: draftProcedure, tone: 'neutral' });
+  if (inlineProcessKind) route.push({ label: 'Process', value: inlineProcessKind.replace(/_/g, ' '), tone: 'neutral' });
+  if (decompositionPhaseId) route.push({ label: 'Phase', value: decompositionPhaseId.replace(/_/g, ' '), tone: 'warning' });
   if (originLane) route.push({ label: 'Origin Lane', value: originLane, tone: 'neutral' });
   if (sourceTaskId) route.push({ label: 'Parent', value: sourceTaskId, tone: 'neutral' });
   if (sourceTitle) route.push({ label: 'Source', value: sourceTitle, tone: 'neutral' });
@@ -177,6 +183,33 @@ function buildTaskContext(task) {
   if (pendingQuestion) route.push({ label: 'Needs You', value: 'operator input', tone: 'warning' });
 
   return { procedureId, sourceTaskId, route };
+}
+
+function isDecompositionPhaseTask(task) {
+  const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
+  return String(constraints.inline_process_kind || '').trim().toLowerCase() === 'decomposition_phase';
+}
+
+function decompositionPhaseSummary(task) {
+  const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
+  const summary = constraints.decomposition_summary && typeof constraints.decomposition_summary === 'object'
+    ? constraints.decomposition_summary
+    : {};
+  const phaseId = String(constraints.decomposition_phase_id || '').trim();
+  if (phaseId === 'emit_leaf_tasks') {
+    const kept = Number(summary.actionable_subtask_count || 0);
+    const rejected = Array.isArray(summary.rejected_subtasks) ? summary.rejected_subtasks.length : 0;
+    return `${kept} actionable leaves kept${rejected ? ` · ${rejected} rejected` : ''}`;
+  }
+  if (phaseId === 'preserve_workflow') {
+    const mode = String(summary.preservation_mode || '').trim().replace(/_/g, ' ');
+    return mode ? `Preservation mode: ${mode}` : 'Workflow preserved into canonical structure';
+  }
+  if (phaseId.startsWith('issue_') || phaseId.startsWith('guardrail')) {
+    const kind = String(summary.kind || summary.guardrail || '').trim().replace(/_/g, ' ');
+    return kind ? `Issue: ${kind}` : 'Decomposition issue recorded';
+  }
+  return '';
 }
 
 const ContextPill = ({ label, value, tone = 'neutral' }) => {
@@ -489,6 +522,8 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
   const progressMeta = useMemo(() => describeTaskProgress(task), [task]);
 
   const children = Array.isArray(task.children) ? task.children : [];
+  const processChildren = useMemo(() => children.filter((child) => isDecompositionPhaseTask(child)), [children]);
+  const workChildren = useMemo(() => children.filter((child) => !isDecompositionPhaseTask(child)), [children]);
   const attempts = useMemo(() => sortAttemptsChronologically(Array.isArray(task.attempts) ? task.attempts : []), [task.attempts]);
   const hasChildren = children.length > 0 || attempts.length > 0;
   const taskContext = buildTaskContext(task);
@@ -724,10 +759,41 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
                </div>
             )}
 
-            {children.length > 0 && (
+            {processChildren.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>SUBTASKS</div>
-                {children.map((child) => (
+                <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>DECOMPOSITION PROCESS</div>
+                {processChildren.map((child) => {
+                  const processSummary = decompositionPhaseSummary(child);
+                  const issueLike = String(child?.constraints?.decomposition_phase_id || '').startsWith('issue_') || String(child?.constraints?.decomposition_phase_id || '') === 'guardrail_depth';
+                  return (
+                    <TaskCard
+                      key={child.id}
+                      task={{
+                        ...child,
+                        description: processSummary
+                          ? `${child.description || ''}\n\n${processSummary}`
+                          : child.description,
+                        status: issueLike && child.status === 'complete' ? 'blocked' : child.status,
+                      }}
+                      onArchive={onArchive}
+                      isNested={true}
+                      nowMs={nowMs}
+                      laneDetail={laneDetail}
+                      detailLevel={detailLevel}
+                      onOpenProcedure={onOpenProcedure}
+                      onOpenTask={onOpenTask}
+                      onOpenWorkbench={onOpenWorkbench}
+                      activePathIds={activePathIds}
+                    />
+                  );
+                })}
+              </div>
+            )}
+
+            {workChildren.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>{processChildren.length > 0 ? 'RESULTING WORK' : 'SUBTASKS'}</div>
+                {workChildren.map((child) => (
                   <TaskCard
                     key={child.id}
                     task={child}

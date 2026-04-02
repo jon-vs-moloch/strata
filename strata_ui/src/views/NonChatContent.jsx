@@ -70,6 +70,37 @@ const stripInlineMarkdown = (content) => {
     .trim();
 };
 
+const isDecompositionPhaseNode = (task) => {
+  const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
+  return String(constraints.inline_process_kind || '').trim().toLowerCase() === 'decomposition_phase';
+};
+
+const summarizeDecompositionPhase = (task) => {
+  const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
+  const summary = constraints.decomposition_summary && typeof constraints.decomposition_summary === 'object'
+    ? constraints.decomposition_summary
+    : {};
+  const phaseId = String(constraints.decomposition_phase_id || '').trim();
+  if (phaseId === 'frame_task') {
+    return String(summary.problem_statement || task.description || '').trim();
+  }
+  if (phaseId === 'emit_leaf_tasks') {
+    const kept = Number(summary.actionable_subtask_count || 0);
+    const rejected = Array.isArray(summary.rejected_subtasks) ? summary.rejected_subtasks.length : 0;
+    return `${kept} actionable leaves retained${rejected ? ` · ${rejected} rejected` : ''}`;
+  }
+  if (phaseId === 'preserve_workflow') {
+    const mode = String(summary.preservation_mode || '').trim().replace(/_/g, ' ');
+    const spawned = Array.isArray(summary.spawned_recovery_subtasks) ? summary.spawned_recovery_subtasks.length : 0;
+    return [mode ? `Mode: ${mode}` : '', spawned ? `${spawned} recovery steps` : ''].filter(Boolean).join(' · ');
+  }
+  if (phaseId.startsWith('issue_') || phaseId.startsWith('guardrail')) {
+    const kind = String(summary.kind || summary.guardrail || '').trim().replace(/_/g, ' ');
+    return kind ? `Issue: ${kind}` : 'Decomposition issue';
+  }
+  return '';
+};
+
 const workbenchSimulationSessionId = (target) => {
   if (target?.procedureId) return `workbench:procedure:${target.procedureId}`;
   if (target?.taskId) return `workbench:task:${target.taskId}`;
@@ -1911,6 +1942,8 @@ const TaskTargetCard = ({
   const [isReplaying, setIsReplaying] = React.useState(false);
   if (!task) return null;
   const stateTone = (s) => taskStateTone(s);
+  const processChildren = Array.isArray(task.children) ? task.children.filter((child) => isDecompositionPhaseNode(child)) : [];
+  const workChildren = Array.isArray(task.children) ? task.children.filter((child) => !isDecompositionPhaseNode(child)) : [];
   const attemptArtifactsById = React.useMemo(() => {
     const grouped = {};
     (Array.isArray(task.observability) ? task.observability : []).forEach((artifact) => {
@@ -2078,7 +2111,8 @@ const TaskTargetCard = ({
           )}
           {task.execution_mode && <RoutePill label="EXECUTION" value={task.execution_mode} />}
           {task.depth > 0 && <RoutePill label="DEPTH" value={String(task.depth)} />}
-          {(task.active_child_ids?.length > 0 || task.children?.length > 0) && <RoutePill label="CHILDREN" value={String(task.active_child_ids?.length || task.children?.length)} tone="success" />}
+          {(task.active_child_ids?.length > 0 || workChildren.length > 0) && <RoutePill label="CHILDREN" value={String(task.active_child_ids?.length || workChildren.length)} tone="success" />}
+          {processChildren.length > 0 && <RoutePill label="PROCESS" value={`${processChildren.length} phases`} tone="warning" />}
         </div>
 
         {/* Task 1.6: Policy/Verification Card for JUDGE tasks */}
@@ -2097,15 +2131,57 @@ const TaskTargetCard = ({
         </div>
       </div>
 
+      {processChildren.length > 0 && (
+        <DashboardPanel title="DECOMPOSITION PROCESS">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {processChildren.map((child) => {
+              const phaseId = String(child?.constraints?.decomposition_phase_id || '').trim();
+              const phaseSummary = summarizeDecompositionPhase(child);
+              const tone = phaseId.startsWith('issue_') || phaseId.startsWith('guardrail') ? 'danger' : 'warning';
+              return (
+                <button
+                  key={child.task_id}
+                  onClick={() => onOpenTask && onOpenTask(child.task_id)}
+                  style={{
+                    background: 'rgba(255,255,255,0.02)',
+                    border: `1px solid ${tone === 'danger' ? 'rgba(248,113,113,0.24)' : 'rgba(255,184,77,0.18)'}`,
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    borderRadius: '12px',
+                    padding: '10px 14px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ fontSize: '13px', fontWeight: 700, color: '#edeeef' }}>{child.title || 'Untitled Decomposition Phase'}</div>
+                    <RoutePill label="PHASE" value={phaseId || 'decomposition'} tone={tone} />
+                  </div>
+                  {phaseSummary ? (
+                    <div style={{ fontSize: '12px', color: '#bfc2d0', lineHeight: 1.6 }}>{phaseSummary}</div>
+                  ) : null}
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '11px', color: '#555', fontFamily: "'JetBrains Mono', monospace" }}>#{child.task_id}</span>
+                    <span style={{ color: '#444', fontSize: '10px' }}>•</span>
+                    <span style={{ fontSize: '11px', color: '#666' }}>{formatAbsoluteWithRelative(child.updated_at || child.created_at)}</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </DashboardPanel>
+      )}
+
       {/* Task 2.5: Child Work Drilldown */}
-      {task.children?.length > 0 && (
+      {workChildren.length > 0 && (
         <DashboardPanel title="CHILD WORK">
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div style={{ display: 'flex', gap: '12px', marginBottom: '4px' }}>
                <RoutePill label="MODE" value={task.execution_mode || 'SERIAL'} />
                {task.procedure_id && <RoutePill label="PROCEDURE" value={task.procedure_id} tone="success" />}
             </div>
-            {task.children.map(child => (
+            {workChildren.map(child => (
               <button
                 key={child.task_id}
                 onClick={() => onOpenTask && onOpenTask(child.task_id)}
