@@ -43,6 +43,8 @@ Owns:
 - checklist structure
 - lifecycle state such as `draft`, `tested`, `vetted`, or `retired`
 - lineage and variant identity for workflow evolution
+- tool-selection guidance, including one-or-more tools a Procedure expects or permits
+- optional tool-binding rules such as "recommended Procedure for this tool" or "mandatory Procedure for this tool"
 - startup/onboarding seeding
 - eventual promotion target for successful repeated decompositions
 
@@ -63,6 +65,7 @@ Current status:
 - now supports explicit draft Procedures for novel live work, plus promotion from `draft` to `tested` after a successful run
 - not yet fully learning and rewriting itself from successful branches
 - still wants a dedicated operator-facing `Procedures` surface so durable workflows are visible, inspectable, and eventually steerable
+- still needs explicit cycle-detection and loop-governance for Procedure <-> tool relationships so circular recommended/mandatory flows remain visible and bounded rather than implicit
 
 ### `Kit`
 
@@ -160,6 +163,7 @@ Current status:
 - the architecture still needs unification so internal machinery is represented as normal `Procedure` or tool artifacts instead of ad hoc runtime branches
 - repeated failures should be treated as an obvious repair trigger across both tools and higher-level reusable processes
 - degradation should eventually become sticky and version-aware: a later audit should be able to inspect the incident-time state of a tool/process and explicitly decide whether to re-green it or blame the earlier review
+- this substrate should converge toward normal first-class artifacts with operator-visible controls, not hidden flags buried inside runtime logic
 
 ### `Audit`
 
@@ -189,6 +193,7 @@ Current status:
 
 - philosophically defined and partially embodied through trace review
 - still missing a dedicated implementation spec that cleanly distinguishes `Audit` from `Verifier`
+- should ultimately be built from ordinary Strata primitives: a proper `Procedure`, explicit tools, explicit provenance, and explicit repair/re-green outputs rather than a forever-special hardcoded branch
 
 ### Trace Review
 
@@ -214,6 +219,67 @@ Current status:
 - real and active
 - increasingly central to supervision and recovery
 - should likely become the main implementation surface for much of `Audit`
+- should eventually either become the first concrete `Audit` Procedure implementation or sit beneath one as a clearly-scoped tool/capability rather than remaining ambiguous proto-machinery
+
+### Communication Lanes
+
+Purpose:
+
+- let Strata operate across multiple incoming and outgoing communication channels while preserving one coherent system model
+- keep routing, provenance, safety, and operator control consistent whether the surface is chat, email, Slack, Discord, voice, or another lane
+
+Owns:
+
+- lane identity and routing metadata
+- ingress/egress safety posture
+- provenance and authority on communications
+- future anti-injection and sandboxing posture for untrusted inbound content
+
+Does not own:
+
+- the product logic of every individual client integration
+- UI-specific rendering details for each shell
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/docs/spec/communication-model.md](/Users/jon/Projects/strata/docs/spec/communication-model.md)
+- [/Users/jon/Projects/strata/docs/spec/product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md)
+
+Current status:
+
+- partially real for chat
+- voice is on the roadmap
+- email/Slack/Discord and similar lanes are still roadmap-level work
+- should become a first-class safety surface because incoming content cannot be trusted blindly
+
+### Operator Work Surfaces
+
+Purpose:
+
+- expose meaningful system capabilities to the operator by default
+- keep all of Strata's machinery inspectable and steerable without requiring that manual involvement for ordinary use
+
+Owns:
+
+- visibility of tasks, Procedures, tools, Knowledge, History, Workbench, and similar control surfaces
+- bounded operator actions over those artifacts
+- the principle that capability generally implies UI access unless deliberately withheld
+
+Does not own:
+
+- autonomy policy itself
+- backend execution of the capabilities it exposes
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/docs/spec/product-roadmap.md](/Users/jon/Projects/strata/docs/spec/product-roadmap.md)
+- [/Users/jon/Projects/strata/.knowledge/specs/project_spec.md](/Users/jon/Projects/strata/.knowledge/specs/project_spec.md)
+
+Current status:
+
+- partially real
+- still too viewer-heavy and too sparse for the full machine
+- should keep evolving toward "the user can operate every subsystem from the UI, but never has to"
 
 ### Attempt / Task Execution
 

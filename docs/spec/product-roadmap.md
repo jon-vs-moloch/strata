@@ -12,6 +12,8 @@ It is intentionally practical rather than aspirational. The goal is to preserve 
 - Keep the bundled frontend shell minimal and trustworthy; prefer validated runtime modules/plugins for fast-changing product surfaces.
 - Prefer operational ownership of local inference over low-level inference implementation.
 - Do not let packaging convenience erase the weak/strong bootstrap architecture.
+- Treat UI exposure as the default for real capabilities: if Strata can do something meaningful, the operator should generally be able to inspect and operate it from the product unless that surface is deliberately withheld.
+- Keep the operator in charge without requiring operator labor: Strata should work out of the box on day 1, but should still feel like a machine the user can open up and drive manually when they want.
 
 ## Workstreams
 
@@ -124,6 +126,7 @@ Near-term implementation standard:
 - the right-rail task pane should stay an at-a-glance surface; a dedicated full `Tasks` view should eventually own deep task inspection, failure forensics, attempt history, and archive navigation
 - operator-facing work surfaces should show all active work, including verification, audits, reviews, and other child work; there should be no invisible work
 - non-blocking operator observations and UX pain points should feed durable alignment/backlog surfaces so the system can consume them as real work instead of leaving them stranded in thread history
+- if a subsystem or artifact is real, plan for the UI surface to exist too; the product should not accumulate hidden backend-only machinery by accident
 
 ## Cross-Cutting Operator Work Surfaces
 
@@ -145,6 +148,9 @@ Near-term product backlog:
 - add a first-class `Tools` view
 - add a first-class `Procedures` view so durable workflows are visible, inspectable, and eventually editable/promotable
 - add a first-class `Kits` surface for bundled artifact groups such as tool packs, procedure bundles, eval suites, or higher-level capability bundles
+- add first-class comms-lane surfaces for email, Slack, Discord, and similar integrations once the underlying routing/safety substrate is ready
+- add first-class schedule/calendar surfaces so Strata can represent both the operator's schedule and its own queued commitments before deeper external calendar integration exists
+- add first-class utility/app surfaces for day-1 tools such as calculator, image generation, website publishing, and similar "it should just work" capability bundles
 - treat all of these work surfaces as interactive operator tooling rather than passive dashboards; `History`, `Tasks`, `Procedures`, `Tools`, and `Knowledge` should all be able to grow bounded edit/control actions over time
 - extend that same interactive rule to the `Workbench`: it should not only replay or inspect flows, but also let the operator substitute tools, models, context, and branching decisions, then observe how downstream execution changes
 - replace raw structured metadata blobs with purpose-built displays wherever the structure is known
@@ -173,6 +179,8 @@ Near-term product backlog:
 - let latency policy apply outside chat too, so internal routing, verification, review, and other system flows can choose `instant` vs thinking behavior deliberately rather than implicitly
 - add first-class voice I/O so the same communication layer can accept microphone input, route speech-to-text into sessions, and optionally deliver spoken output without inventing a second interaction model
 - treat voice as an operator/debugging surface too: support push-to-talk, transcript provenance, and eventually ambient-audio-aware comfort loops where fan noise or room noise can inform local throttle posture when the user has explicitly enabled that sensing
+- diagnose and improve "chatty presence": Strata should proactively emit user-facing progress and state messages often enough that long-running work feels alive rather than mute
+- do not surface an `instant` option in the UI unless the underlying runtime can reliably produce near-instant behavior; fake low-latency promises are worse than honest slower behavior
 
 ## Cross-Cutting Observability and Self-Evaluation Follow-Up
 
@@ -203,6 +211,10 @@ Follow-up work remains and should stay on the roadmap:
 - add a signed desktop `alpha` updater/distribution channel so packaged desktop installs stay in lockstep with rapid internal iteration without manual rebuild/reinstall churn
 - harden the desktop launcher path so detached startup is as reliable and observable as foreground startup, with clear logs and safe recovery when the backend fails to stay bound to its port
 - if SQLite continues to interfere with core task/attempt control flow after hot-path write-shape hardening, graduate runtime state to Postgres rather than continuing to accumulate lock workarounds
+- reduce supply-chain dependency risk over time by replacing casual third-party dependencies with self-hosted, inspectable, reproducible implementations where practical
+- harden inbound communication safety: sandbox and inspect incoming communications/attachments, and probe for prompt injection or similar hostile control attempts before granting them trusted status
+- support website publishing as a default showcase capability; "Strata made my website" should be a normal out-of-the-box product story
+- add a low-motion visual polish pass for the shell, including the option for an almost-static geological/strata background treatment that reads as wallpaper first and animation second
 
 ### Phase 2. Managed Engine Supervision
 

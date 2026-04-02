@@ -13,6 +13,8 @@ Current durable guidance:
 - preserve provenance for spec changes, knowledge synthesis, promotions, and runtime actions so decisions stay explainable
 - provenance should be robust enough to answer, for every consequential system action, what happened, why it happened, under what authority it happened, and which user statement or spec clause authorized it
 - durable changes should be reviewable and attributable, especially spec updates and promoted improvements
+- Strata is a manual, not an automatic: the operator should be able to steer, inspect, and tinker with every meaningful part of the machine by default, even when the machine can also drive itself
+- the operator should never be required to do that routine steering; autonomy exists to reduce necessary manual work, not to hide control surfaces
 - in normal bootstrap operation, the agent tier should continue behaving like the real system under test, including authoring bounded mutations; the trainer tier should supervise, diagnose, and steer that behavior rather than replacing it
 - the agent tier should remain available for normal operations and bounded autonomous work while the trainer tier supervises and troubleshoots harness performance
 - trainer and agent execution must not starve each other; they should run on separate worker lanes and, where possible, separate inference pools so one stalled tier cannot block the other
@@ -34,6 +36,7 @@ Current durable guidance:
 - `Verifier` should be callable at any step on any artifact, including task drafts, chat turns, tool outputs, verifier outputs, and audit outputs; lowercase `verification` remains the generic activity, while `Verifier` names the system capability
 - let surprise itself be audited; if the system is surprised, that surprise should remain reviewable evidence rather than a terminal judgment, because even the act of noticing something can be miscalibrated
 - prefer extending or unifying existing systems over creating parallel ones; introduce a new subsystem only when it is a reusable primitive that can serve multiple parts of Strata rather than a one-off special case
+- if the system has a meaningful capability, it should be available in the UI unless it is deliberately excluded by policy, profile, or unfinished safety gating; hidden capability should be the exception, not the default
 - when verifier findings repeatedly say an output is flawed or uncertain, supervision should escalate into a corrective intervention quickly; do not allow the system to normalize repeated verifier warnings into passive retry loops
 - if a reviewer or verifier cannot produce perfect structured output, preserve the strongest grounded fallback judgment available instead of discarding the review entirely
 - default runtime history should be append-only in meaning: edits, redactions, compactions, opens, closes, and other lifecycle actions should themselves emit provenance-bearing events rather than silently rewriting history
@@ -47,3 +50,5 @@ Current durable guidance:
 - long-running work must remain interpretable; deterministic and non-deterministic processes alike should publish progress signals so the system never appears idle while useful work is actually advancing
 - operator comfort is a real optimization target, not an afterthought; local inference and background activity should prefer miss-safe behavior that stays below the operator's annoyance threshold unless the operator has explicitly opted into more aggressive hardware use
 - durable preferences should include not only explicit user facts, but also the classes of constraints the system ought to remember and optimize for, such as noise tolerance, memory pressure tolerance, thermal comfort, and similar operating-envelope limits
+- default security posture should move toward minimal external dependency trust: prefer code the system can inspect, understand, reproduce, and sandbox over opaque third-party dependency intake
+- incoming communications, attachments, and tool-originated content should be treated as potentially adversarial input and should eventually be sandboxed, inspected, and probed for prompt-injection or similar control-surface attacks before being trusted
