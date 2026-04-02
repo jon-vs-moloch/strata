@@ -1,4 +1,4 @@
-import React, { memo, useMemo, useState } from 'react';
+import React, { memo, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -510,8 +510,15 @@ const StructuredArtifactPanel = ({ artifactDisplay }) => {
 
 const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench, activePathIds = new Set() }) => {
   const isOnActivePath = activePathIds?.has?.(String(task.id)) || false;
-  const defaultExpanded = useMemo(() => isOnActivePath || !TERMINAL_STATUSES.has(task.status), [task.status, isOnActivePath]);
+  const defaultExpanded = useMemo(() => {
+    if (isOnActivePath) return true;
+    if (!TERMINAL_STATUSES.has(task.status)) return true;
+    return !isNested && detailLevel === 'full';
+  }, [detailLevel, isNested, task.status, isOnActivePath]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  useEffect(() => {
+    setIsExpanded(defaultExpanded);
+  }, [defaultExpanded]);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const style = STATUS_MAP[task.status] ?? DEFAULT_STATUS;
   const typeInfo = task.type ? TYPE_MAP[task.type] : null;
@@ -526,6 +533,10 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
   const workChildren = useMemo(() => children.filter((child) => !isDecompositionPhaseTask(child)), [children]);
   const attempts = useMemo(() => sortAttemptsChronologically(Array.isArray(task.attempts) ? task.attempts : []), [task.attempts]);
   const hasChildren = children.length > 0 || attempts.length > 0;
+  const visibleAttemptWindow = attempts.length > 3 ? 3 : attempts.length;
+  const olderAttempts = visibleAttemptWindow > 0 ? attempts.slice(0, Math.max(0, attempts.length - visibleAttemptWindow)) : [];
+  const recentAttempts = visibleAttemptWindow > 0 ? attempts.slice(-visibleAttemptWindow) : attempts;
+  const [showOlderAttempts, setShowOlderAttempts] = useState(false);
   const taskContext = buildTaskContext(task);
   const compactRoute = taskContext.route.slice(0, isExpanded ? taskContext.route.length : 3);
 
@@ -606,7 +617,7 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
               ))}
             </div>
           )}
-          {(isExpanded || !isNested) && task.description && (
+          {(isExpanded || (!isNested && !TERMINAL_STATUSES.has(task.status))) && task.description && (
             <div>
               <div
                 className="markdown-body"
@@ -741,17 +752,61 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
             {attempts.length > 0 && (
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>ATTEMPTS</div>
-                {attempts.map((attempt, idx) => (
+                {olderAttempts.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginLeft: '12px' }}>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setShowOlderAttempts((value) => !value);
+                      }}
+                      style={{
+                        alignSelf: 'flex-start',
+                        background: 'rgba(255,255,255,0.03)',
+                        border: '1px solid rgba(255,255,255,0.06)',
+                        borderRadius: '999px',
+                        color: '#9ca1b4',
+                        fontSize: '10px',
+                        fontWeight: 800,
+                        letterSpacing: '0.06em',
+                        padding: '6px 10px',
+                        cursor: 'pointer',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      {showOlderAttempts ? 'Hide' : 'Show'} Previous Attempts ({olderAttempts.length})
+                    </button>
+                    {showOlderAttempts && olderAttempts.map((attempt, idx) => (
+                      <AttemptRow
+                        key={`${attempt.id || attempt.attempt_id || idx}:${attempt.outcome || 'open'}:${attempt.ended_at || ''}`}
+                        attempt={attempt}
+                        taskId={task.id}
+                        index={idx + 1}
+                        totalAttempts={attempts.length}
+                        taskUpdatedAt={task.updated_at}
+                        defaultExpanded={false}
+                        nowMs={nowMs}
+                        hasNewerAttempt={true}
+                        laneDetail={laneDetail}
+                        detailLevel={detailLevel}
+                      />
+                    ))}
+                  </div>
+                )}
+                {recentAttempts.map((attempt, idx) => (
                   <AttemptRow
-                    key={attempt.id || attempt.attempt_id || idx}
+                    key={`${attempt.id || attempt.attempt_id || idx}:${attempt.outcome || 'open'}:${attempt.ended_at || ''}`}
                     attempt={attempt}
                     taskId={task.id}
-                    index={idx + 1}
+                    index={olderAttempts.length + idx + 1}
                     totalAttempts={attempts.length}
                     taskUpdatedAt={task.updated_at}
-                    defaultExpanded={idx === attempts.length - 1 || (!attempt.outcome && idx >= attempts.length - 2)}
+                    defaultExpanded={
+                      idx === recentAttempts.length - 1
+                      || (!attempt.outcome && idx >= Math.max(0, recentAttempts.length - 2))
+                    }
                     nowMs={nowMs}
-                    hasNewerAttempt={idx < attempts.length - 1}
+                    hasNewerAttempt={olderAttempts.length + idx < attempts.length - 1}
                     laneDetail={laneDetail}
                     detailLevel={detailLevel}
                   />
@@ -836,7 +891,7 @@ const AttemptRow = ({ attempt, taskId, index, totalAttempts, taskUpdatedAt, defa
     && laneDetail
     && String(laneDetail.current_task_id || '') === String(taskId || '')
     && String(laneDetail.active_attempt_id || '') === String(attempt.id || '');
-  const displayAttemptNumber = Math.max(1, (Number(totalAttempts) || 0) - index + 1);
+  const displayAttemptNumber = Math.max(1, Number(index) || 1);
   const artifacts = attempt.artifacts && typeof attempt.artifacts === 'object' ? attempt.artifacts : null;
   const artifactDisplay = artifacts ? { ...artifacts } : null;
   const persistedSteps = Array.isArray(artifacts?.step_history) ? artifacts.step_history : [];
