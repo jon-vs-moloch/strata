@@ -164,6 +164,10 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
     def _is_local_transport(self) -> bool:
         return self.__class__.__name__ == "LocalProvider"
 
+    def _request_origin(self, kwargs: Optional[Dict[str, Any]] = None) -> str:
+        origin = str((kwargs or {}).get("request_origin") or "background").strip().lower()
+        return origin if origin in {"foreground", "background"} else "background"
+
     def _adaptive_min_interval_ms(self, telemetry: ProviderTelemetryState) -> float:
         if not self._is_local_transport():
             return 0.0
@@ -181,7 +185,9 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             adaptive_ms = max(adaptive_ms, min(20000.0, 1500.0 + (avg_latency_ms * 0.2)))
         return adaptive_ms
 
-    def _comfort_multiplier(self) -> float:
+    def _comfort_multiplier(self, *, request_origin: str = "background") -> float:
+        if request_origin == "foreground":
+            return 1.0
         policy = self.get_runtime_policy()
         comfort = dict(policy.get("operator_comfort") or {})
         profile = str(comfort.get("profile") or "quiet").strip().lower()
@@ -280,15 +286,22 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             return 0.9
         return 0.95
 
-    def _effective_min_interval_ms(self, telemetry: Optional[ProviderTelemetryState] = None) -> float:
+    def _effective_min_interval_ms(
+        self,
+        telemetry: Optional[ProviderTelemetryState] = None,
+        *,
+        request_origin: str = "background",
+    ) -> float:
         min_interval = float(self.min_interval_ms or 0)
         if self.requests_per_minute and self.requests_per_minute > 0:
             rpm_interval = 60000.0 / float(self.requests_per_minute)
             min_interval = max(min_interval, rpm_interval)
         if telemetry is not None:
             if self._is_local_transport():
+                if request_origin == "foreground":
+                    return min_interval
                 min_interval = max(min_interval, self._adaptive_min_interval_ms(telemetry))
-                min_interval = min_interval * self._comfort_multiplier() * self._local_greedy_probe_multiplier(telemetry)
+                min_interval = min_interval * self._comfort_multiplier(request_origin=request_origin) * self._local_greedy_probe_multiplier(telemetry)
             else:
                 min_interval = max(min_interval, float(telemetry.learned_cloud_min_interval_ms or 0.0))
                 min_interval = min_interval * self._cloud_greedy_probe_multiplier(telemetry)
@@ -330,14 +343,20 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         telemetry.learned_cloud_min_interval_ms = reduced_probe
         telemetry.cloud_next_probe_at = now + 120.0
 
-    async def _wait_for_turn(self, state: ThrottleState, telemetry: ProviderTelemetryState):
+    async def _wait_for_turn(
+        self,
+        state: ThrottleState,
+        telemetry: ProviderTelemetryState,
+        *,
+        request_origin: str = "background",
+    ):
         delay_s = 0.0
         async with state.lock:
             now = asyncio.get_running_loop().time()
             if state.next_allowed_at > now:
                 delay_s = state.next_allowed_at - now
             reservation_start = max(now, state.next_allowed_at)
-            state.next_allowed_at = reservation_start + (self._effective_min_interval_ms(telemetry) / 1000.0)
+            state.next_allowed_at = reservation_start + (self._effective_min_interval_ms(telemetry, request_origin=request_origin) / 1000.0)
         if delay_s > 0:
             telemetry.throttled_count += 1
             telemetry.total_wait_s += delay_s
@@ -394,6 +413,14 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             "stream": False,
             "temperature": kwargs.get("temperature", 0.7)
         }
+        if "top_p" in kwargs:
+            payload["top_p"] = kwargs["top_p"]
+        if "max_tokens" in kwargs:
+            payload["max_tokens"] = kwargs["max_tokens"]
+        if "reasoning_effort" in kwargs:
+            payload["reasoning_effort"] = kwargs["reasoning_effort"]
+        if "reasoning" in kwargs:
+            payload["reasoning"] = kwargs["reasoning"]
         if "tools" in kwargs:
             payload["tools"] = kwargs["tools"]
         if "response_format" in kwargs:
@@ -405,10 +432,11 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         async with state.semaphore:
             for retry in range(max_retries):
                 try:
+                    request_origin = self._request_origin(kwargs)
                     telemetry.request_count += 1
                     telemetry.last_request_at = datetime.utcnow().isoformat()
                     started_at = asyncio.get_running_loop().time()
-                    await self._wait_for_turn(state, telemetry)
+                    await self._wait_for_turn(state, telemetry, request_origin=request_origin)
                     async with httpx.AsyncClient() as client:
                         response = await client.post(self.endpoint_url, json=payload, headers=headers, timeout=timeout)
                         response.raise_for_status()

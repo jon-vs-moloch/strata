@@ -501,9 +501,15 @@ Available Tools:
             active_tools = []
         max_iters = self.deps["global_settings"].get("max_sync_tool_iterations", 3)
         iteration = 0
+        reasoning_effort = "low" if response_mode == "instant" else "medium"
 
         while iteration < max_iters:
-            model_response = await active_adapter.chat(messages, tools=active_tools)
+            model_response = await active_adapter.chat(
+                messages,
+                tools=active_tools,
+                request_origin="foreground",
+                reasoning_effort=reasoning_effort,
+            )
             if model_response.get("status") == "error":
                 error_message = str(model_response.get("message") or model_response.get("content") or "").strip()
                 if active_tools and "Function calling is not enabled" in error_message:
@@ -630,7 +636,11 @@ Available Tools:
                 "content": "You have reached the tool call limit. You MUST synthesize the data gathered so far and reply to the user immediately. Do not attempt further tool calls.",
             }
         )
-        final_response = await active_adapter.chat(messages)
+        final_response = await active_adapter.chat(
+            messages,
+            request_origin="foreground",
+            reasoning_effort=reasoning_effort,
+        )
         reply = final_response.get("content", "I hit the maximum iteration limit for synchronous tool usage without reaching a conclusion.")
         if not reply or not reply.strip():
             reply = "I couldn't synthesize the final results."
