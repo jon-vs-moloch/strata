@@ -19,17 +19,22 @@ import httpx
 from strata.core.lanes import infer_lane_from_task, normalize_lane
 from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.feedback.signals import register_feedback_signal
-from strata.storage.models import TaskModel, TaskState, AttemptOutcome
+from strata.storage.models import TaskModel, TaskState, AttemptOutcome, TaskType
 from strata.orchestrator.worker.queue_recovery import recover_tasks
 from strata.orchestrator.worker.idle_policy import run_idle_tasks
 from strata.orchestrator.worker.telemetry import synthesize_model_performance
 from strata.orchestrator.worker.attempt_runner import run_attempt
 from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
+from strata.orchestrator.capability_incidents import record_capability_incident
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.orchestrator.worker.routing_policy import select_model_tier
 from strata.eval.job_runner import run_eval_job_task
-from strata.experimental.verifier import emit_verifier_attention_signal, verify_task_output
+from strata.experimental.verifier import (
+    count_recent_verifier_mechanism_failures,
+    emit_verifier_attention_signal,
+    verify_task_output,
+)
 
 logger = logging.getLogger(__name__)
 LANE_NAMES = ("trainer", "agent")
@@ -369,6 +374,19 @@ async def queue_task_attention_review(storage, *, task, signal: dict) -> Optiona
             "spec_scope": "project",
             "attention_signal_id": signal.get("signal_id"),
             "prioritization": prioritization,
+            "source_task_id": task.task_id,
+            "provenance": {
+                "source_kind": "feedback_signal",
+                "source_actor": str((signal or {}).get("source_actor") or "system"),
+                "authority_kind": "spec_policy",
+                "authority_ref": "feedback-prioritization",
+                "derived_from": [f"signal:{signal.get('signal_id')}"] if signal.get("signal_id") else [f"task:{task.task_id}"],
+                "governing_spec_refs": [
+                    ".knowledge/specs/constitution.md",
+                    ".knowledge/specs/project_spec.md",
+                    "docs/spec/step-runtime-flow.md",
+                ],
+            },
         },
         session_id=session_id,
         dedupe_signature={
@@ -377,6 +395,263 @@ async def queue_task_attention_review(storage, *, task, signal: dict) -> Optiona
             "task_id": task.task_id,
         },
     )
+
+
+def _provenance_record(
+    *,
+    source_kind: str,
+    source_actor: str,
+    authority_kind: str,
+    authority_ref: str,
+    derived_from: list[str] | None = None,
+    governing_spec_refs: list[str] | None = None,
+    note: str = "",
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "source_kind": str(source_kind or "").strip(),
+        "source_actor": str(source_actor or "").strip() or "system",
+        "authority_kind": str(authority_kind or "").strip() or "spec_policy",
+        "authority_ref": str(authority_ref or "").strip() or "unknown",
+        "derived_from": list(derived_from or []),
+        "governing_spec_refs": list(
+            governing_spec_refs
+            or [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/step-runtime-flow.md",
+            ]
+        ),
+    }
+    if str(note or "").strip():
+        payload["note"] = str(note).strip()
+    return payload
+
+
+def _should_queue_direct_audit(verification: Dict[str, object]) -> bool:
+    verdict = str(verification.get("verdict") or "").strip().lower()
+    recommended_action = str(verification.get("recommended_action") or "").strip().lower()
+    mechanism_failure_kind = str(verification.get("mechanism_failure_kind") or "").strip().lower()
+    confidence = float(verification.get("confidence") or 0.0)
+    if recommended_action == "audit":
+        return True
+    if verdict == "flawed" and confidence >= 0.8:
+        return True
+    if recommended_action == "escalate" and confidence >= 0.7:
+        return True
+    if mechanism_failure_kind:
+        return True
+    return False
+
+
+async def queue_direct_audit_review(storage, *, task: TaskModel, verification: Dict[str, object]) -> Optional[dict]:
+    try:
+        from strata.api.main import _queue_eval_system_job
+    except Exception as exc:
+        logger.warning("Unable to import system-job queue helper for direct audit review: %s", exc)
+        return None
+
+    verdict = str(verification.get("verdict") or "uncertain").strip().lower() or "uncertain"
+    mechanism_failure_kind = str(verification.get("mechanism_failure_kind") or "").strip().lower()
+    reason_bits = [
+        f"verdict={verdict}",
+        f"recommended_action={str(verification.get('recommended_action') or '').strip().lower() or 'verify_more'}",
+    ]
+    if mechanism_failure_kind:
+        reason_bits.append(f"mechanism_failure_kind={mechanism_failure_kind}")
+    session_id = str(task.session_id or "").strip() or None
+    incident_id = str(verification.get("incident_id") or "").strip()
+    derived_from = [
+        f"task:{task.task_id}",
+        *([f"attempt:{verification.get('attempt_id')}"] if verification.get("attempt_id") else []),
+        *([f"incident:{incident_id}"] if incident_id else []),
+    ]
+    return await _queue_eval_system_job(
+        storage,
+        kind="trace_review",
+        title=f"Audit Now: {str(task.title or task.task_id)[:84]}",
+        description="Queued direct audit after a severe verifier outcome.",
+        payload={
+            "trace_kind": "task_trace",
+            "task_id": task.task_id,
+            "reviewer_tier": "trainer",
+            "emit_followups": True,
+            "persist_to_task": True,
+            "spec_scope": "project",
+            "audit_mode": "internal",
+            "source_task_id": task.task_id,
+            "trigger": "verifier_direct_audit",
+            "verification_snapshot": {
+                "attempt_id": verification.get("attempt_id"),
+                "verdict": verification.get("verdict"),
+                "confidence": verification.get("confidence"),
+                "recommended_action": verification.get("recommended_action"),
+                "failure_modes": list(verification.get("failure_modes") or []),
+                "mechanism_failure_kind": mechanism_failure_kind,
+                "incident_id": incident_id,
+            },
+            "provenance": _provenance_record(
+                source_kind="verifier_review",
+                source_actor="lightweight_verifier",
+                authority_kind="spec_policy",
+                authority_ref="verifier_direct_audit",
+                derived_from=derived_from,
+                note=" ".join(reason_bits),
+            ),
+        },
+        session_id=session_id,
+        dedupe_signature={
+            "trace_kind": "task_trace",
+            "reviewer_tier": "trainer",
+            "task_id": task.task_id,
+            "trigger": "verifier_direct_audit",
+            "incident_id": incident_id or None,
+        },
+    )
+
+
+def _attach_task_incident(task: TaskModel, incident: Dict[str, object]) -> None:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    rows = list(constraints.get("capability_incidents") or [])
+    summary = {
+        "incident_id": incident.get("incident_id"),
+        "capability_ref": incident.get("capability_ref"),
+        "status": incident.get("status"),
+        "reason": incident.get("reason"),
+        "opened_at": incident.get("opened_at"),
+        "last_seen_at": incident.get("last_seen_at"),
+        "occurrence_count": incident.get("occurrence_count", 1),
+    }
+    rows = [
+        item
+        for item in rows
+        if not isinstance(item, dict) or str(item.get("incident_id") or "").strip() != str(summary["incident_id"] or "").strip()
+    ]
+    rows.append(summary)
+    constraints["capability_incidents"] = rows[-8:]
+    task.constraints = constraints
+
+
+def _mark_degraded_process(
+    storage,
+    task: TaskModel,
+    *,
+    process_name: str,
+    reason: str,
+    metadata: Optional[Dict[str, object]] = None,
+    attempt_id: Optional[str] = None,
+    signal_id: Optional[str] = None,
+    provenance: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    incident = record_capability_incident(
+        storage,
+        capability_kind="process",
+        capability_name=process_name,
+        status="degraded",
+        reason=reason,
+        task_id=task.task_id,
+        attempt_id=attempt_id,
+        session_id=str(task.session_id or "").strip() or None,
+        signal_id=signal_id,
+        provenance=dict(provenance or {}),
+        snapshot={
+            "task_title": str(task.title or "").strip(),
+            "lane": normalize_lane(infer_lane_from_task(task)) or "agent",
+            "state": getattr(getattr(task, "state", None), "value", getattr(task, "state", None)),
+        },
+        metadata=dict(metadata or {}),
+    )
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    degraded = list(constraints.get("degraded_processes") or [])
+    entry = {
+        "incident_id": incident.get("incident_id"),
+        "process": str(process_name or "").strip(),
+        "status": "degraded",
+        "reason": str(reason or "").strip(),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if metadata:
+        entry["metadata"] = dict(metadata)
+    degraded = [item for item in degraded if not isinstance(item, dict) or str(item.get("process") or "").strip() != entry["process"]]
+    degraded.append(entry)
+    constraints["degraded_processes"] = degraded[-8:]
+    task.constraints = constraints
+    _attach_task_incident(task, incident)
+    return incident
+
+
+async def queue_process_repair_task(
+    storage,
+    *,
+    task: TaskModel,
+    process_name: str,
+    reason: str,
+    enqueue_fn,
+    metadata: Optional[Dict[str, object]] = None,
+    incident_id: Optional[str] = None,
+) -> Optional[TaskModel]:
+    target = str(process_name or "").strip()
+    if not target:
+        return None
+
+    for existing in storage.session.query(TaskModel).all():
+        constraints = dict(getattr(existing, "constraints", {}) or {})
+        if str(constraints.get("target_scope") or "").strip().lower() != "tooling":
+            continue
+        if str(constraints.get("tool_modification_target") or "").strip() != target:
+            continue
+        if getattr(existing, "state", None) in {TaskState.COMPLETE, TaskState.CANCELLED, TaskState.ABANDONED}:
+            continue
+        return existing
+
+    lane = infer_lane_from_task(task)
+    repair_task = storage.tasks.create(
+        title=f"Process Repair: {target}",
+        description=(
+            "A reusable system process is degrading repeatedly and needs bounded repair. "
+            f"Target: {target}. Reason: {reason}. "
+            "Fix the degraded mechanism before trusting its outputs again."
+        ),
+        session_id=task.session_id,
+        state=TaskState.PENDING,
+        type=TaskType.BUG_FIX,
+        depth=task.depth + 1,
+        priority=float(task.priority or 0.0),
+        constraints={
+            "lane": lane,
+            "target_scope": "tooling",
+            "source_task_id": task.task_id,
+            "provenance": _provenance_record(
+                source_kind="degraded_process",
+                source_actor="background_worker",
+                authority_kind="spec_policy",
+                authority_ref="process_repair_queue",
+                derived_from=[
+                    f"task:{task.task_id}",
+                    f"process:{target}",
+                    *([f"incident:{incident_id}"] if incident_id else []),
+                ],
+                note=reason,
+            ),
+            "tool_modification_target": target,
+            "tool_improvement_reason": "tool_broken",
+            "tool_improvement_reasoning": reason,
+            "tooling_repair_mode": "direct_or_meta_tool",
+            "target_files": [
+                "strata/experimental/verifier.py",
+                "strata/orchestrator/background.py",
+                "strata/experimental/trace_review.py",
+            ],
+            "degraded_process": target,
+            "capability_incident_id": incident_id,
+            "degraded_process_metadata": dict(metadata or {}),
+        },
+    )
+    storage.commit()
+    storage.tasks.add_dependency(task.task_id, repair_task.task_id)
+    storage.commit()
+    await enqueue_fn(repair_task.task_id)
+    return repair_task
 
 
 async def ensure_continuous_supervision_job(
@@ -1357,14 +1632,143 @@ class BackgroundWorker:
                                 "confidence": verification.get("confidence"),
                                 "recommended_action": verification.get("recommended_action"),
                                 "failure_modes": list(verification.get("failure_modes") or []),
+                                "mechanism_failure_kind": verification.get("mechanism_failure_kind") or "",
                                 "policy": dict(verification.get("policy") or {}),
                             },
                         }
+                        mechanism_failure_kind = str(verification.get("mechanism_failure_kind") or "").strip().lower()
+                        process_incident = None
+                        if mechanism_failure_kind:
+                            consecutive_mechanism_failures = count_recent_verifier_mechanism_failures(
+                                storage,
+                                mode=str(verification.get("mode") or context.mode or infer_lane_from_task(task) or "unknown"),
+                            )
+                            process_incident = _mark_degraded_process(
+                                storage,
+                                task,
+                                process_name="verification_process",
+                                reason=(
+                                    f"Verifier mechanism failure: {mechanism_failure_kind}. "
+                                    f"Consecutive recent verifier mechanism failures: {consecutive_mechanism_failures}."
+                                ),
+                                attempt_id=attempt.attempt_id,
+                                metadata={
+                                    "mechanism_failure_kind": mechanism_failure_kind,
+                                    "consecutive_recent_failures": consecutive_mechanism_failures,
+                                    "verification_kind": verification.get("verification_kind"),
+                                },
+                                provenance=_provenance_record(
+                                    source_kind="verifier_review",
+                                    source_actor="lightweight_verifier",
+                                    authority_kind="spec_policy",
+                                    authority_ref="degrade_process_on_verifier_mechanism_failure",
+                                    derived_from=[
+                                        f"task:{task.task_id}",
+                                        f"attempt:{attempt.attempt_id}",
+                                    ],
+                                    note=f"Verifier mechanism failure kind={mechanism_failure_kind}",
+                                ),
+                            )
+                            verification["incident_id"] = process_incident.get("incident_id")
+                            should_flush = enqueue_attempt_observability_artifact(
+                                {
+                                    "task_id": task.task_id,
+                                    "attempt_id": attempt.attempt_id,
+                                    "session_id": task.session_id,
+                                    "artifact_kind": "capability_incident",
+                                    "payload": dict(process_incident),
+                                }
+                            )
+                            if should_flush:
+                                flush_observability_writes()
+                            if consecutive_mechanism_failures >= 3:
+                                repair_task = await queue_process_repair_task(
+                                    storage,
+                                    task=task,
+                                    process_name="verification_process",
+                                    reason=(
+                                        "Repeated verifier machinery failures are degrading output verification. "
+                                        f"Latest failure kind: {mechanism_failure_kind}."
+                                    ),
+                                    enqueue_fn=self.enqueue,
+                                    metadata={
+                                        "mechanism_failure_kind": mechanism_failure_kind,
+                                        "consecutive_recent_failures": consecutive_mechanism_failures,
+                                        "verification_kind": verification.get("verification_kind"),
+                                    },
+                                    incident_id=str(process_incident.get("incident_id") or "").strip() or None,
+                                )
+                                logger.warning(
+                                    "Queued verifier repair task %s after %s consecutive verifier mechanism failures.",
+                                    getattr(repair_task, "task_id", None),
+                                    consecutive_mechanism_failures,
+                                )
                         verifier_signal = emit_verifier_attention_signal(
                             storage,
                             task=task,
                             verification=verification,
                         )
+                        direct_audit = None
+                        if _should_queue_direct_audit(verification):
+                            if not str(verification.get("incident_id") or "").strip():
+                                output_incident = record_capability_incident(
+                                    storage,
+                                    capability_kind="task_output",
+                                    capability_name=task.task_id,
+                                    status="degraded",
+                                    reason=(
+                                        "Verifier requested immediate audit for task output. "
+                                        f"verdict={verification.get('verdict')}; "
+                                        f"recommended_action={verification.get('recommended_action') or 'verify_more'}."
+                                    ),
+                                    task_id=task.task_id,
+                                    attempt_id=attempt.attempt_id,
+                                    session_id=str(task.session_id or "").strip() or None,
+                                    signal_id=(verifier_signal or {}).get("signal_id"),
+                                    provenance=_provenance_record(
+                                        source_kind="verifier_review",
+                                        source_actor="lightweight_verifier",
+                                        authority_kind="spec_policy",
+                                        authority_ref="degrade_task_output_pending_audit",
+                                        derived_from=[f"task:{task.task_id}", f"attempt:{attempt.attempt_id}"],
+                                        note="Immediate audit required before trusting this task output.",
+                                    ),
+                                    snapshot={
+                                        "task_title": str(task.title or "").strip(),
+                                        "verification_kind": verification.get("verification_kind"),
+                                        "verdict": verification.get("verdict"),
+                                        "confidence": verification.get("confidence"),
+                                    },
+                                    metadata={
+                                        "recommended_action": verification.get("recommended_action"),
+                                        "failure_modes": list(verification.get("failure_modes") or []),
+                                    },
+                                )
+                                verification["incident_id"] = output_incident.get("incident_id")
+                                _attach_task_incident(task, output_incident)
+                                should_flush = enqueue_attempt_observability_artifact(
+                                    {
+                                        "task_id": task.task_id,
+                                        "attempt_id": attempt.attempt_id,
+                                        "session_id": task.session_id,
+                                        "artifact_kind": "capability_incident",
+                                        "payload": dict(output_incident),
+                                    }
+                                )
+                                if should_flush:
+                                    flush_observability_writes()
+                            direct_audit = await queue_direct_audit_review(
+                                storage,
+                                task=task,
+                                verification=verification,
+                            )
+                            if direct_audit:
+                                logger.warning(
+                                    "Queued direct audit review %s for task %s after verifier outcome %s.",
+                                    direct_audit.get("task_id"),
+                                    task.task_id,
+                                    verification.get("verdict"),
+                                )
                         if verifier_signal:
                             queued_review = await queue_task_attention_review(
                                 storage,

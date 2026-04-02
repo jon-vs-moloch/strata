@@ -34,6 +34,7 @@ from strata.experimental.trace_review import (
     emit_trace_review_attention_signal,
     review_trace,
 )
+from strata.orchestrator.capability_incidents import resolve_capability_incident
 from strata.knowledge.pages import KnowledgePageStore
 from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
@@ -521,6 +522,43 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                 session_id=derived_session_id or None,
                 task_id=payload.get("task_id"),
             )
+            verification_snapshot = dict(payload.get("verification_snapshot") or {})
+            incident_id = str(verification_snapshot.get("incident_id") or payload.get("capability_incident_id") or "").strip()
+            normalized_assessment = str(review.get("overall_assessment") or "").strip().lower()
+            if incident_id and normalized_assessment not in {
+                "needs_intervention",
+                "misaligned",
+                "blocked",
+                "failed",
+                "degraded",
+                "review_unavailable",
+            }:
+                resolve_capability_incident(
+                    storage,
+                    incident_id=incident_id,
+                    resolution_kind="audit_re_green",
+                    note=(
+                        "Trace review found no continuing incident-level degradation. "
+                        f"overall_assessment={normalized_assessment or 'healthy'}."
+                    ),
+                    provenance={
+                        "source_kind": "trace_review",
+                        "source_actor": str(review.get("reviewer_tier") or reviewer_tier or "trainer").strip().lower(),
+                        "authority_kind": "spec_policy",
+                        "authority_ref": "trace_review_re_green",
+                        "derived_from": [
+                            *([f"task:{payload.get('task_id')}"] if payload.get("task_id") else []),
+                            *([f"incident:{incident_id}"] if incident_id else []),
+                            *([f"timeline:{artifacts['timeline_artifact'].get('artifact_id')}"] if artifacts.get("timeline_artifact") else []),
+                        ],
+                        "governing_spec_refs": [
+                            ".knowledge/specs/constitution.md",
+                            ".knowledge/specs/project_spec.md",
+                            "docs/spec/step-runtime-flow.md",
+                        ],
+                        "note": "Incident cleared by audit-style trace review.",
+                    },
+                )
             queued_followups = []
             if bool(payload.get("emit_followups", True)):
                 _progress(step="system_job", label="Queuing followups", detail=str(trace_kind), progress_label="followups")

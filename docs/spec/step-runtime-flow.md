@@ -54,6 +54,30 @@ Research, implementation, decomposition, and tool repair should all fit the same
 
 This means Research is not a special exception to the ontology; it is a Procedure/task family with its own toolset and prompts.
 
+## Self-Modification Direction
+
+The same runtime model should apply to Strata's own machinery:
+
+- `Verifier`, `Audit`, decomposition, and repair are system capabilities, not magical exceptions.
+- A system capability should either be represented directly as a `Procedure`, as a tool, or as a thin runtime primitive that delegates to `Procedure` steps quickly.
+- Capability outputs remain verifiable and auditable, including verifier outputs themselves.
+- Repeated machinery failures should mark the capability `degraded` and queue bounded repair work.
+- Repair work should target the owning artifact:
+  - update a `Procedure` when the workflow is wrong
+  - update a tool when execution logic is wrong
+  - update a runtime primitive only when the behavior truly belongs below the Procedure/tool layer
+
+This keeps “the system repairs itself” from becoming a parallel architecture. The repair path should operate on the same artifacts the runtime already executes.
+
+## Escalation Rule
+
+- `Verifier` may accept, revise, verify_more, escalate, or call for `Audit`.
+- When a verifier outcome is severe, contradictory, or suggestive of damaged machinery, the runtime should be able to queue `Audit` immediately instead of waiting for a slower aggregate review path.
+- When the same reusable tool or process fails repeatedly, the owning capability should be marked degraded and routed into explicit repair work.
+- Capability degradation should latch immediately on a serious verifier/audit finding and should only clear when later audit or repair records explicit re-greening evidence.
+- Audit should evaluate the incident against the capability version or snapshot that existed when the incident occurred whenever that state can be reconstructed.
+- If the incident-time state was actually sound, the audit should treat the earlier supervisory judgment as the defective artifact and route repair there instead.
+
 ## Branching Groundwork
 
 Tasks may declare `tool_result_branches` in constraints. Each branch may match on:
@@ -70,4 +94,3 @@ And may specify:
 - `stop_after_tool_step`
 
 This is intentionally minimal groundwork. Richer branching should eventually support structured predicates over tool payloads rather than substring matching.
-

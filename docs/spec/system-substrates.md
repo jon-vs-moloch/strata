@@ -125,6 +125,41 @@ Current status:
 
 - conceptually strong and now callable at arbitrary steps
 - still needs a cleaner dedicated implementation note covering invocation patterns, outputs, and known failure modes
+- should converge toward a normal `Procedure`-backed system capability rather than a permanently special hardcoded sidecar
+- should be allowed to request `Audit` directly when a verification outcome is severe enough that the branch needs immediate diagnosis
+
+### Machinery Health and Repair
+
+Purpose:
+
+- treat reusable system machinery such as `Verifier`, `Audit`, decomposition policy, and repair flows as first-class capabilities with health
+- let repeated machinery failures degrade the capability instead of silently poisoning task-level evidence
+- route degraded machinery into bounded repair work the same way repeated tool failures already do
+
+Owns:
+
+- degradation state for reusable internal processes
+- circuit-breaking or caution signals when a process is unhealthy
+- repair-task queueing for degraded system machinery
+
+Does not own:
+
+- the full implementation of every process it monitors
+- permanent special-case logic for each subsystem
+
+Primary surfaces:
+
+- [/Users/jon/Projects/strata/strata/orchestrator/tool_health.py](/Users/jon/Projects/strata/strata/orchestrator/tool_health.py)
+- [/Users/jon/Projects/strata/strata/orchestrator/background.py](/Users/jon/Projects/strata/strata/orchestrator/background.py)
+- [/Users/jon/Projects/strata/strata/orchestrator/worker/resolution_policy.py](/Users/jon/Projects/strata/strata/orchestrator/worker/resolution_policy.py)
+
+Current status:
+
+- tool health is real and already supports `healthy`, `degraded`, and `broken`
+- process degradation is now beginning to appear for verification machinery
+- the architecture still needs unification so internal machinery is represented as normal `Procedure` or tool artifacts instead of ad hoc runtime branches
+- repeated failures should be treated as an obvious repair trigger across both tools and higher-level reusable processes
+- degradation should eventually become sticky and version-aware: a later audit should be able to inspect the incident-time state of a tool/process and explicitly decide whether to re-green it or blame the earlier review
 
 ### `Audit`
 
@@ -295,11 +330,14 @@ Purpose:
 
 - provide a chronological event log of what the system did, when, and why
 - support operator inspection, system querying, and later summarization/archive flows
+- preserve authority and provenance so every consequential action is attributable and reviewable
 
 Owns:
 
 - append-only chronological runtime history views
 - event-level provenance and timestamp ordering
+- authority chain for events, including user-origin, spec-origin, audit-origin, and system-policy-origin actions
+- lifecycle events for edits, redactions, opens, closes, and compactions
 - history summaries and archive rollups
 
 Does not own:
@@ -318,6 +356,7 @@ Current status:
 - partially present in logs, attempt artifacts, and observability tables
 - now beginning to surface as a first-class operator/system `History` view
 - still wants richer drilldown, query, archive, and action affordances
+- provenance is still under-specified relative to the system's needs; history should grow into a true ledger of what happened, why, and under what authority
 
 ### Workbench
 

@@ -22,6 +22,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_signal_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = dict(metadata or {})
+    payload["authority_kind"] = str(payload.get("authority_kind") or "unspecified").strip() or "unspecified"
+    payload["authority_ref"] = str(payload.get("authority_ref") or "").strip()
+    derived_from = payload.get("derived_from")
+    if isinstance(derived_from, list):
+        payload["derived_from"] = [str(item).strip() for item in derived_from if str(item).strip()]
+    elif derived_from:
+        text = str(derived_from).strip()
+        payload["derived_from"] = [text] if text else []
+    else:
+        payload["derived_from"] = []
+    governing = payload.get("governing_spec_refs")
+    if isinstance(governing, list):
+        payload["governing_spec_refs"] = [str(item).strip() for item in governing if str(item).strip()]
+    elif governing:
+        text = str(governing).strip()
+        payload["governing_spec_refs"] = [text] if text else []
+    else:
+        payload["governing_spec_refs"] = []
+    return payload
+
+
 def list_feedback_signals(
     storage,
     *,
@@ -287,7 +310,7 @@ def register_feedback_signal(
         "note": str(note or "").strip()[:500],
         "expected_outcome": str(expected_outcome or "").strip(),
         "observed_outcome": str(observed_outcome or "").strip(),
-        "metadata": dict(metadata or {}),
+        "metadata": _normalize_signal_metadata(metadata),
         "prioritization": prioritization,
         "created_at": _now(),
         "status": "queued_attention" if prioritization.get("priority") in {"review_soon", "urgent"} else "logged",

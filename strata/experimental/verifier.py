@@ -76,6 +76,10 @@ def _default_registry() -> Dict[str, Any]:
             "uncertain_count": 0,
             "deterministic_contradictions": 0,
             "model_verification_count": 0,
+            "mechanism_failure_count": 0,
+            "parse_failure_count": 0,
+            "timeout_count": 0,
+            "model_unavailable_count": 0,
         },
     }
 
@@ -89,14 +93,18 @@ def _apply_registry_artifact(registry: Dict[str, Any], *, mode: str, artifact: D
     def _apply(bucket: Dict[str, Any]) -> Dict[str, Any]:
         bucket["verified_count"] = int(bucket.get("verified_count", 0) or 0) + 1
         verdict = str(artifact.get("verdict") or "uncertain").strip().lower()
+        mechanism_failure_kind = str(artifact.get("mechanism_failure_kind") or "").strip().lower()
         if verdict == "flawed":
             bucket["flawed_count"] = int(bucket.get("flawed_count", 0) or 0) + 1
-        if verdict == "uncertain":
+        if verdict == "uncertain" and not mechanism_failure_kind:
             bucket["uncertain_count"] = int(bucket.get("uncertain_count", 0) or 0) + 1
         if artifact.get("deterministic_contradictions"):
             bucket["deterministic_contradictions"] = int(bucket.get("deterministic_contradictions", 0) or 0) + 1
         if artifact.get("verification_kind") == "model":
             bucket["model_verification_count"] = int(bucket.get("model_verification_count", 0) or 0) + 1
+        if mechanism_failure_kind:
+            bucket["mechanism_failure_count"] = int(bucket.get("mechanism_failure_count", 0) or 0) + 1
+            bucket[f"{mechanism_failure_kind}_count"] = int(bucket.get(f"{mechanism_failure_kind}_count", 0) or 0) + 1
         return bucket
 
     registry["by_mode"][mode] = _apply(mode_bucket)
@@ -216,11 +224,23 @@ def select_verification_policy(storage, *, mode: str, window: int = 24) -> Dict[
     flawed_count = int(mode_bucket.get("flawed_count", 0) or 0)
     uncertain_count = int(mode_bucket.get("uncertain_count", 0) or 0)
     verified_count = int(mode_bucket.get("verified_count", 0) or 0)
+    mechanism_failure_count = int(mode_bucket.get("mechanism_failure_count", 0) or 0)
     verifier_issue_rate = (flawed_count + uncertain_count) / verified_count if verified_count else 1.0
+    verifier_mechanism_failure_rate = mechanism_failure_count / verified_count if verified_count else 1.0
 
-    if sample_count < 8 or recent_error_rate >= 0.18 or verifier_issue_rate >= 0.22:
+    if (
+        sample_count < 8
+        or recent_error_rate >= 0.18
+        or verifier_issue_rate >= 0.22
+        or verifier_mechanism_failure_rate >= 0.12
+    ):
         cadence = 1
-    elif sample_count < 24 or recent_error_rate >= 0.08 or verifier_issue_rate >= 0.12:
+    elif (
+        sample_count < 24
+        or recent_error_rate >= 0.08
+        or verifier_issue_rate >= 0.12
+        or verifier_mechanism_failure_rate >= 0.06
+    ):
         cadence = 2
     else:
         cadence = 4
@@ -232,9 +252,51 @@ def select_verification_policy(storage, *, mode: str, window: int = 24) -> Dict[
         "sample_count": sample_count,
         "recent_error_rate": round(recent_error_rate, 4),
         "verifier_issue_rate": round(verifier_issue_rate, 4),
+        "verifier_mechanism_failure_rate": round(verifier_mechanism_failure_rate, 4),
         "cadence": cadence,
         "should_verify": should_verify,
     }
+
+
+def _mechanism_failure_kind_for_artifact(artifact: Dict[str, Any]) -> str:
+    verification_kind = str(artifact.get("verification_kind") or "").strip().lower()
+    checks_run = [str(item or "").strip().lower() for item in (artifact.get("checks_run") or [])]
+    reasons = " ".join(str(item or "").strip().lower() for item in (artifact.get("reasons") or []))
+    residual_risk = " ".join(str(item or "").strip().lower() for item in (artifact.get("residual_risk") or []))
+    haystack = " ".join(part for part in [reasons, residual_risk] if part)
+    if verification_kind == "skipped":
+        return "model_unavailable"
+    if "model_verifier_parse_fallback" in checks_run:
+        return "parse_failure"
+    if "timed out" in haystack or "timeout" in haystack:
+        return "timeout"
+    return ""
+
+
+def count_recent_verifier_mechanism_failures(storage, *, mode: str, limit: int = 12) -> int:
+    normalized_mode = str(mode or "unknown").strip().lower() or "unknown"
+    try:
+        rows = (
+            storage.session.query(AttemptObservabilityArtifactModel)
+            .filter(AttemptObservabilityArtifactModel.artifact_kind == "verifier_review")
+            .order_by(AttemptObservabilityArtifactModel.created_at.desc())
+            .limit(max(1, int(limit or 12)))
+            .all()
+        )
+    except Exception:
+        return 0
+
+    total = 0
+    for row in rows:
+        payload = dict(getattr(row, "payload", {}) or {})
+        row_mode = str(payload.get("mode") or "unknown").strip().lower() or "unknown"
+        if row_mode != normalized_mode:
+            continue
+        if str(payload.get("mechanism_failure_kind") or "").strip():
+            total += 1
+            continue
+        break
+    return total
 
 
 def _trim_summary_for_verifier(summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -458,6 +520,7 @@ Verification summary:
     artifact["policy"] = policy
     artifact["summary"] = summary_payload
     artifact["deterministic_contradictions"] = contradictions
+    artifact["mechanism_failure_kind"] = _mechanism_failure_kind_for_artifact(artifact)
 
     if attempt is not None:
         should_flush = enqueue_attempt_observability_artifact(
@@ -476,6 +539,22 @@ Verification summary:
                     "recommended_action": artifact.get("recommended_action"),
                     "failure_modes": artifact.get("failure_modes") or [],
                     "deterministic_contradictions": contradictions,
+                    "mechanism_failure_kind": artifact.get("mechanism_failure_kind") or "",
+                    "provenance": {
+                        "source_kind": "verifier_review",
+                        "source_actor": "lightweight_verifier",
+                        "authority_kind": "spec_policy",
+                        "authority_ref": "post_attempt_verification",
+                        "derived_from": [
+                            *([f"task:{getattr(task, 'task_id', None)}"] if getattr(task, "task_id", None) else []),
+                            *([f"attempt:{getattr(attempt, 'attempt_id', None)}"] if getattr(attempt, "attempt_id", None) else []),
+                        ],
+                        "governing_spec_refs": [
+                            ".knowledge/specs/constitution.md",
+                            ".knowledge/specs/project_spec.md",
+                            "docs/spec/step-runtime-flow.md",
+                        ],
+                    },
                 },
             }
         )
@@ -530,5 +609,17 @@ def emit_verifier_attention_signal(storage, *, task: TaskModel, verification: Di
             "verification_kind": verification.get("verification_kind"),
             "failure_modes": list(verification.get("failure_modes") or []),
             "deterministic_contradictions": list(verification.get("deterministic_contradictions") or []),
+            "mechanism_failure_kind": verification.get("mechanism_failure_kind") or "",
+            "authority_kind": "spec_policy",
+            "authority_ref": "post_attempt_verification",
+            "derived_from": [
+                f"task:{task.task_id}",
+                *([f"attempt:{verification.get('attempt_id')}"] if verification.get("attempt_id") else []),
+            ],
+            "governing_spec_refs": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/step-runtime-flow.md",
+            ],
         },
     )

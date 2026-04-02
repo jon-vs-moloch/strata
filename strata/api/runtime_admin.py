@@ -24,6 +24,7 @@ from strata.experimental.trace_review import list_attempt_observability_artifact
 from strata.models.providers import GenericOpenAICompatibleProvider
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 from strata.observability.host import get_host_telemetry_snapshot
+from strata.orchestrator.capability_incidents import list_capability_incidents
 from strata.procedures.registry import get_procedure, list_procedures, queue_procedure, save_procedure
 from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
 from strata.storage.models import task_state_api_value
@@ -719,6 +720,12 @@ def register_runtime_admin_routes(
             parent = storage.session.query(TaskModel).filter(TaskModel.task_id == task.parent_task_id).first()
 
         artifacts = list_attempt_observability_artifacts(storage, task_id=task_id)
+        incidents = list_capability_incidents(
+            storage,
+            task_id=task_id,
+            session_id=str(task.session_id or "").strip() or None,
+            limit=20,
+        )
 
         procedure = None
         procedure_id = (task.constraints or {}).get("procedure_id")
@@ -772,6 +779,7 @@ def register_runtime_admin_routes(
                 "state": task_state_api_value(parent.state),
             } if parent else None,
             "observability": artifacts,
+            "capability_incidents": incidents,
             "procedure": procedure,
         }
 

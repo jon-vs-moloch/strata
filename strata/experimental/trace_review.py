@@ -1059,6 +1059,18 @@ def emit_trace_review_attention_signal(
                 or str(session_id or "").strip()
                 or str((trace_summary or {}).get("candidate_change_id") or "").strip()
             ),
+            "authority_kind": "spec_policy",
+            "authority_ref": "trace_review_attention",
+            "derived_from": [
+                *([f"task:{task_id}"] if str(task_id or "").strip() else []),
+                *([f"session:{session_id}"] if str(session_id or "").strip() else []),
+                *([f"timeline:{review.get('timeline_artifact_id')}"] if review.get("timeline_artifact_id") else []),
+            ],
+            "governing_spec_refs": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/step-runtime-flow.md",
+            ],
         },
     )
 

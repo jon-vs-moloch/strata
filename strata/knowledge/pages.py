@@ -441,6 +441,7 @@ class KnowledgePageStore:
         domain: Optional[str] = None,
         operation: str = "update_page",
         related_slugs: Optional[List[str]] = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ):
         normalized_slug = slugify_page_title(slug)
         page = self.get_page(normalized_slug)
@@ -515,6 +516,7 @@ class KnowledgePageStore:
                 "reason": reason,
                 "evidence_hints": evidence or [],
                 "related_knowledge_slugs": normalized_related,
+                "provenance": dict(provenance or {}),
             },
         )
         task.type = TaskType.RESEARCH

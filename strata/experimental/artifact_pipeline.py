@@ -138,6 +138,22 @@ def enqueue_review_followups(
             evidence=evidence,
             domain="user",
             operation="knowledge_refresh",
+            provenance={
+                "source_kind": "trace_review",
+                "source_actor": str(review.get("reviewer_tier") or "trainer").strip().lower() or "trainer",
+                "authority_kind": "spec_policy",
+                "authority_ref": "trace_review_followup",
+                "derived_from": [
+                    *( [f"session:{session_id}"] if session_id else [] ),
+                    *( [f"timeline:{review.get('timeline_artifact_id')}"] if review.get("timeline_artifact_id") else [] ),
+                ],
+                "governing_spec_refs": [
+                    ".knowledge/specs/constitution.md",
+                    ".knowledge/specs/project_spec.md",
+                    "docs/spec/step-runtime-flow.md",
+                ],
+                "note": "Knowledge refresh queued from trace review follow-up.",
+            },
         )
         queued_task_ids.append(task.task_id)
     for intervention in review.get("targeted_interventions") or []:
@@ -151,6 +167,22 @@ def enqueue_review_followups(
             evidence=evidence,
             domain="project",
             operation="knowledge_refresh",
+            provenance={
+                "source_kind": "trace_review",
+                "source_actor": str(review.get("reviewer_tier") or "trainer").strip().lower() or "trainer",
+                "authority_kind": "spec_policy",
+                "authority_ref": "trace_review_followup",
+                "derived_from": [
+                    *( [f"session:{session_id}"] if session_id else [] ),
+                    *( [f"timeline:{review.get('timeline_artifact_id')}"] if review.get("timeline_artifact_id") else [] ),
+                ],
+                "governing_spec_refs": [
+                    ".knowledge/specs/constitution.md",
+                    ".knowledge/specs/project_spec.md",
+                    "docs/spec/step-runtime-flow.md",
+                ],
+                "note": "Knowledge refresh queued from trace review follow-up.",
+            },
         )
         queued_task_ids.append(task.task_id)
         break

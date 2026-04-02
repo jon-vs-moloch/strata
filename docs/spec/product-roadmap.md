@@ -135,10 +135,12 @@ Near-term product backlog:
 - keep task progress visible even when a task is expanded and keep lane progress visible even when another scope is focused
 - move throttle controls off the global header and onto the relevant agent/lane surfaces, because throttle posture should be scoped to the workstream it affects rather than presented as an app-global switch
 - show task provenance explicitly: why the task exists, who/what spawned it, and what caused retries, decomposition, review, or verification
+- show "why this happened" and "under what authority" directly in operator work surfaces, not only raw timestamps or parent ids
 - render attempts as expandable context -> result narratives rather than only status chips, while still keeping concise attempt metadata visible when collapsed
 - nest verification, audits, reviews, and other spawned child work under the task or attempt that created it
 - let operators invoke internal machinery from task/attempt surfaces, including things like verification, audit, retry, decomposition, pause, resume, or other bounded control actions where policy allows
 - add a scoped chronological `History` view that acts as a queryable event log for both operators and the system
+- make `History` a true provenance ledger: every consequential action should record authority, cause, derived-from links, and governing spec/user references
 - add a first-class operator `Workbench` surface (working title; effectively a universal debugger) that can step through any Strata process end-to-end, pause at arbitrary nodes, inspect exact inputs/context/tool results, regenerate outputs from a chosen node, branch from modified context, and run downstream consequences side-by-side
 - add a first-class `Tools` view
 - add a first-class `Procedures` view so durable workflows are visible, inspectable, and eventually editable/promotable
@@ -188,6 +190,8 @@ Follow-up work remains and should stay on the roadmap:
 - add lineage-level rollups/materialized summaries so the UI and agents can read branch pressure cheaply
 - make trainer/self-review jobs consume observability artifacts and attempt intelligence more explicitly
 - continue shaping raw observability into ergonomic summary surfaces that weak models can use without reconstructing state by hand
+- add incident-time capability snapshots or version pointers for reusable tools/processes so audit can compare “broken then” vs “looks fine now”
+- add append-only lifecycle logging for edits, redactions, compactions, opens, closes, and other history mutations so log mutation never becomes silent provenance loss
 - keep sharpening lane/runtime visibility so labels like `stalled`, `queued`, and `children in progress` always resolve to an explicit reason such as transport wait, database contention, missing progress heartbeat, or child-task handoff
 - keep refining `Procedure` execution so successful decompositions and reusable partial progress can fold back into durable `Procedure` artifacts instead of staying one-off runtime branches
 - add a durable `Kit` substrate so the system can package coordinated artifact groups, including nested Kits, instead of treating multi-artifact capability bundles as ad hoc conventions

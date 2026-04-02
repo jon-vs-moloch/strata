@@ -10,6 +10,7 @@ Current project intent:
 - use the trainer tier to improve the harness until the agent tier can improve the system itself
 - treat repo structure, modularity, and progressive disclosure as supports for small models with small context
 - keep bootstrap progress measurable through evals, telemetry, promotion evidence, and explainable provenance
+- all durable system actions should carry provenance that explains authority, causal chain, and governing policy, not only outcome
 - treat deterministic preprocessing as part of the product, not just an optimization; inference should receive already-structured, evidence-rich tasks whenever possible
 
 Normal operating mode:
@@ -27,6 +28,8 @@ Normal operating mode:
 - evals should support diagnosis and promotion decisions, not dominate wall-clock activity when the system could be doing useful work
 - trainer supervision should treat verifier findings and deterministic contradictions as first-class evidence; repeated verifier failures without correction indicate a system-level supervision gap, not merely a task that needs more retries
 - verification policy should be shared across tiers and anneal from measured error rate rather than from hardcoded role-specific trust
+- severe verifier findings should be able to trigger `Audit` directly rather than waiting for passive review aggregation when immediate branch diagnosis is warranted
+- reusable capability health should be sticky: once a tool or process is marked degraded by verification or audit, it should stay degraded until explicit re-greening evidence is recorded
 - the product shell should stay minimal and trustworthy: bundled code should provide continuity and safe-mode fallback, while higher-level UI and tool surfaces should increasingly be delivered through validated runtime modules or plugins
 - task boundaries should be chosen so one variance-bearing invocation can plausibly complete the task; if work naturally requires inspect, then patch, then validate, those are separate subtasks rather than multiple progressive attempts at one task
 - because decomposition quality now carries more of the intelligence, durable procedures should be treated as a primary substrate for reusable process knowledge, recovery logic, and compounding behavioral improvement
@@ -36,6 +39,8 @@ Normal operating mode:
 - this proper-noun convention applies across the architecture: `Procedure`, `Kit`, `Verifier`, `Audit`, and similar capitalized terms name first-class system artifacts or subsystems, while lowercase terms refer to the ordinary generic activity
 - partial success should not be discarded; useful decompositions, clarified subgoals, successful recoveries, and reusable intermediate structure should be captured into durable artifacts such as Procedures, knowledge, or policy updates
 - failures should metabolize into durable improvements too; repeated failure modes, blocked branches, verifier findings, and recovery dead ends should cash out into Procedures, tool health, policy changes, or other persistent system adaptations
+- repeated failures of reusable machinery, whether a tool or a higher-level process, should degrade that capability and route toward explicit repair of the owning artifact
+- durable capability history should include enough versioning or snapshots to let later audits ask “was this actually broken at the time of incident?” rather than inferring from a later repaired state
 - notifying the trainer is not, by itself, a recovery. When an autonomous branch fails to decompose or plan cleanly, the system should continue pursuing bounded self-recovery unless the branch is truly blocked on required external input or permission
 - failures should always produce an explicit "what's next" decision. The system should never treat a failed attempt as the end of the line without choosing a concrete continuation path such as decomposition, replanning, remediation, escalation, or other bounded follow-on work
 
@@ -50,6 +55,7 @@ Canonical supporting references:
 Operational guidance:
 - when the system detects durable user intent, route it into the spec proposal workflow rather than mutating the spec casually
 - when alignment work is triggered, the spec files above are the source of truth and should be cited explicitly
+- every nontrivial system decision should be explainable in terms of either direct user instruction or spec-derived policy; “the system decided” is not an acceptable terminal explanation
 - seed operator onboarding before agent-side idle alignment; if onboarding is still active or incomplete, prefer progressing or clarifying onboarding over inventing freeform alignment work
 - if the spec is missing detail, prefer a bounded spec-hardening task over claiming the project vision is unknown
 - when repository facts are uncertain, prefer verification or explicit uncertainty over asserting absence from a partial snapshot
@@ -90,6 +96,7 @@ Operational guidance:
 - operator visibility and control should be profile-aware over time: Strata should be able to support simple chat-only operation, power-user/developer operation, and stricter managed/enterprise profiles without changing the underlying system model
 - bugs and regressions should live in a durable tracker rather than only in thread history; active runtime defects, truthfulness gaps, and operator pain points should be recorded in [bug-tracker.md](/Users/jon/Projects/strata/docs/spec/bug-tracker.md) so trainer/alignment work can consume them as real backlog
 - operator-facing surfaces such as `History`, `Tasks`, `Procedures`, `Tools`, and `Knowledge` should not remain read-only viewers by default; they should evolve toward bounded interaction and editing surfaces where the operator can inspect, modify, queue, verify, audit, or otherwise act on the underlying artifacts
+- `History` should evolve toward a true append-only event ledger with lifecycle provenance for reads, writes, edits, redactions, compactions, opens, closes, and other consequential interactions
 - Strata should eventually expose a first-class operator `Workbench` surface: a universal debugger-like environment where any Strata process can be replayed, stepped, paused, branched, regenerated from intermediate context, and re-run under different tools, models, or inputs
 - Workbench semantics should preserve real process shape rather than flatten it into logs: the operator should be able to inspect exact per-node inputs, outputs, handoff behavior, downstream consumers, and alternate branches, including verification and audit subflows
 - reflection resolution should be arbitrarily high: Strata should be able to inspect and edit its own tools, Procedures, Knowledge artifacts, runtime policies, source code, and UI from within Strata itself, subject to whatever bounded controls/policy gates are active for the current operator profile

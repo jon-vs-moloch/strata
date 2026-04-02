@@ -164,6 +164,17 @@ class ModelRegistry:
             if preferred_model and endpoint.model == preferred_model:
                 return endpoint
 
+        if preferred_model:
+            override_base = None
+            if preferred_transport:
+                override_base = next(
+                    (endpoint for endpoint in candidate_endpoints if endpoint.transport == preferred_transport),
+                    None,
+                )
+            if override_base is None:
+                override_base = candidate_endpoints[0]
+            return override_base.model_copy(update={"model": preferred_model})
+
         if preferred_transport:
             for endpoint in candidate_endpoints:
                 if endpoint.transport == preferred_transport:

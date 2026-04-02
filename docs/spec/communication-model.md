@@ -24,6 +24,18 @@ If those paths all write directly to storage, the system loses:
 
 The communication layer exists to make those choices explicit.
 
+## Provenance Rule
+
+Every communication event should be able to answer:
+
+- what was emitted
+- who or what emitted it
+- why it was emitted
+- under what authority it was emitted
+- which upstream user input, spec clause, task, audit, or policy decision it derived from
+
+Communication provenance should include both causal ancestry and authority ancestry, not just source labels.
+
 ## Core Rule
 
 All non-user-authored messages should go through the communication decision and delivery layer.
@@ -103,6 +115,7 @@ Important metadata/state fields include:
 
 - title fields: `custom_title`, `generated_title`, `recommended_title`
 - provenance: `opened_by`, `opened_reason`, `source_kind`
+- authority/provenance chain: `authority_kind`, `authority_ref`, `derived_from`, `governing_spec_refs`
 - topical hints: `tags`, `topic_summary`
 - lifecycle: `created_at`, `last_audited_at`
 - attention state: `last_read_at`, `last_read_message_id`, `unread_count`
@@ -143,12 +156,33 @@ Current message-level metadata should support fields such as:
 - `read_at`
 - `read_by`
 - `tags`
+- `authority_kind`
+- `authority_ref`
+- `derived_from`
+- `governing_spec_refs`
+- `event_action`
+- `event_target`
 
 Design intent:
 
 - user-authored messages should be markable as `seen_by_system` even if no reply is emitted
 - system-authored messages should be markable as `read` by the user or another recipient later
 - downstream policy should be able to reason about whether a message was merely sent, actually observed, or ignored
+- downstream audit should be able to reason about whether a message or log mutation was authorized, attributable, and later corrected
+
+## Append-Only Meaning
+
+Communication and history should be append-only in meaning even when storage is compacted or edited.
+
+This means:
+
+- opening a thread or log is an event
+- closing it is an event
+- editing a message or log entry is an event
+- redacting or compacting history is an event
+- replaying or restoring prior history is an event
+
+The system should prefer emitting a new provenance-bearing event over silently mutating prior history.
 
 ## Emitter Guidelines
 

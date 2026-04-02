@@ -432,6 +432,7 @@ async def _queue_eval_system_job(
                 type=TaskType.JUDGE,
                 constraints={
                     "lane": lane,
+                    "provenance": dict(payload.get("provenance") or {}),
                     "system_job": {
                         "kind": kind,
                         "payload": payload,
