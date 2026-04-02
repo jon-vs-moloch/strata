@@ -18,6 +18,7 @@ const NonChatContent = lazy(() => import('./views/NonChatContent'));
 const LazySettingsView = lazy(() => import('./views/SettingsView'));
 const MarkdownMessageBody = lazy(() => import('./components/MarkdownMessageBody'));
 const TaskPaneContent = lazy(() => import('./views/TaskPaneContent'));
+import SegmentedProgressRail from './components/SegmentedProgressRail';
 const preloadNonChatContent = () => import('./views/NonChatContent');
 const preloadSettingsView = () => import('./views/SettingsView');
 
@@ -458,12 +459,26 @@ const isDirectCommunication = (message) => {
   if (message?.role === 'user') return true;
   if (message?.role === 'assistant') {
     const sourceKind = String(message?.message_metadata?.source_kind || '').trim().toLowerCase();
-    if (!sourceKind || sourceKind === 'chat_reply' || sourceKind === 'chat_error' || sourceKind === 'tool_progress') {
+    const sourceActor = String(message?.message_metadata?.source_actor || '').trim().toLowerCase();
+    const act = normalizeCommunicativeAct(message);
+    if (sourceActor === 'task_runner' && act !== 'response' && act !== 'question') {
+      return false;
+    }
+    if (!sourceKind || sourceKind === 'chat_reply' || sourceKind === 'chat_error' || (sourceKind === 'tool_progress' && sourceActor === 'chat_runtime')) {
       return true;
     }
   }
   const act = normalizeCommunicativeAct(message);
   return act === 'response' || act === 'question';
+};
+
+const shouldHideFromChatRail = (message) => {
+  const metadata = message?.message_metadata || {};
+  const sourceKind = String(metadata.source_kind || '').trim().toLowerCase();
+  const sourceActor = String(metadata.source_actor || '').trim().toLowerCase();
+  const act = normalizeCommunicativeAct(message);
+  if (sourceActor === 'task_runner' && act !== 'response' && act !== 'question') return true;
+  return false;
 };
 
 const eventAlignmentForMessage = (message) => {
@@ -1278,6 +1293,10 @@ function App() {
   const isDraftSession = isDraftSessionId(sessionId);
   const currentDraft = Object.values(laneDrafts).flat().find((draft) => draft?.session_id === sessionId) || null;
   const activeChatRoute = routingSummary?.[effectiveLane] || routingSummary?.chat || null;
+  const chatRailMessages = React.useMemo(
+    () => (Array.isArray(messages) ? messages.filter((message) => !shouldHideFromChatRail(message)) : []),
+    [messages]
+  );
   const currentSession = currentDraft || sessionList.find((session) => session.session_id === sessionId) || null;
   const currentSessionMetadata = currentSession?.session_metadata || {};
   const visibleSessionId = displaySessionId(sessionId);
@@ -3614,8 +3633,8 @@ function App() {
         ) : (
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', gap: '20px' }}>
           <AnimatePresence initial={false}>
-            {messages.map((msg, i) => {
-              const previousMessage = i > 0 ? messages[i - 1] : null;
+            {chatRailMessages.map((msg, i) => {
+              const previousMessage = i > 0 ? chatRailMessages[i - 1] : null;
               const groupedWithPrevious = shouldGroupMessages(msg, previousMessage, effectiveLane);
               return (
                 <MemoMessageCard
@@ -3635,7 +3654,7 @@ function App() {
             );
           })}
 
-            {messages.length === 0 && !isSending && (
+            {chatRailMessages.length === 0 && !isSending && (
               <MotionDiv
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -4303,119 +4322,11 @@ const TopModeTab = ({
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          {pathSegments.slice(0, -1).length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-              {pathSegments.slice(0, -1).map((segment, index) => {
-                const segmentPercent = Math.max(0, Math.min(100, Number(segment?.percent || 0)));
-                const segmentStatus = String(segment?.status || '').trim().toLowerCase();
-                const segmentTone = segmentStatus === 'complete'
-                  ? 'linear-gradient(90deg, rgba(0,242,148,0.96), rgba(104,255,198,0.84))'
-                  : segmentStatus === 'blocked'
-                  ? 'linear-gradient(90deg, rgba(255,184,77,0.96), rgba(255,92,92,0.84))'
-                  : segmentStatus === 'pending'
-                  ? 'linear-gradient(90deg, rgba(143,214,255,0.96), rgba(92,156,255,0.84))'
-                  : segmentStatus === 'pushed'
-                  ? 'linear-gradient(90deg, rgba(255,215,120,0.96), rgba(255,168,76,0.84))'
-                  : accent === 'agent'
-                  ? 'linear-gradient(90deg, rgba(146,196,188,0.95), rgba(93,131,137,0.82))'
-                  : accent === 'trainer'
-                  ? 'linear-gradient(90deg, rgba(255,177,140,0.96), rgba(205,96,52,0.9))'
-                  : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))';
-                const segmentTrack = segmentStatus === 'complete'
-                  ? 'rgba(0,242,148,0.14)'
-                  : segmentStatus === 'blocked'
-                  ? 'rgba(255,92,92,0.16)'
-                  : segmentStatus === 'pending'
-                  ? 'rgba(143,214,255,0.14)'
-                  : segmentStatus === 'pushed'
-                  ? 'rgba(255,184,77,0.14)'
-                  : 'rgba(255,255,255,0.08)';
-                const segmentOpacity = segmentStatus === 'complete'
-                  ? 0.92
-                  : segmentStatus === 'blocked'
-                  ? 0.96
-                  : segmentStatus === 'pending'
-                  ? 0.9
-                  : segmentStatus === 'pushed'
-                  ? 0.92
-                  : 0.78;
-                return (
-                  <div
-                    key={`${label}-crumb-${index}`}
-                    style={{
-                      width: '18px',
-                      height: '5px',
-                      borderRadius: '999px',
-                      background: segmentTrack,
-                      overflow: 'hidden',
-                      opacity: segmentOpacity,
-                      boxShadow: segmentStatus === 'blocked'
-                        ? '0 0 10px rgba(255,92,92,0.14)'
-                        : 'none',
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${segmentPercent}%`,
-                        height: '100%',
-                        borderRadius: '999px',
-                        background: segmentTone,
-                        transition: 'width 0.22s ease',
-                      }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <div style={{ flex: 1, height: '5px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden', position: 'relative' }}>
-            <div
-              style={{
-                width: `${progressValue}%`,
-                height: '100%',
-                borderRadius: '999px',
-                background: accent === 'agent'
-                  ? 'linear-gradient(90deg, rgba(146,196,188,0.95), rgba(93,131,137,0.82))'
-                  : accent === 'trainer'
-                  ? 'linear-gradient(90deg, rgba(255,177,140,0.96), rgba(205,96,52,0.9))'
-                  : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))',
-              transition: 'width 0.22s ease',
-              }}
-            />
-            {progressMarkers.length > 1 && (
-              <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-                {progressMarkers.map((marker, index) => {
-                  if (index === progressMarkers.length - 1) return null;
-                  const markerStatus = String(marker?.status || '').trim().toLowerCase();
-                  const markerColor = markerStatus === 'complete'
-                    ? 'rgba(0,242,148,0.92)'
-                    : markerStatus === 'blocked'
-                    ? 'rgba(255,92,92,0.92)'
-                    : markerStatus === 'pending'
-                    ? 'rgba(143,214,255,0.9)'
-                    : markerStatus === 'pushed'
-                    ? 'rgba(255,184,77,0.92)'
-                    : 'rgba(255,255,255,0.45)';
-                  return (
-                    <div
-                      key={`${label}-marker-${index}`}
-                      style={{
-                        position: 'absolute',
-                        left: `${((index + 1) / progressMarkers.length) * 100}%`,
-                        top: '50%',
-                        width: '5px',
-                        height: '5px',
-                        borderRadius: '999px',
-                        background: markerColor,
-                        transform: 'translate(-50%, -50%)',
-                        boxShadow: `0 0 0 1px rgba(10,10,12,0.9), 0 0 8px ${markerColor}`,
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <SegmentedProgressRail
+            percent={progressValue}
+            accentColor={accent === 'agent' ? '#9ad8cd' : accent === 'trainer' ? '#ffb18c' : '#d4d9eb'}
+            segments={pathSegments.length > 0 ? pathSegments : progressMarkers}
+          />
           {showControls && apiStatus === 'ok' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
               {taskPaused ? (

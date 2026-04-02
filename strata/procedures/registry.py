@@ -356,8 +356,9 @@ def get_procedure_registry(storage) -> Dict[str, Any]:
         procedure_id: _normalize_procedure(definition)
         for procedure_id, definition in dict(registry.get("procedures") or {}).items()
     }
-    if not procedures:
-        procedures = deepcopy(DEFAULT_PROCEDURES)
+    merged = deepcopy(DEFAULT_PROCEDURES)
+    merged.update(procedures)
+    procedures = merged
     return {"procedures": procedures}
 
 

@@ -1436,9 +1436,27 @@ const taskStateTone = (s) => {
   }
 };
 
+const normalizeWorkbenchAct = (message) => String(message?.message_metadata?.communicative_act || '').trim().toLowerCase();
+
+const shouldHideWorkbenchMessage = (message) => {
+  const metadata = message?.message_metadata || {};
+  const sourceActor = String(metadata.source_actor || '').trim().toLowerCase();
+  const act = normalizeWorkbenchAct(message);
+  return sourceActor === 'task_runner' && act !== 'response' && act !== 'question';
+};
+
 const ContextSnapshotSnapshot = ({ artifact }) => {
   const payload = artifact.payload || {};
   const [expanded, setExpanded] = React.useState(false);
+  const userMessage = String(payload.user_message || '').trim();
+  const systemPromptPreview = String(payload.system_prompt_preview || '').trim();
+  const uniqueContext = payload.unique_context && typeof payload.unique_context === 'object' ? payload.unique_context : {};
+  const toolNames = Array.isArray(payload.tool_names) ? payload.tool_names : [];
+  const staticRefs = Array.isArray(payload.static_section_refs) ? payload.static_section_refs : [];
+  const preferredPaths = Array.isArray(uniqueContext.preferred_start_paths) ? uniqueContext.preferred_start_paths : [];
+  const handoffContext = uniqueContext.handoff_context && typeof uniqueContext.handoff_context === 'object' ? uniqueContext.handoff_context : {};
+  const graphContext = uniqueContext.task_graph_context && typeof uniqueContext.task_graph_context === 'object' ? uniqueContext.task_graph_context : {};
+  const recentPath = Array.isArray(graphContext.recent_path) ? graphContext.recent_path : [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -1450,15 +1468,25 @@ const ContextSnapshotSnapshot = ({ artifact }) => {
       </div>
 
       <div style={{ display: 'flex', gap: '8px' }}>
-        <RoutePill label="MESSAGES" value={payload.messages?.length || 0} />
-        <RoutePill label="TOOLS" value={payload.tools?.length || 0} tone="success" />
-        {payload.variant_id && <RoutePill label="VARIANT" value={payload.variant_id} tone="caution" />}
+        {payload.prompt_template_ref && <RoutePill label="PROMPT" value={payload.prompt_template_ref} />}
+        {payload.prompt_lineage_id && <RoutePill label="LINEAGE" value={payload.prompt_lineage_id} tone="success" />}
+        <RoutePill label="TOOLS" value={toolNames.length || 0} tone="success" />
+        {staticRefs.length > 0 && <RoutePill label="STATIC" value={staticRefs.length} />}
       </div>
+
+      {userMessage && (
+        <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, marginBottom: '8px', textTransform: 'uppercase' }}>User Message</div>
+          <div style={{ fontSize: '12px', color: '#edeeef', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+            {userMessage}
+          </div>
+        </div>
+      )}
 
       <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '8px', padding: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
         <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, marginBottom: '8px', textTransform: 'uppercase' }}>System Prompt Excerpt</div>
-        <div style={{ fontSize: '12px', color: '#a9aaba', whiteSpace: 'pre-wrap', maxHeight: expanded ? 'none' : '100px', overflow: 'hidden' }}>
-          {payload.messages?.[0]?.content?.slice(0, 500)}...
+        <div style={{ fontSize: '12px', color: '#a9aaba', whiteSpace: 'pre-wrap', maxHeight: expanded ? 'none' : '140px', overflow: 'hidden', lineHeight: 1.55 }}>
+          {systemPromptPreview || '(no system prompt preview captured)'}
         </div>
         <button
           onClick={() => setExpanded(!expanded)}
@@ -1468,10 +1496,121 @@ const ContextSnapshotSnapshot = ({ artifact }) => {
         </button>
       </div>
 
-      {payload.repo_snapshot && (
-         <div style={{ fontSize: '11px', color: '#444' }}>
-           📦 Repository Snapshot included ({payload.repo_snapshot.length} chars)
-         </div>
+      {preferredPaths.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, textTransform: 'uppercase' }}>Preferred Start Paths</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            {preferredPaths.map((path) => (
+              <RoutePill key={path} label="PATH" value={path} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(handoffContext.tool_call?.name || handoffContext.next_step_hint) && (
+        <div style={{ background: 'rgba(130,87,229,0.03)', border: '1px solid rgba(130,87,229,0.1)', borderRadius: '12px', padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {handoffContext.tool_call?.name && <RoutePill label="INHERITED TOOL" value={handoffContext.tool_call.name} tone="info" />}
+            {handoffContext.from_task_title && <RoutePill label="FROM TASK" value={handoffContext.from_task_title} />}
+          </div>
+          {handoffContext.next_step_hint && (
+            <div style={{ fontSize: '12px', color: '#edeeef', lineHeight: 1.6 }}>
+              {handoffContext.next_step_hint}
+            </div>
+          )}
+          {handoffContext.tool_result_preview && (
+            <pre style={{ margin: 0, fontSize: '11px', background: '#0f1014', padding: '10px', borderRadius: '8px', overflowX: 'auto', color: '#d5d8e6', whiteSpace: 'pre-wrap' }}>
+              {handoffContext.tool_result_preview}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {recentPath.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, textTransform: 'uppercase' }}>Recent Task Path</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {recentPath.map((node, index) => (
+              <div key={`${node.task_id || node.title}-${index}`} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#c7c8d6' }}>
+                <RoutePill label={`D${node.depth ?? index}`} value={node.state || 'pending'} tone="neutral" />
+                <span>{node.title || 'Untitled task'}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ModelTurnSnapshotCard = ({ artifact }) => {
+  const payload = artifact.payload || {};
+  const toolCalls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
+  const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage : {};
+  const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens;
+  return (
+    <div style={{ background: 'rgba(56,189,248,0.03)', border: '1px solid rgba(56,189,248,0.12)', borderRadius: '12px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <RoutePill label="MODEL TURN" value={payload.response_status || 'unknown'} tone={payload.response_status === 'success' ? 'success' : 'warning'} />
+          {payload.provider && <RoutePill label="PROVIDER" value={payload.provider} />}
+          {payload.model && <RoutePill label="MODEL" value={payload.model} />}
+          {usage.prompt_tokens != null && <RoutePill label="PROMPT TOKENS" value={usage.prompt_tokens} />}
+          {usage.completion_tokens != null && <RoutePill label="COMPLETION TOKENS" value={usage.completion_tokens} />}
+          {reasoningTokens != null && <RoutePill label="REASONING" value={reasoningTokens} tone="warning" />}
+        </div>
+        <span style={{ fontSize: '10px', color: '#444' }}>{formatAbsoluteTime(payload.timestamp || artifact.recorded_at || artifact.at)}</span>
+      </div>
+      {payload.content_preview && (
+        <div style={{ fontSize: '12px', color: '#e7e8ef', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+          {payload.content_preview}
+        </div>
+      )}
+      {toolCalls.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, textTransform: 'uppercase' }}>Tool Calls</div>
+          {toolCalls.map((call, index) => (
+            <pre key={`${call?.function?.name || 'tool'}-${index}`} style={{ margin: 0, fontSize: '11px', background: '#0f1014', padding: '10px', borderRadius: '8px', overflowX: 'auto', color: '#d5d8e6', whiteSpace: 'pre-wrap' }}>
+              {`${call?.function?.name || 'unknown'}(${call?.function?.arguments || ''})`}
+            </pre>
+          ))}
+        </div>
+      )}
+      {payload.error && Object.keys(payload.error).length > 0 && (
+        <pre style={{ margin: 0, fontSize: '11px', background: '#190d10', padding: '10px', borderRadius: '8px', overflowX: 'auto', color: '#ffb4b4', whiteSpace: 'pre-wrap' }}>
+          {stringifyJson(payload.error)}
+        </pre>
+      )}
+    </div>
+  );
+};
+
+const TerminalToolCallCard = ({ artifact }) => {
+  const payload = artifact.payload || {};
+  const toolCall = payload.tool_call || {};
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '12px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <RoutePill label="TERMINAL TOOL" value={toolCall.name || 'unknown'} tone="info" />
+          {payload.source_module && <RoutePill label="MODULE" value={payload.source_module} />}
+        </div>
+        <span style={{ fontSize: '10px', color: '#444' }}>{formatAbsoluteTime(payload.timestamp || artifact.recorded_at || artifact.at)}</span>
+      </div>
+      {toolCall.arguments && (
+        <pre style={{ margin: 0, fontSize: '11px', background: '#0f1014', padding: '10px', borderRadius: '8px', overflowX: 'auto', color: '#d5d8e6', whiteSpace: 'pre-wrap' }}>
+          {stringifyJson(toolCall.arguments)}
+        </pre>
+      )}
+      {payload.tool_result_preview && (
+        <pre style={{ margin: 0, fontSize: '11px', background: '#0f1014', padding: '10px', borderRadius: '8px', overflowX: 'auto', color: '#d5d8e6', whiteSpace: 'pre-wrap' }}>
+          {payload.tool_result_preview}
+        </pre>
+      )}
+      {payload.next_step_hint && (
+        <div style={{ fontSize: '12px', color: '#edeeef', lineHeight: 1.6 }}>
+          {payload.next_step_hint}
+        </div>
       )}
     </div>
   );
@@ -1552,6 +1691,7 @@ const ObservabilityInspector = ({ artifacts = [] }) => {
                 <div style={{ display: 'flex', gap: '8px' }}>
                    <RoutePill label="VERIFICATION" value={payload.verdict} tone={payload.verdict === 'good' ? 'success' : (payload.verdict === 'flawed' ? 'danger' : 'warning')} />
                    <RoutePill label="CONFIDENCE" value={`${Math.round(payload.confidence * 100)}%`} />
+                   {payload.mechanism_failure_kind && <RoutePill label="MECHANISM" value={payload.mechanism_failure_kind} tone="danger" />}
                 </div>
                 <span style={{ fontSize: '10px', color: '#444' }}>{formatAbsoluteTime(timestamp)}</span>
              </div>
@@ -1562,6 +1702,10 @@ const ObservabilityInspector = ({ artifacts = [] }) => {
         );
       case 'context_snapshot':
         return <ContextSnapshotSnapshot artifact={artifact} />;
+      case 'model_turn_snapshot':
+        return <ModelTurnSnapshotCard key={idx} artifact={artifact} />;
+      case 'terminal_tool_call':
+        return <TerminalToolCallCard key={idx} artifact={artifact} />;
       default:
         return (
           <div key={idx} style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.04)', borderRadius: '12px', padding: '12px' }}>
@@ -1767,6 +1911,16 @@ const TaskTargetCard = ({
   const [isReplaying, setIsReplaying] = React.useState(false);
   if (!task) return null;
   const stateTone = (s) => taskStateTone(s);
+  const attemptArtifactsById = React.useMemo(() => {
+    const grouped = {};
+    (Array.isArray(task.observability) ? task.observability : []).forEach((artifact) => {
+      const attemptId = String(artifact?.attempt_id || '').trim();
+      if (!attemptId) return;
+      grouped[attemptId] = grouped[attemptId] || [];
+      grouped[attemptId].push(artifact);
+    });
+    return grouped;
+  }, [task.observability]);
 
   const handleTaskClick = () => {
     if (activeTool && onSendWorkbenchPrompt) {
@@ -1989,6 +2143,7 @@ const TaskTargetCard = ({
             <AttemptTargetCard
               key={`${attempt.attempt_id}-${idx}`}
               attempt={attempt}
+              attemptArtifacts={attemptArtifactsById[String(attempt.attempt_id || '')] || []}
               onSendWorkbenchPrompt={onSendWorkbenchPrompt}
             />
           ))}
@@ -2005,7 +2160,7 @@ const TaskTargetCard = ({
   );
 };
 
-const AttemptTargetCard = ({ attempt, onSendWorkbenchPrompt }) => {
+const AttemptTargetCard = ({ attempt, attemptArtifacts = [], onSendWorkbenchPrompt }) => {
   const [expanded, setExpanded] = useState(false);
   const outcomeTone = (o) => {
     switch (String(o || '').toLowerCase()) {
@@ -2077,6 +2232,12 @@ const AttemptTargetCard = ({ attempt, onSendWorkbenchPrompt }) => {
 
           {attempt.evidence?.autopsy && (
             <ObservabilityInspector artifacts={[{ artifact_kind: 'autopsy', payload: attempt.evidence.autopsy, at: attempt.ended_at }]} />
+          )}
+          {attemptArtifacts.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Attempt Observability</div>
+              <ObservabilityInspector artifacts={attemptArtifacts} />
+            </div>
           )}
         </div>
       )}
@@ -2327,8 +2488,8 @@ const WorkbenchView = ({
   const simulationSessionId = workbenchSimulationSessionId(target);
   const sessionMatch = Array.isArray(messages)
     ? (target?.sessionId
-        ? messages.filter((message) => String(message.session_id) === String(target.sessionId)).slice(-5)
-        : messages.filter((message) => message?.message_metadata?.workbench_session === simulationSessionId).slice(-5))
+        ? messages.filter((message) => String(message.session_id) === String(target.sessionId) && !shouldHideWorkbenchMessage(message)).slice(-5)
+        : messages.filter((message) => message?.message_metadata?.workbench_session === simulationSessionId && !shouldHideWorkbenchMessage(message)).slice(-5))
     : [];
   const metadata = target?.metadata || taskMatch || procedureMatch || null;
   const hasTarget = Boolean(target || taskMatch || procedureMatch);

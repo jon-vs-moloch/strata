@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { GitBranch, FlaskConical, ArchiveX, ChevronDown, ChevronRight, Activity, CheckCircle2, XCircle, Clock, Signal } from 'lucide-react';
+import SegmentedProgressRail from './SegmentedProgressRail';
 
 const MotionDiv = motion.div;
 
@@ -152,45 +153,6 @@ function describeTaskProgress(task) {
     markers,
   };
 }
-
-const ProgressRail = ({ percent, accentColor, markers = [] }) => (
-  <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden', position: 'relative' }}>
-    <div style={{ height: '100%', width: `${Math.max(0, Math.min(100, Number(percent || 0)))}%`, background: accentColor, borderRadius: '10px' }} />
-    {markers.length > 1 && (
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
-        {markers.map((marker, index) => {
-          if (index === markers.length - 1) return null;
-          const markerStatus = String(marker?.status || '').trim().toLowerCase();
-          const markerColor = markerStatus === 'complete'
-            ? 'rgba(0,242,148,0.92)'
-            : markerStatus === 'blocked'
-            ? 'rgba(255,92,92,0.92)'
-            : markerStatus === 'pending'
-            ? 'rgba(143,214,255,0.92)'
-            : markerStatus === 'pushed'
-            ? 'rgba(255,184,77,0.92)'
-            : accentColor;
-          return (
-            <div
-              key={`marker-${index}`}
-              style={{
-                position: 'absolute',
-                left: `${((index + 1) / markers.length) * 100}%`,
-                top: '50%',
-                width: '5px',
-                height: '5px',
-                borderRadius: '999px',
-                background: markerColor,
-                transform: 'translate(-50%, -50%)',
-                boxShadow: `0 0 0 1px rgba(20,20,24,0.94), 0 0 8px ${markerColor}`,
-              }}
-            />
-          );
-        })}
-      </div>
-    )}
-  </div>
-);
 
 function buildTaskContext(task) {
   const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
@@ -763,7 +725,7 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
           </div>
         )}
 
-        <ProgressRail percent={progressMeta.percent} accentColor={accentColor} markers={progressMeta.markers} />
+        <SegmentedProgressRail percent={progressMeta.percent} accentColor={accentColor} segments={progressMeta.markers} compact />
       </MotionDiv>
 
       <AnimatePresence>
