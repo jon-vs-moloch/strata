@@ -466,10 +466,10 @@ const isDirectCommunication = (message) => {
     if (sourceActor === 'task_runner' && act !== 'response' && act !== 'question') {
       return false;
     }
-    if (sourceActor === 'chat_runtime' || sourceActor === 'agent') {
+    if (act === 'response' || act === 'question') {
       return true;
     }
-    if (!sourceKind || sourceKind === 'chat_reply' || sourceKind === 'chat_error' || (sourceKind === 'tool_progress' && sourceActor === 'chat_runtime')) {
+    if (!sourceKind || sourceKind === 'chat_reply' || sourceKind === 'chat_error') {
       return true;
     }
   }
@@ -490,6 +490,9 @@ const eventAlignmentForMessage = (message) => {
   const sourceActor = normalizeMessageSourceActor(message);
   if (sourceKind === 'feedback_event' || sourceActor === 'user_opened' || sourceActor === 'message_feedback') {
     return 'right';
+  }
+  if (sourceActor === 'chat_runtime' || sourceActor === 'agent') {
+    return 'left';
   }
   return 'center';
 };
@@ -591,6 +594,13 @@ const messageSenderKey = (message, lane) => {
 const messageSenderTitle = (message, lane, participantNames = {}) => {
   if (message?.role === 'user') return participantNames?.user || 'You';
   if (isDirectCommunication(message)) {
+    const messageLane = getMessageLane(message, lane);
+    if (messageLane === 'agent') return participantNames?.agent || 'Agent';
+    return participantNames?.trainer || 'Trainer';
+  }
+  const eventAlignment = eventAlignmentForMessage(message);
+  if (eventAlignment === 'right') return participantNames?.user || 'You';
+  if (eventAlignment === 'left') {
     const messageLane = getMessageLane(message, lane);
     if (messageLane === 'agent') return participantNames?.agent || 'Agent';
     return participantNames?.trainer || 'Trainer';
