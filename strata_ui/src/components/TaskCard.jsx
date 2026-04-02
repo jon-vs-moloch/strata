@@ -206,110 +206,27 @@ const ContextPill = ({ label, value, tone = 'neutral' }) => {
   );
 };
 
-const TaskGroup = ({ title, tasks, defaultExpanded = false, onArchive, nowMs, laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench }) => {
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  if (tasks.length === 0) return null;
+const sortAttemptsChronologically = (attempts = []) => (
+  [...attempts].sort((left, right) => {
+    const leftAt = parseTimestamp(left?.started_at)?.getTime() || 0;
+    const rightAt = parseTimestamp(right?.started_at)?.getTime() || 0;
+    return leftAt - rightAt;
+  })
+);
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
-      <button 
-        onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-        style={{
-          background: 'rgba(255,255,255,0.03)', border: 'none', display: 'flex', alignItems: 'center', gap: '8px',
-          color: '#666', fontSize: '10px', fontWeight: 800, textTransform: 'uppercase',
-          letterSpacing: '0.1em', cursor: 'pointer', padding: '6px 12px', borderRadius: '6px',
-          width: 'fit-content', marginLeft: '12px'
-        }}
-      >
-        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        {title} · {tasks.length}
-      </button>
-      <AnimatePresence>
-        {expanded && (
-          <MotionDiv
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'hidden' }}
-          >
-            {tasks.map((t) => (
-              <TaskCard
-                key={t.id}
-                task={t}
-                onArchive={onArchive}
-                isNested={true}
-                nowMs={nowMs}
-                laneDetail={laneDetail}
-                detailLevel={detailLevel}
-                onOpenProcedure={onOpenProcedure}
-                onOpenTask={onOpenTask}
-                onOpenWorkbench={onOpenWorkbench}
-              />
-            ))}
-          </MotionDiv>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-};
-
-const OlderAttemptsGroup = ({ attempts, taskUpdatedAt, nowMs, totalAttempts, laneDetail = null, taskId = null, detailLevel = 'compact' }) => {
-  const [expanded, setExpanded] = useState(false);
-  if (!attempts.length) return null;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
-      <button
-        onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
-        style={{
-          background: 'rgba(255,255,255,0.03)',
-          border: 'none',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          color: '#666',
-          fontSize: '10px',
-          fontWeight: 800,
-          textTransform: 'uppercase',
-          letterSpacing: '0.1em',
-          cursor: 'pointer',
-          padding: '6px 12px',
-          borderRadius: '6px',
-          width: 'fit-content',
-          marginLeft: '12px',
-        }}
-      >
-        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-        Older Attempts · {attempts.length}
-      </button>
-      <AnimatePresence>
-        {expanded && (
-          <MotionDiv
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            style={{ display: 'flex', flexDirection: 'column', gap: '6px', overflow: 'hidden' }}
-          >
-            {attempts.map((attempt, idx) => (
-              <AttemptRow
-                key={attempt.id}
-                attempt={attempt}
-                taskId={taskId}
-                index={idx + 4}
-                totalAttempts={totalAttempts}
-                taskUpdatedAt={taskUpdatedAt}
-                defaultExpanded={false}
-                nowMs={nowMs}
-                hasNewerAttempt={true}
-                laneDetail={laneDetail}
-                detailLevel={detailLevel}
-              />
-            ))}
-          </MotionDiv>
-        )}
-      </AnimatePresence>
-    </div>
-  );
+const findActivePathIds = (nodes, targetId) => {
+  const normalizedTarget = String(targetId || '').trim();
+  if (!normalizedTarget) return new Set();
+  const visit = (items) => {
+    for (const item of items || []) {
+      if (!item) continue;
+      if (String(item.id || '') === normalizedTarget) return [String(item.id)];
+      const childPath = visit(item.children || []);
+      if (childPath.length) return [String(item.id), ...childPath];
+    }
+    return [];
+  };
+  return new Set(visit(nodes));
 };
 
 const InterventionWidget = ({ taskId, taskSessionId, taskLane, pendingQuestion, onResolve }) => {
@@ -558,8 +475,9 @@ const StructuredArtifactPanel = ({ artifactDisplay }) => {
   );
 };
 
-const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench }) => {
-  const defaultExpanded = useMemo(() => !TERMINAL_STATUSES.has(task.status), [task.status]);
+const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench, activePathIds = new Set() }) => {
+  const isOnActivePath = activePathIds?.has?.(String(task.id)) || false;
+  const defaultExpanded = useMemo(() => isOnActivePath || !TERMINAL_STATUSES.has(task.status), [task.status, isOnActivePath]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const style = STATUS_MAP[task.status] ?? DEFAULT_STATUS;
@@ -570,18 +488,8 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
   const longDescription = descriptionText.length > 420 || descriptionText.split('\n').length > 8;
   const progressMeta = useMemo(() => describeTaskProgress(task), [task]);
 
-  const children = task.children || [];
-  const attempts = Array.isArray(task.attempts) ? task.attempts : [];
-  const visibleAttempts = attempts.slice(0, 3);
-  const olderAttempts = attempts.slice(3);
-  const pastStatuses = ['complete', 'abandoned', 'cancelled'];
-  const futureStatuses = ['pending'];
-  
-  const pastTasks = children.filter(c => pastStatuses.includes(c.status));
-  const futureTasks = children.filter(c => futureStatuses.includes(c.status));
-  // Fallback: If it's not past or future, it belongs in present
-  const presentTasks = children.filter(c => !pastStatuses.includes(c.status) && !futureStatuses.includes(c.status));
-  
+  const children = Array.isArray(task.children) ? task.children : [];
+  const attempts = useMemo(() => sortAttemptsChronologically(Array.isArray(task.attempts) ? task.attempts : []), [task.attempts]);
   const hasChildren = children.length > 0 || attempts.length > 0;
   const taskContext = buildTaskContext(task);
   const compactRoute = taskContext.route.slice(0, isExpanded ? taskContext.route.length : 3);
@@ -798,39 +706,44 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
             {attempts.length > 0 && (
                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>ATTEMPTS</div>
-                {visibleAttempts.map((attempt, idx) => (
+                {attempts.map((attempt, idx) => (
                   <AttemptRow
-                    key={attempt.id}
+                    key={attempt.id || attempt.attempt_id || idx}
                     attempt={attempt}
                     taskId={task.id}
                     index={idx + 1}
                     totalAttempts={attempts.length}
                     taskUpdatedAt={task.updated_at}
-                    defaultExpanded={idx === 0 || attempt.outcome !== 'failed'}
+                    defaultExpanded={idx === attempts.length - 1 || (!attempt.outcome && idx >= attempts.length - 2)}
                     nowMs={nowMs}
-                    hasNewerAttempt={idx > 0}
+                    hasNewerAttempt={idx < attempts.length - 1}
                     laneDetail={laneDetail}
                     detailLevel={detailLevel}
                   />
                 ))}
-                {olderAttempts.length > 0 && (
-                  <OlderAttemptsGroup
-                    attempts={olderAttempts}
-                    taskUpdatedAt={task.updated_at}
-                    nowMs={nowMs}
-                    totalAttempts={attempts.length}
-                    laneDetail={laneDetail}
-                    taskId={task.id}
-                    detailLevel={detailLevel}
-                  />
-                )}
                </div>
             )}
-            
-            {/* Grouped Child Tasks */}
-            <TaskGroup title="Present Children" tasks={presentTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} onOpenProcedure={onOpenProcedure} onOpenTask={onOpenTask} onOpenWorkbench={onOpenWorkbench} />
-            <TaskGroup title="Recently Completed" tasks={pastTasks} defaultExpanded={false} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} onOpenProcedure={onOpenProcedure} onOpenTask={onOpenTask} onOpenWorkbench={onOpenWorkbench} />
-            <TaskGroup title="Queued / Pending" tasks={futureTasks} defaultExpanded={true} onArchive={onArchive} nowMs={nowMs} laneDetail={laneDetail} detailLevel={detailLevel} onOpenProcedure={onOpenProcedure} onOpenTask={onOpenTask} onOpenWorkbench={onOpenWorkbench} />
+
+            {children.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ fontSize: '9px', fontWeight: 800, color: '#444', letterSpacing: '0.1em', marginLeft: '12px' }}>SUBTASKS</div>
+                {children.map((child) => (
+                  <TaskCard
+                    key={child.id}
+                    task={child}
+                    onArchive={onArchive}
+                    isNested={true}
+                    nowMs={nowMs}
+                    laneDetail={laneDetail}
+                    detailLevel={detailLevel}
+                    onOpenProcedure={onOpenProcedure}
+                    onOpenTask={onOpenTask}
+                    onOpenWorkbench={onOpenWorkbench}
+                    activePathIds={activePathIds}
+                  />
+                ))}
+              </div>
+            )}
           </MotionDiv>
         )}
       </AnimatePresence>
@@ -1001,6 +914,7 @@ const TaskCard = memo(TaskCardComponent, (prev, next) => (
   prev.nowMs === next.nowMs &&
   prev.laneDetail === next.laneDetail &&
   prev.detailLevel === next.detailLevel &&
+  prev.activePathIds === next.activePathIds &&
   prev.onOpenProcedure === next.onOpenProcedure &&
   prev.onOpenTask === next.onOpenTask &&
   prev.onOpenWorkbench === next.onOpenWorkbench

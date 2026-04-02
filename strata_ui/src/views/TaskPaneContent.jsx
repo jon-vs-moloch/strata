@@ -12,6 +12,21 @@ const TelemetryCell = ({ value, label }) => (
   </div>
 );
 
+const findActivePathIds = (nodes, targetId) => {
+  const normalizedTarget = String(targetId || '').trim();
+  if (!normalizedTarget) return new Set();
+  const visit = (items) => {
+    for (const item of items || []) {
+      if (!item) continue;
+      if (String(item.id || '') === normalizedTarget) return [String(item.id)];
+      const childPath = visit(item.children || []);
+      if (childPath.length) return [String(item.id), ...childPath];
+    }
+    return [];
+  };
+  return new Set(visit(nodes));
+};
+
 export default function TaskPaneContent({
   activeNav,
   laneFinishedTasks,
@@ -63,6 +78,13 @@ export default function TaskPaneContent({
     ? focusedTaskPaneTree.filter((task) => task.status !== 'pending')
     : [];
   const queuedTaskRoots = Array.isArray(laneQueuedTasks) ? laneQueuedTasks : [];
+  const focusedTaskId = currentScope === 'home'
+    ? (laneDetails?.agent?.current_task_id || laneDetails?.trainer?.current_task_id || '')
+    : (scopeLaneDetail?.current_task_id || '');
+  const activePathIds = React.useMemo(
+    () => findActivePathIds(focusedTaskPaneTree, focusedTaskId),
+    [focusedTaskPaneTree, focusedTaskId]
+  );
   return (
     <>
       {activeNav !== 'dashboard' && laneFinishedTasks.length > 0 && (
@@ -107,6 +129,7 @@ export default function TaskPaneContent({
                     onOpenProcedure={onOpenProcedure}
                     onOpenTask={onOpenTask}
                     onOpenWorkbench={onOpenWorkbench}
+                    activePathIds={activePathIds}
                   />
                 ))}
               </MotionDiv>
@@ -131,6 +154,7 @@ export default function TaskPaneContent({
                 onOpenProcedure={onOpenProcedure}
                 onOpenTask={onOpenTask}
                 onOpenWorkbench={onOpenWorkbench}
+                activePathIds={activePathIds}
               />
             ))}
           </AnimatePresence>
@@ -154,6 +178,7 @@ export default function TaskPaneContent({
                 onOpenProcedure={onOpenProcedure}
                 onOpenTask={onOpenTask}
                 onOpenWorkbench={onOpenWorkbench}
+                activePathIds={activePathIds}
               />
             ))}
           </div>
