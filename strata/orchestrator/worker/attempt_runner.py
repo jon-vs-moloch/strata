@@ -21,12 +21,132 @@ from strata.eval.job_runner import run_eval_job_task
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_CONTINUATION_DEPTH = 6
+DEFAULT_CONTINUATION_AUDIT_INTERVAL = 3
+DEFAULT_MAX_DECOMPOSITION_DEPTH = 3
+
 
 async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> None:
     try:
         await enqueue_fn(task_id, front=front)
     except TypeError:
         await enqueue_fn(task_id)
+
+
+def _lineage_task_id(task: TaskModel) -> str:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    return str(constraints.get("lineage_root_task_id") or getattr(task, "task_id", "") or "").strip()
+
+
+def _count_ancestor_tasks(storage, task: TaskModel, *, task_types: Optional[set[TaskType]] = None) -> int:
+    if storage is None or not hasattr(storage, "tasks"):
+        return 0
+    total = 0
+    seen = set()
+    current = task
+    while current is not None:
+        parent_task_id = getattr(current, "parent_task_id", None)
+        if not parent_task_id or parent_task_id in seen:
+            break
+        seen.add(parent_task_id)
+        parent = storage.tasks.get_by_id(parent_task_id)
+        if parent is None:
+            break
+        if not task_types or getattr(parent, "type", None) in task_types:
+            total += 1
+        current = parent
+    return total
+
+
+async def _queue_trace_review_guardrail(
+    storage,
+    task: TaskModel,
+    enqueue_fn,
+    *,
+    title: str,
+    description: str,
+    trigger: str,
+    note: str,
+    associated_task_ids: Optional[List[str]] = None,
+) -> TaskModel:
+    payload = {
+        "trace_kind": "task_trace",
+        "task_id": task.task_id,
+        "associated_task_ids": [str(item).strip() for item in list(associated_task_ids or []) if str(item).strip()],
+        "reviewer_tier": "trainer",
+        "emit_followups": True,
+        "persist_to_task": True,
+        "spec_scope": "project",
+        "audit_mode": "internal",
+        "source_task_id": task.task_id,
+        "trigger": trigger,
+        "guardrail_note": note,
+        "provenance": {
+            "source_kind": "task_guardrail",
+            "source_actor": "attempt_runner",
+            "authority_kind": "spec_policy",
+            "authority_ref": trigger,
+            "derived_from": [f"task:{task.task_id}", f"lineage:{_lineage_task_id(task) or task.task_id}"],
+            "governing_spec_refs": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/step-runtime-flow.md",
+            ],
+            "note": note,
+        },
+    }
+    judge = storage.tasks.create(
+        title=title,
+        description=description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.PENDING,
+        flush=False,
+        constraints={
+            "lane": "trainer",
+            "provenance": dict(payload.get("provenance") or {}),
+            "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
+            "system_job": {
+                "kind": "trace_review",
+                "payload": payload,
+            },
+        },
+    )
+    judge.type = TaskType.JUDGE
+    judge.depth = int(getattr(task, "depth", 0) or 0) + 1
+    task.active_child_ids = list(dict.fromkeys([*(list(getattr(task, "active_child_ids", []) or [])), judge.task_id]))
+    task.state = TaskState.PUSHED
+    storage.commit()
+    await _enqueue_task(enqueue_fn, judge.task_id, front=True)
+    return judge
+
+
+async def _resume_parent_repair_task_if_supported(storage, task: TaskModel, enqueue_fn) -> bool:
+    title = str(getattr(task, "title", "") or "").strip().lower()
+    if not title.startswith("recovery plan for "):
+        return False
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if not parent_task_id or storage is None or not hasattr(storage, "tasks"):
+        return False
+    parent = storage.tasks.get_by_id(parent_task_id)
+    if parent is None or getattr(parent, "type", None) not in {TaskType.BUG_FIX, TaskType.REFACTOR, TaskType.IMPL}:
+        return False
+    parent.active_child_ids = [task_id for task_id in list(getattr(parent, "active_child_ids", []) or []) if task_id != task.task_id]
+    if not parent.active_child_ids:
+        parent.active_child_ids = []
+    parent.state = TaskState.PENDING
+    parent_constraints = dict(getattr(parent, "constraints", {}) or {})
+    parent_constraints["recovered_from_stale_decomposition"] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source_task_id": str(task.task_id),
+        "reason": "Parent repair task is now executable directly; collapsing stale recovery-plan shell.",
+    }
+    parent.constraints = parent_constraints
+    task.state = TaskState.COMPLETE
+    task.active_child_ids = []
+    storage.commit()
+    await _enqueue_task(enqueue_fn, parent.task_id, front=True)
+    return True
 
 
 def _is_root_procedure_task(task: TaskModel) -> bool:
@@ -171,11 +291,33 @@ def _tool_branch_matches(branch: Dict[str, Any], outcome: TerminalToolCallOutcom
 
 async def _enqueue_terminal_tool_followup(storage, task: TaskModel, attempt, outcome: TerminalToolCallOutcome, enqueue_fn) -> Optional[TaskModel]:
     parent_constraints = dict(getattr(task, "constraints", {}) or {})
+    continuation_depth = int(parent_constraints.get("continuation_depth") or getattr(task, "depth", 0) or 0)
+    next_continuation_depth = continuation_depth + 1
+    max_continuation_depth = max(1, int(parent_constraints.get("max_continuation_depth") or DEFAULT_MAX_CONTINUATION_DEPTH))
+    continuation_audit_interval = max(1, int(parent_constraints.get("continuation_audit_interval") or DEFAULT_CONTINUATION_AUDIT_INTERVAL))
     branches = list(parent_constraints.get("tool_result_branches") or [])
     selected_branch = next((dict(item or {}) for item in branches if _tool_branch_matches(dict(item or {}), outcome)), None)
     if selected_branch and bool(selected_branch.get("stop_after_tool_step")):
         task.active_child_ids = []
         task.state = TaskState.COMPLETE
+        return None
+    if next_continuation_depth > max_continuation_depth:
+        await _queue_trace_review_guardrail(
+            storage,
+            task,
+            enqueue_fn,
+            title=f"Audit Deep Continuation: {str(getattr(task, 'title', '') or task.task_id)[:84]}",
+            description=(
+                "A continuation chain exceeded the allowed recursion depth. "
+                "Review whether the task is already sufficiently decomposed or should cash out instead of continuing."
+            ),
+            trigger="deep_continuation_guardrail",
+            note=(
+                f"Continuation depth {next_continuation_depth} exceeded max {max_continuation_depth} "
+                f"after terminal tool step `{str(outcome.tool_name or 'tool')}`."
+            ),
+            associated_task_ids=[str(getattr(task, "parent_task_id", "") or "").strip()],
+        )
         return None
 
     child_title = str(
@@ -201,6 +343,10 @@ async def _enqueue_terminal_tool_followup(storage, task: TaskModel, attempt, out
     child_constraints.update(dict((selected_branch or {}).get("constraints") or {}))
     child_constraints["handoff_context"] = handoff
     child_constraints["execution_mode"] = "serial"
+    child_constraints["continuation_depth"] = next_continuation_depth
+    child_constraints["max_continuation_depth"] = max_continuation_depth
+    child_constraints["continuation_audit_interval"] = continuation_audit_interval
+    child_constraints["lineage_root_task_id"] = _lineage_task_id(task) or str(task.task_id)
     child_constraints["terminal_tool_origin"] = {
         "tool_name": str(outcome.tool_name or "").strip(),
         "source_module": str(outcome.source_module or "").strip(),
@@ -222,6 +368,26 @@ async def _enqueue_terminal_tool_followup(storage, task: TaskModel, attempt, out
     task.state = TaskState.PUSHED
     storage.commit()
     await _enqueue_task(enqueue_fn, child.task_id, front=True)
+    if next_continuation_depth % continuation_audit_interval == 0:
+        audit_task = await _queue_trace_review_guardrail(
+            storage,
+            task,
+            enqueue_fn,
+            title=f"Audit Recursive Continuation: {str(getattr(task, 'title', '') or task.task_id)[:80]}",
+            description=(
+                "A continuation branch reached the configured audit interval. "
+                "Verify that the branch remains well-framed and is not recursing unnecessarily."
+            ),
+            trigger="continuation_interval_audit",
+            note=(
+                f"Continuation depth reached {next_continuation_depth}; "
+                f"tool `{str(outcome.tool_name or 'tool')}` completed and follow-up `{child.title}` was queued."
+            ),
+            associated_task_ids=[child.task_id, str(getattr(task, "parent_task_id", "") or "").strip()],
+        )
+        task.active_child_ids = list(dict.fromkeys([child.task_id, audit_task.task_id]))
+        task.state = TaskState.PUSHED
+        storage.commit()
     return child
 
 
@@ -841,7 +1007,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             execution_result = await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.DECOMP:
             execution_result = await _run_decomposition(task, storage, model_adapter, enqueue_fn)
-        elif task.type == TaskType.IMPL:
+        elif task.type in {TaskType.IMPL, TaskType.BUG_FIX, TaskType.REFACTOR}:
             execution_result = await _run_implementation(task, storage, model_adapter, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.JUDGE:
             execution_result = await _run_judge(task, storage, model_adapter)
@@ -995,6 +1161,29 @@ async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn
     return report
 
 async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
+    if await _resume_parent_repair_task_if_supported(storage, task, enqueue_fn):
+        return
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    max_decomposition_depth = max(1, int(constraints.get("max_decomposition_depth") or DEFAULT_MAX_DECOMPOSITION_DEPTH))
+    decomposition_depth = _count_ancestor_tasks(storage, task, task_types={TaskType.DECOMP})
+    if decomposition_depth >= max_decomposition_depth:
+        await _queue_trace_review_guardrail(
+            storage,
+            task,
+            enqueue_fn,
+            title=f"Audit Recursive Decomposition: {str(getattr(task, 'title', '') or task.task_id)[:78]}",
+            description=(
+                "This task has already been decomposed multiple times. "
+                "Audit whether the task is already sufficiently decomposed or whether the decomposition procedure is misbehaving."
+            ),
+            trigger="deep_decomposition_guardrail",
+            note=(
+                f"Decomposition ancestry depth {decomposition_depth} met/exceeded max {max_decomposition_depth}. "
+                "Escalating to audit instead of generating another decomposition layer."
+            ),
+            associated_task_ids=[str(getattr(task, "parent_task_id", "") or "").strip()],
+        )
+        return
     decomp_mod = DecompositionModule(model_adapter, storage)
     decomp = await decomp_mod.decompose_task(task.title, task.description)
     actionable = []
