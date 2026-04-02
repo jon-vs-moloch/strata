@@ -12,12 +12,16 @@ AUDIT_TRACE_REVIEW_PROCEDURE_ID = "audit_trace_review"
 TASK_DECOMPOSITION_PROCEDURE_ID = "task_decomposition"
 PROCESS_REPAIR_PROCEDURE_ID = "process_repair"
 VERIFICATION_REVIEW_PROCEDURE_ID = "verification_review"
+KNOWLEDGE_REFRESH_PROCEDURE_ID = "knowledge_refresh"
+BOOTSTRAP_CYCLE_PROCEDURE_ID = "bootstrap_cycle"
 
 SYSTEM_PROCEDURE_TITLES: Dict[str, str] = {
     AUDIT_TRACE_REVIEW_PROCEDURE_ID: "Audit Trace Review",
     TASK_DECOMPOSITION_PROCEDURE_ID: "Task Decomposition",
     PROCESS_REPAIR_PROCEDURE_ID: "Process Repair",
     VERIFICATION_REVIEW_PROCEDURE_ID: "Verification Review",
+    KNOWLEDGE_REFRESH_PROCEDURE_ID: "Knowledge Refresh",
+    BOOTSTRAP_CYCLE_PROCEDURE_ID: "Bootstrap Cycle",
 }
 
 
@@ -30,12 +34,16 @@ def canonical_system_procedure_id(
     normalized_job = str(system_job_kind or "").strip().lower()
     normalized_process = str(process_name or "").strip().lower()
     normalized_task_type = str(task_type or "").strip().upper()
+    if normalized_job == "bootstrap_cycle":
+        return BOOTSTRAP_CYCLE_PROCEDURE_ID
     if normalized_job == "trace_review":
         return AUDIT_TRACE_REVIEW_PROCEDURE_ID
     if normalized_process == "verification_process":
         return VERIFICATION_REVIEW_PROCEDURE_ID
     if normalized_process:
         return PROCESS_REPAIR_PROCEDURE_ID
+    if normalized_task_type == "KNOWLEDGE_REFRESH":
+        return KNOWLEDGE_REFRESH_PROCEDURE_ID
     if normalized_task_type == "DECOMP":
         return TASK_DECOMPOSITION_PROCEDURE_ID
     return None

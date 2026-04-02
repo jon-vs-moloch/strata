@@ -40,6 +40,7 @@ from strata.orchestrator.tools_pipeline import ToolsPromotionPipeline
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.orchestrator.worker.telemetry import record_metric
 from strata.storage.models import AttemptOutcome, TaskState
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 
 
 def _trim_result(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -128,6 +129,15 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
     payload = dict(system_job.get("payload") or {})
     if not kind:
         raise ValueError("Task is missing system_job.kind")
+    normalized_constraints = bind_system_procedure(
+        dict(getattr(task, "constraints", {}) or {}),
+        procedure_id=canonical_system_procedure_id(system_job_kind=kind),
+        capability_kind="process",
+        capability_name=f"system_job:{kind}",
+    )
+    if normalized_constraints != dict(getattr(task, "constraints", {}) or {}):
+        task.constraints = normalized_constraints
+        storage.commit()
 
     for prior_attempt in storage.attempts.get_by_task_id(task.task_id):
         if prior_attempt.outcome is None and prior_attempt.ended_at is None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from strata.knowledge import pages as knowledge_pages
+from strata.system_capabilities import BOOTSTRAP_CYCLE_PROCEDURE_ID, canonical_system_procedure_id
 
 
 class DummyParameterRepo:
@@ -111,6 +112,7 @@ def test_enqueue_update_task_marks_knowledge_operation(tmp_path, monkeypatch):
     assert task.constraints["knowledge_slug"] == "seahorses"
     assert task.constraints["knowledge_domain"] == "world"
     assert task.constraints["target_scope"] == "web"
+    assert task.constraints["procedure_id"] == "knowledge_refresh"
 
 
 def test_enqueue_update_task_supports_maintenance_operations(tmp_path, monkeypatch):
@@ -161,6 +163,38 @@ def test_enqueue_update_task_dedupes_existing_open_refresh(tmp_path, monkeypatch
     assert second.constraints["related_knowledge_slugs"] == ["constitution", "system-substrates"]
 
 
+def test_enqueue_update_task_compacts_trace_heavy_evidence_and_sets_source_hints(tmp_path, monkeypatch):
+    monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
+    storage = DummyStorage()
+    store = knowledge_pages.KnowledgePageStore(storage)
+
+    long_hint = "This is an extremely long trace-review evidence hint " + ("x" * 400)
+    task = store.enqueue_update_task(
+        slug="project-spec",
+        reason="trace review suggested a project-spec correction",
+        target_scope="codebase",
+        operation="knowledge_refresh",
+        evidence=[
+            "duplicate",
+            "duplicate",
+            long_hint,
+            "another signal",
+            "third signal",
+            "fourth signal",
+            "fifth signal",
+            "sixth signal",
+            "seventh signal",
+        ],
+    )
+
+    assert task.constraints["procedure_id"] == "knowledge_refresh"
+    assert task.constraints["source_hints"]["preferred_paths"][0] == ".knowledge/specs/project_spec.md"
+    assert len(task.constraints["evidence_hints"]) == 6
+    assert task.constraints["evidence_hints"][0] == "duplicate"
+    assert task.constraints["evidence_hints"][1].endswith("...")
+    assert "Suggested starting points:" in task.description
+
+
 def test_user_access_respects_visibility_and_redaction(tmp_path, monkeypatch):
     monkeypatch.setattr(knowledge_pages, "KNOWLEDGE_PAGE_MIRROR_DIR", tmp_path)
     storage = DummyStorage()
@@ -195,6 +229,10 @@ def test_user_access_respects_visibility_and_redaction(tmp_path, monkeypatch):
 
     operator_page = store.get_page("internal-agent-note", audience="operator")
     assert "Do not disclose this directly." in operator_page["body"]
+
+
+def test_canonical_system_procedure_id_maps_bootstrap_cycle():
+    assert canonical_system_procedure_id(system_job_kind="bootstrap_cycle") == BOOTSTRAP_CYCLE_PROCEDURE_ID
 
 
 def test_access_views_surface_missing_restricted_and_redacted_states(tmp_path, monkeypatch):

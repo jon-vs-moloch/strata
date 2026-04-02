@@ -16,6 +16,8 @@ from strata.orchestrator.user_questions import enqueue_user_question, get_questi
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.system_capabilities import (
     AUDIT_TRACE_REVIEW_PROCEDURE_ID,
+    BOOTSTRAP_CYCLE_PROCEDURE_ID,
+    KNOWLEDGE_REFRESH_PROCEDURE_ID,
     PROCESS_REPAIR_PROCEDURE_ID,
     TASK_DECOMPOSITION_PROCEDURE_ID,
     VERIFICATION_REVIEW_PROCEDURE_ID,
@@ -27,6 +29,33 @@ DEFAULT_PROCEDURE_LANE = "agent"
 STARTUP_SMOKE_PROCEDURE_ID = "startup_sanity_check"
 ONBOARDING_PROCEDURE_ID = "operator_onboarding"
 DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
+    BOOTSTRAP_CYCLE_PROCEDURE_ID: {
+        "procedure_id": BOOTSTRAP_CYCLE_PROCEDURE_ID,
+        "title": "Bootstrap Cycle",
+        "summary": "Generate eval-change proposals, compare them against recent history, run bounded evals, and either promote a candidate or cash out into audit.",
+        "repeatable": True,
+        "lifecycle_state": "draft",
+        "lineage_id": BOOTSTRAP_CYCLE_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
+        "target_lane": "trainer",
+        "task_type": "JUDGE",
+        "instructions": (
+            "Treat bootstrap as a canonical Procedure. Generate proposals, resolve them against recent history, "
+            "evaluate only the novel candidates, and audit the cycle if no candidate is promotable."
+        ),
+        "checklist": [
+            {"id": "generate_proposals", "title": "Generate proposals", "verification": "The configured proposer tiers produce candidate changes."},
+            {"id": "resolve_history", "title": "Resolve against recent history", "verification": "Duplicate or recently-tested candidates are filtered before eval."},
+            {"id": "cash_out_cycle", "title": "Cash out the cycle", "verification": "The cycle either promotes a candidate or triggers an audit instead of silently stalling."},
+        ],
+        "success_criteria": {
+            "deliverables": [
+                "A reviewed set of candidate eval changes",
+                "Either a promotion decision or an explicit audit artifact",
+            ],
+        },
+    },
     AUDIT_TRACE_REVIEW_PROCEDURE_ID: {
         "procedure_id": AUDIT_TRACE_REVIEW_PROCEDURE_ID,
         "title": "Audit Trace Review",
@@ -132,6 +161,33 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
             "deliverables": [
                 "A repaired verification path",
                 "Cleaner verifier incident evidence",
+            ],
+        },
+    },
+    KNOWLEDGE_REFRESH_PROCEDURE_ID: {
+        "procedure_id": KNOWLEDGE_REFRESH_PROCEDURE_ID,
+        "title": "Knowledge Refresh",
+        "summary": "Inspect durable knowledge, gather only missing evidence, and cash out into a synthesized page update rather than open-ended research drift.",
+        "repeatable": True,
+        "lifecycle_state": "draft",
+        "lineage_id": KNOWLEDGE_REFRESH_PROCEDURE_ID,
+        "variant_of": None,
+        "mutable": True,
+        "target_lane": DEFAULT_PROCEDURE_LANE,
+        "task_type": "RESEARCH",
+        "instructions": (
+            "Treat knowledge refresh as a bounded Procedure. Inspect the current page and its canonical sources first, "
+            "gather only missing evidence, then update or queue the durable knowledge outcome without drifting into open-ended repo exploration."
+        ),
+        "checklist": [
+            {"id": "inspect_current_knowledge", "title": "Inspect the current knowledge payload", "verification": "The current page/source state is read before searching for new evidence."},
+            {"id": "gather_missing_evidence", "title": "Gather only missing evidence", "verification": "The branch uses focused sources and avoids broad repo foraging when the task is already narrow."},
+            {"id": "cash_out_update", "title": "Cash out the knowledge result", "verification": "The work ends in a durable page update, refresh proposal, or explicit unresolved attention item."},
+        ],
+        "success_criteria": {
+            "deliverables": [
+                "A bounded knowledge update or refresh result",
+                "Clear provenance for why the knowledge changed",
             ],
         },
     },

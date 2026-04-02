@@ -129,13 +129,27 @@ def enqueue_review_followups(
         ]
         if str(item or "").strip()
     ]
+    def _compact_evidence(rows):
+        compact = []
+        for item in rows:
+            text = " ".join(str(item or "").split()).strip()
+            if not text:
+                continue
+            if len(text) > 220:
+                text = text[:217].rstrip() + "..."
+            if text not in compact:
+                compact.append(text)
+            if len(compact) >= 6:
+                break
+        return compact
+    compact_evidence = _compact_evidence(evidence)
     if trace_kind == "session_trace" and session_id:
         task = knowledge_pages.enqueue_update_task(
             slug="user-profile",
             reason=f"[session_feedback] Distill durable user preferences and chat-quality signal from session '{session_id}'.",
             session_id=session_id,
             target_scope="chat",
-            evidence=evidence,
+            evidence=compact_evidence,
             domain="user",
             operation="knowledge_refresh",
             provenance={
@@ -164,7 +178,7 @@ def enqueue_review_followups(
             reason=f"[trace_review] Session review suggests project-level guidance changes: {str((intervention or {}).get('description') or '').strip()}",
             session_id=session_id,
             target_scope="codebase",
-            evidence=evidence,
+            evidence=compact_evidence,
             domain="project",
             operation="knowledge_refresh",
             provenance={

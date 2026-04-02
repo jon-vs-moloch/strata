@@ -15,7 +15,7 @@ from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.procedures.registry import STARTUP_SMOKE_PROCEDURE_ID, ensure_draft_procedure_for_task, record_procedure_run
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
-from strata.orchestrator.research import ResearchModule
+from strata.orchestrator.research import ResearchModule, _normalize_research_context_hints
 from strata.orchestrator.decomposition import DecompositionModule
 from strata.orchestrator.implementation import ImplementationModule
 from strata.eval.job_runner import run_eval_job_task
@@ -439,6 +439,13 @@ async def _enqueue_terminal_tool_followup(storage, task: TaskModel, attempt, out
         "tool_name": str(outcome.tool_name or "").strip(),
         "source_module": str(outcome.source_module or "").strip(),
     }
+    if str(child_constraints.get("knowledge_operation") or "").strip().lower() == "knowledge_refresh":
+        child_constraints = bind_system_procedure(
+            child_constraints,
+            procedure_id=canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH"),
+            capability_kind="procedure",
+            capability_name="knowledge_refresh",
+        )
 
     child = storage.tasks.create(
         title=child_title,
@@ -1221,6 +1228,21 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         return False, e, attempt
 
 async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn=None, attempt_id=None):
+    existing_constraints = dict(getattr(task, "constraints", {}) or {})
+    normalized_constraints = _normalize_research_context_hints(existing_constraints)
+    if (
+        str(normalized_constraints.get("knowledge_operation") or "").strip().lower() == "knowledge_refresh"
+        and str(normalized_constraints.get("procedure_id") or "").strip().lower() != canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH")
+    ):
+        normalized_constraints = bind_system_procedure(
+            normalized_constraints,
+            procedure_id=canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH"),
+            capability_kind="procedure",
+            capability_name="knowledge_refresh",
+        )
+    if normalized_constraints != existing_constraints:
+        task.constraints = normalized_constraints
+        storage.commit()
     research = ResearchModule(model_adapter, storage, enqueue_task=enqueue_fn)
     task_trajectory = _build_task_trajectory(storage, task)
     context_hints = dict(task.constraints or {})

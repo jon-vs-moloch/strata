@@ -26,6 +26,7 @@ from strata.knowledge.page_payloads import (
     split_sections,
 )
 from strata.storage.models import ParameterModel, TaskModel, TaskState, TaskType
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 
 
 KNOWLEDGE_PAGE_INDEX_KEY = "knowledge_pages:index"
@@ -36,6 +37,47 @@ KNOWLEDGE_PAGE_MIRROR_DIR = Path("docs/spec/kb")
 
 def _page_key(slug: str) -> str:
     return f"{KNOWLEDGE_PAGE_KEY_PREFIX}{slugify_page_title(slug)}"
+
+
+def _compact_evidence_hints(evidence: Optional[List[str]], *, limit: int = 6, char_limit: int = 220) -> List[str]:
+    rows: List[str] = []
+    for item in evidence or []:
+        text = " ".join(str(item or "").split()).strip()
+        if not text:
+            continue
+        if len(text) > char_limit:
+            text = text[: char_limit - 3].rstrip() + "..."
+        if text not in rows:
+            rows.append(text)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _knowledge_source_hints(slug: str) -> Dict[str, Any]:
+    normalized = slugify_page_title(slug)
+    if normalized == "project-spec":
+        return {
+            "preferred_paths": [
+                ".knowledge/specs/project_spec.md",
+                ".knowledge/specs/constitution.md",
+                "docs/spec/step-runtime-flow.md",
+            ],
+            "guidance": "Start with the canonical project spec surfaces and update the durable guidance directly before broadening into implementation files.",
+        }
+    if normalized == "user-profile":
+        return {
+            "preferred_paths": [
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/communication-model.md",
+            ],
+            "guidance": "Start from the durable user/session guidance surfaces and only widen scope if the current profile cannot be updated from existing evidence.",
+        }
+    return {}
+
+
+def get_knowledge_source_hints(slug: str) -> Dict[str, Any]:
+    return dict(_knowledge_source_hints(slug))
 
 class KnowledgePageStore:
     """
@@ -447,6 +489,8 @@ class KnowledgePageStore:
         page = self.get_page(normalized_slug)
         title = page.get("title") or normalized_slug.replace("-", " ").title()
         resolved_domain = normalize_domain(domain or page.get("domain"))
+        compact_evidence = _compact_evidence_hints(evidence)
+        source_hints = _knowledge_source_hints(normalized_slug)
         description = (
             f"Update the knowledge page '{title}' ({normalized_slug}).\n"
             f"Reason: {reason}\n"
@@ -458,8 +502,12 @@ class KnowledgePageStore:
         normalized_related = [slugify_page_title(item) for item in (related_slugs or []) if str(item).strip()]
         if normalized_related:
             description += "\nRelated pages:\n" + "\n".join(f"- {item}" for item in normalized_related[:10])
-        if evidence:
-            description += "\nEvidence hints:\n" + "\n".join(f"- {hint}" for hint in evidence[:10])
+        if compact_evidence:
+            description += "\nEvidence hints:\n" + "\n".join(f"- {hint}" for hint in compact_evidence)
+        if source_hints:
+            description += "\nSuggested starting points:\n" + "\n".join(
+                f"- {path}" for path in list(source_hints.get("preferred_paths") or [])[:6]
+            )
         existing = None
         if hasattr(self.storage, "session"):
             existing = (
@@ -495,11 +543,13 @@ class KnowledgePageStore:
                 str(existing_constraints.get("knowledge_slug") or "").strip() == normalized_slug
                 and str(existing_constraints.get("knowledge_operation") or "").strip() == str(operation or "").strip()
             ):
-                merged_hints = list(dict.fromkeys([*(existing_constraints.get("evidence_hints") or []), *(evidence or [])]))
+                merged_hints = _compact_evidence_hints([*(existing_constraints.get("evidence_hints") or []), *compact_evidence], limit=8)
                 merged_related = list(dict.fromkeys([*(existing_constraints.get("related_knowledge_slugs") or []), *normalized_related]))
                 existing_constraints["evidence_hints"] = merged_hints
                 existing_constraints["related_knowledge_slugs"] = merged_related
                 existing_constraints["reason"] = reason
+                if source_hints:
+                    existing_constraints["source_hints"] = source_hints
                 existing.constraints = existing_constraints
                 existing.description = description
                 return existing
@@ -508,16 +558,20 @@ class KnowledgePageStore:
             description=description,
             session_id=session_id,
             state=TaskState.PENDING,
-            constraints={
+            constraints=bind_system_procedure({
                 "target_scope": target_scope,
                 "knowledge_operation": operation,
                 "knowledge_slug": normalized_slug,
                 "knowledge_domain": resolved_domain,
                 "reason": reason,
-                "evidence_hints": evidence or [],
+                "evidence_hints": compact_evidence,
                 "related_knowledge_slugs": normalized_related,
+                "source_hints": source_hints,
                 "provenance": dict(provenance or {}),
             },
+            procedure_id=canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH"),
+            capability_kind="procedure",
+            capability_name="knowledge_refresh"),
         )
         task.type = TaskType.RESEARCH
         return task

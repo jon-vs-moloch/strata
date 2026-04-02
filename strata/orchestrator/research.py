@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, List
 import json
 import hashlib
 from datetime import datetime, timezone
-from strata.knowledge.pages import KnowledgePageStore
+from strata.knowledge.pages import KnowledgePageStore, get_knowledge_source_hints
 from strata.core.lanes import infer_lane_from_session_id
 from strata.feedback.signals import register_feedback_signal
 from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
@@ -20,6 +20,7 @@ from strata.orchestrator.tool_health import record_tool_execution, should_thrott
 from strata.schemas.core import ResearchReport
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.storage.models import TaskModel
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 
 
 DEFAULT_REPO_ANCHORS = [
@@ -137,6 +138,21 @@ def _clip_text(value: Any, limit: int = 500) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _compact_string_list(values: Any, *, limit: int = 6, char_limit: int = 220) -> List[str]:
+    rows: List[str] = []
+    for item in list(values or []):
+        text = " ".join(str(item or "").split()).strip()
+        if not text:
+            continue
+        if len(text) > char_limit:
+            text = text[: char_limit - 3].rstrip() + "..."
+        if text not in rows:
+            rows.append(text)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def _serialize_research_turn(message: Dict[str, Any]) -> Dict[str, Any]:
     payload = {
         "role": str(message.get("role") or ""),
@@ -208,6 +224,52 @@ def _task_trajectory_block(task_trajectory: Optional[Dict[str, Any]]) -> str:
             lines.append(f"- Current next-step hint: {next_step_hint}")
     lines.append("- Use this trajectory to avoid repeating already-completed branch moves unless you can justify why repetition is necessary.")
     return "\n" + "\n".join(lines) + "\n"
+
+
+def _normalize_research_context_hints(context_hints: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    normalized = dict(context_hints or {})
+    normalized["spec_paths"] = _compact_string_list(normalized.get("spec_paths") or [], limit=8, char_limit=180)
+    normalized["preferred_start_paths"] = _compact_string_list(
+        normalized.get("preferred_start_paths") or [],
+        limit=6,
+        char_limit=140,
+    )
+    if isinstance(normalized.get("source_hints"), dict):
+        source_hints = dict(normalized.get("source_hints") or {})
+        source_hints["preferred_paths"] = _compact_string_list(source_hints.get("preferred_paths") or [], limit=6, char_limit=140)
+        source_hints["guidance"] = _clip_text(source_hints.get("guidance"), 320)
+        normalized["source_hints"] = source_hints
+    if isinstance(normalized.get("handoff_context"), dict):
+        handoff = dict(normalized.get("handoff_context") or {})
+        handoff["tool_result_preview"] = _clip_text(handoff.get("tool_result_preview"), 900)
+        handoff["tool_result_full"] = _clip_text(handoff.get("tool_result_full"), 1800)
+        if isinstance(handoff.get("parent_branch_state"), dict):
+            parent_branch_state = dict(handoff.get("parent_branch_state") or {})
+            parent_branch_state["findings"] = _compact_string_list(parent_branch_state.get("findings") or [], limit=5, char_limit=180)
+            parent_branch_state["open_child_ids"] = _compact_string_list(parent_branch_state.get("open_child_ids") or [], limit=6, char_limit=48)
+            handoff["parent_branch_state"] = parent_branch_state
+        normalized["handoff_context"] = handoff
+    normalized["reason"] = _clip_text(normalized.get("reason"), 600)
+    normalized["evidence_hints"] = _compact_string_list(normalized.get("evidence_hints") or [], limit=6, char_limit=220)
+    if isinstance(normalized.get("child_branch_state"), dict):
+        branch_state = dict(normalized.get("child_branch_state") or {})
+        branch_state["findings"] = _compact_string_list(branch_state.get("findings") or [], limit=5, char_limit=180)
+        branch_state["open_child_ids"] = _compact_string_list(branch_state.get("open_child_ids") or [], limit=6, char_limit=48)
+        child_rows = list((branch_state.get("children") or {}).values()) if isinstance(branch_state.get("children"), dict) else []
+        branch_state["children_preview"] = [
+            {
+                "task_id": str(item.get("task_id") or ""),
+                "title": _clip_text(item.get("title"), 120),
+                "outcome": str(item.get("outcome") or ""),
+                "failure_kind": str(item.get("failure_kind") or ""),
+            }
+            for item in child_rows[:4]
+            if isinstance(item, dict)
+        ]
+        branch_state["child_count"] = len(child_rows)
+        branch_state.pop("children", None)
+        normalized["child_branch_state"] = branch_state
+    return normalized
 
 
 def _build_iteration_limit_autopsy(
@@ -677,10 +739,12 @@ class ResearchModule:
         
         print(f"Starting autonomous research loop for: {task_description[:50]}...")
         root = repo_path or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        context_hints = context_hints or {}
+        context_hints = _normalize_research_context_hints(context_hints or {})
         repo_snapshot = str(context_hints.get("repo_snapshot") or "").strip()
         spec_paths = context_hints.get("spec_paths") or []
         source_hints = dict(context_hints.get("source_hints") or {})
+        if not source_hints and str(context_hints.get("knowledge_operation") or "").strip().lower() == "knowledge_refresh":
+            source_hints = get_knowledge_source_hints(str(context_hints.get("knowledge_slug") or ""))
         preferred_start_paths = list(
             context_hints.get("preferred_start_paths")
             or source_hints.get("preferred_paths")
