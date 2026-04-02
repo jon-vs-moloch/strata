@@ -7,10 +7,11 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 from strata.communication.primitives import build_communication_decision, deliver_communication_decision
 from strata.core.lanes import infer_lane_from_task
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
+from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.procedures.registry import STARTUP_SMOKE_PROCEDURE_ID, ensure_draft_procedure_for_task, record_procedure_run
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.orchestrator.research import ResearchModule
@@ -129,21 +130,118 @@ def _default_carry_forward_policy() -> Dict[str, Any]:
     }
 
 
+def _task_type_from_name(raw: Any, *, default: TaskType) -> TaskType:
+    if isinstance(raw, TaskType):
+        return raw
+    normalized = str(raw or "").strip().upper()
+    return getattr(TaskType, normalized, default)
+
+
+def _terminal_tool_handoff(outcome: TerminalToolCallOutcome, *, task: TaskModel, attempt_id: str) -> Dict[str, Any]:
+    return {
+        "from_task_id": str(getattr(task, "task_id", "") or ""),
+        "from_task_title": str(getattr(task, "title", "") or ""),
+        "from_attempt_id": str(attempt_id or ""),
+        "tool_call": {
+            "name": str(outcome.tool_name or "").strip(),
+            "arguments": dict(outcome.tool_arguments or {}),
+        },
+        "tool_result_preview": str(outcome.tool_result_preview or "").strip(),
+        "tool_result_full": str(outcome.tool_result_full or "").strip(),
+        "next_step_hint": str(outcome.next_step_hint or "").strip(),
+        "source_module": str(outcome.source_module or "").strip(),
+        "avoid_repeating_first_tool": {
+            "name": str(outcome.tool_name or "").strip(),
+            "reason": "This tool call already ran in the prior explicit step; consume its result before deciding whether to repeat it.",
+        },
+    }
+
+
+def _tool_branch_matches(branch: Dict[str, Any], outcome: TerminalToolCallOutcome) -> bool:
+    expected_tool = str(branch.get("tool_name") or "").strip()
+    if expected_tool and expected_tool != str(outcome.tool_name or "").strip():
+        return False
+    preview = str(outcome.tool_result_preview or "")
+    full_result = str(outcome.tool_result_full or "")
+    result_contains = str(branch.get("result_contains") or "").strip()
+    if result_contains and result_contains not in preview and result_contains not in full_result:
+        return False
+    return True
+
+
+async def _enqueue_terminal_tool_followup(storage, task: TaskModel, attempt, outcome: TerminalToolCallOutcome, enqueue_fn) -> Optional[TaskModel]:
+    parent_constraints = dict(getattr(task, "constraints", {}) or {})
+    branches = list(parent_constraints.get("tool_result_branches") or [])
+    selected_branch = next((dict(item or {}) for item in branches if _tool_branch_matches(dict(item or {}), outcome)), None)
+    if selected_branch and bool(selected_branch.get("stop_after_tool_step")):
+        task.active_child_ids = []
+        task.state = TaskState.COMPLETE
+        return None
+
+    child_title = str(
+        (selected_branch or {}).get("next_title")
+        or outcome.continuation_title
+        or f"Continue after {str(outcome.tool_name or 'tool')}"
+    ).strip()
+    child_description = str(
+        (selected_branch or {}).get("next_description")
+        or outcome.continuation_description
+        or (
+            f"Continue the task after the previous step executed `{str(outcome.tool_name or 'tool')}`. "
+            "Consume the inherited tool result before deciding on any new model move."
+        )
+    ).strip()
+    child_type = _task_type_from_name(
+        (selected_branch or {}).get("task_type") or outcome.continuation_task_type,
+        default=getattr(task, "type", TaskType.RESEARCH),
+    )
+    handoff = _terminal_tool_handoff(outcome, task=task, attempt_id=str(getattr(attempt, "attempt_id", "") or ""))
+    child_constraints = dict(parent_constraints)
+    child_constraints.update(dict(outcome.continuation_constraints or {}))
+    child_constraints.update(dict((selected_branch or {}).get("constraints") or {}))
+    child_constraints["handoff_context"] = handoff
+    child_constraints["execution_mode"] = "serial"
+    child_constraints["terminal_tool_origin"] = {
+        "tool_name": str(outcome.tool_name or "").strip(),
+        "source_module": str(outcome.source_module or "").strip(),
+    }
+
+    child = storage.tasks.create(
+        title=child_title,
+        description=child_description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.PENDING,
+        constraints=child_constraints,
+        flush=False,
+    )
+    child.type = child_type
+    child.depth = int(getattr(task, "depth", 0) or 0) + 1
+    child.repo_path = str(getattr(task, "repo_path", ".") or ".")
+    task.active_child_ids = [child.task_id]
+    task.state = TaskState.PUSHED
+    storage.commit()
+    await _enqueue_task(enqueue_fn, child.task_id, front=True)
+    return child
+
+
 def _terminal_handoff_payload(task: TaskModel, attempt) -> Dict[str, Any]:
     artifacts = dict(getattr(attempt, "artifacts", {}) or {})
     evidence = dict(getattr(attempt, "evidence", {}) or {})
     autopsy = dict(evidence.get("autopsy") or {}) if isinstance(evidence.get("autopsy"), dict) else {}
+    terminal_tool = dict(artifacts.get("terminal_tool_call") or {})
+    tool_call = dict(terminal_tool.get("tool_call") or autopsy.get("tool_call") or {})
     return {
         "task_id": str(getattr(task, "task_id", "") or ""),
         "title": str(getattr(task, "title", "") or ""),
         "attempt_id": str(getattr(attempt, "attempt_id", "") or ""),
         "outcome": str(getattr(getattr(attempt, "outcome", None), "value", getattr(attempt, "outcome", "")) or ""),
         "reason": str(getattr(attempt, "reason", "") or ""),
-        "tool_call": dict(autopsy.get("tool_call") or {}),
-        "tool_result_preview": str(autopsy.get("tool_result_preview") or ""),
-        "tool_result_full": str(autopsy.get("tool_result_full") or ""),
-        "next_step_hint": str(autopsy.get("next_step_hint") or ""),
-        "avoid_repeating_first_tool": dict(autopsy.get("avoid_repeating_first_tool") or {}),
+        "tool_call": tool_call,
+        "tool_result_preview": str(terminal_tool.get("tool_result_preview") or autopsy.get("tool_result_preview") or ""),
+        "tool_result_full": str(terminal_tool.get("tool_result_full") or autopsy.get("tool_result_full") or ""),
+        "next_step_hint": str(terminal_tool.get("next_step_hint") or autopsy.get("next_step_hint") or ""),
+        "avoid_repeating_first_tool": dict(terminal_tool.get("avoid_repeating_first_tool") or autopsy.get("avoid_repeating_first_tool") or {}),
         "failure_kind": str(evidence.get("failure_kind") or autopsy.get("failure_kind") or ""),
         "step_history": list(artifacts.get("step_history") or []),
         "duration_s": artifacts.get("duration_s"),
@@ -689,6 +787,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
     )
 
     try:
+        execution_result = None
         if task.type == TaskType.RESEARCH and _is_root_procedure_task(task):
             await _expand_root_procedure_task(
                 task,
@@ -739,15 +838,62 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
             await notify_fn(task.task_id, task.state.value)
             return True, None, attempt
         if task.type == TaskType.RESEARCH:
-            await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
+            execution_result = await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.DECOMP:
-            await _run_decomposition(task, storage, model_adapter, enqueue_fn)
+            execution_result = await _run_decomposition(task, storage, model_adapter, enqueue_fn)
         elif task.type == TaskType.IMPL:
-            await _run_implementation(task, storage, model_adapter, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
+            execution_result = await _run_implementation(task, storage, model_adapter, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.JUDGE:
-            await _run_judge(task, storage, model_adapter)
+            execution_result = await _run_judge(task, storage, model_adapter)
         else:
             raise NotImplementedError(f"Unsupported task type {task.type}")
+
+        if isinstance(execution_result, TerminalToolCallOutcome):
+            terminal_payload = {
+                "tool_call": {
+                    "name": str(execution_result.tool_name or "").strip(),
+                    "arguments": dict(execution_result.tool_arguments or {}),
+                },
+                "tool_result_preview": str(execution_result.tool_result_preview or "").strip(),
+                "tool_result_full": str(execution_result.tool_result_full or "").strip(),
+                "next_step_hint": str(execution_result.next_step_hint or "").strip(),
+                "avoid_repeating_first_tool": {
+                    "name": str(execution_result.tool_name or "").strip(),
+                    "reason": "This tool already ran in the prior step; consume its result explicitly before deciding whether to repeat it.",
+                },
+                "source_module": str(execution_result.source_module or "").strip(),
+                "metadata": dict(execution_result.metadata or {}),
+            }
+            attempt.artifacts["terminal_tool_call"] = terminal_payload
+            should_flush = enqueue_attempt_observability_artifact(
+                {
+                    "task_id": task.task_id,
+                    "attempt_id": attempt.attempt_id,
+                    "session_id": task.session_id,
+                    "artifact_kind": "terminal_tool_call",
+                    "payload": terminal_payload,
+                }
+            )
+            if should_flush:
+                flush_observability_writes()
+            spawned_followup = await _enqueue_terminal_tool_followup(storage, task, attempt, execution_result, enqueue_fn)
+            if spawned_followup is not None:
+                _emit_task_communication(
+                    storage,
+                    task,
+                    content=(
+                        f"Tool step complete: `{execution_result.tool_name}` executed. "
+                        f"Queued explicit follow-up step '{spawned_followup.title}'."
+                    ),
+                    source_kind="task_tool_step_handoff",
+                )
+            else:
+                _emit_task_communication(
+                    storage,
+                    task,
+                    content=f"Tool step complete: `{execution_result.tool_name}` executed with no follow-up step queued.",
+                    source_kind="task_tool_step_handoff",
+                )
 
         # If we got here without exception, it succeeded
         storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
@@ -760,11 +906,12 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
         attempt.artifacts["step_history"] = list(step_history)
         _update_parent_branch_state(storage, task, attempt)
-            
-        task.state = TaskState.COMPLETE
-        procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
-        if procedure_id:
-            record_procedure_run(storage, procedure_id, outcome="succeeded", source_task_id=task.task_id)
+
+        if task.state != TaskState.PUSHED:
+            task.state = TaskState.COMPLETE
+            procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+            if procedure_id:
+                record_procedure_run(storage, procedure_id, outcome="succeeded", source_task_id=task.task_id)
         storage.commit()
         await notify_fn(task.task_id, task.state.value)
         return True, None, attempt
@@ -834,6 +981,8 @@ async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn
             "session_id": task.session_id,
         },
     )
+    if isinstance(report, TerminalToolCallOutcome):
+        return report
     # Formatter would go here, simplified for brevity
     _emit_task_communication(
         storage,
@@ -843,6 +992,7 @@ async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn
     )
     task.state = TaskState.WORKING
     storage.commit()
+    return report
 
 async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
     decomp_mod = DecompositionModule(model_adapter, storage)
@@ -958,6 +1108,8 @@ async def _run_implementation(task, storage, model_adapter, *, progress_fn=None,
     research_mod = ResearchModule(model_adapter, storage)
     impl_mod = ImplementationModule(model_adapter, storage, research_mod)
     candidate_ids = await impl_mod.implement_task(task.task_id, progress_fn=progress_fn, attempt_id=attempt_id)
+    if isinstance(candidate_ids, TerminalToolCallOutcome):
+        return candidate_ids
     _emit_task_communication(
         storage,
         task,
@@ -966,6 +1118,7 @@ async def _run_implementation(task, storage, model_adapter, *, progress_fn=None,
     )
     task.state = TaskState.WORKING
     storage.commit()
+    return candidate_ids
 
 
 async def _run_judge(task, storage, model_adapter):

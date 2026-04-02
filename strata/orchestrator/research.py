@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from strata.knowledge.pages import KnowledgePageStore
 from strata.core.lanes import infer_lane_from_session_id
 from strata.feedback.signals import register_feedback_signal
+from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.orchestrator.tool_health import record_tool_execution, should_throttle_tool
 from strata.schemas.core import ResearchReport
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
@@ -388,7 +389,7 @@ class ResearchModule:
         task_context: Optional[Dict[str, Any]] = None,
         progress_fn=None,
         attempt_id: Optional[str] = None,
-    ) -> ResearchReport:
+    ) -> ResearchReport | TerminalToolCallOutcome:
         """
         @summary Autonomous agent loop for research. Decomposes the task, queries the web/codebase iteratively, and synthesizes.
         """
@@ -969,23 +970,34 @@ class ResearchModule:
                     failure_kind=failure_kind,
                     details={"tool_result": tool_result[:500]},
                 )
-                raise TaskBoundaryViolationError(
-                    public_message=(
-                        "Research task required a second variance-bearing move after completing a tool interaction. "
-                        "Decompose it into smaller oneshottable research tasks."
+                tool_result_full = tool_result if len(str(tool_result or "")) <= 12000 else ""
+                return TerminalToolCallOutcome(
+                    tool_name=str(func_name or ""),
+                    tool_arguments=dict(args or {}),
+                    tool_result_preview=str(tool_result or "")[:1200],
+                    tool_result_full=str(tool_result_full or ""),
+                    next_step_hint=(
+                        "Consume the inherited tool result in a new explicit step. "
+                        "If it is sufficient, finalize the research; otherwise choose the next bounded move."
                     ),
-                    autopsy=_build_task_boundary_autopsy(
-                        task_description=task_description,
-                        target_scope=target_scope,
-                        task_context=task_context,
-                        response=response,
-                        tool_call=call,
-                        tool_result_preview=tool_result,
-                        tool_result_full=tool_result if len(str(tool_result or "")) <= 12000 else "",
-                        next_step_hint=(
-                            "Split the work so one task can inspect exactly one source or artifact and a later task can synthesize."
-                        ),
+                    source_module="research",
+                    metadata={
+                        "target_scope": target_scope,
+                        "task_description": task_description,
+                    },
+                    continuation_title=f"Continue research after {str(func_name or 'tool')}",
+                    continuation_description=(
+                        f"Continue the research task after the prior step executed `{str(func_name or 'tool')}`. "
+                        "Your first move is to interpret the inherited tool result rather than repeat the same tool call. "
+                        "If the inherited result is already enough, finalize the research; otherwise take one new bounded step."
                     ),
+                    continuation_task_type="RESEARCH",
+                    continuation_constraints={
+                        "target_scope": target_scope,
+                        "terminal_tool_step": True,
+                        "allow_inherited_tool_result": True,
+                        "step_role": "consume_tool_result",
+                    },
                 )
         else:
             raise TaskBoundaryViolationError(

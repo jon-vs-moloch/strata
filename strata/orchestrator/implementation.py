@@ -14,6 +14,7 @@ import json
 import httpx
 from datetime import datetime, timezone
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
+from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
 from strata.experimental.variants import build_stage_scope, build_variant_execution_plan, classify_pool_pruning
 from strata.orchestrator.research import TaskBoundaryViolationError
@@ -169,7 +170,7 @@ class ImplementationModule:
         *,
         progress_fn=None,
         attempt_id: Optional[str] = None,
-    ) -> List[str]:
+    ) -> List[str] | TerminalToolCallOutcome:
         """
         @summary Execute a coding task with a two-pass research strategy.
         """
@@ -182,12 +183,14 @@ class ImplementationModule:
         print(f"Implementing leaf task: {task.title}...")
         
         # Pass 2: Local Research focused on the Files
-        local_research: ResearchReport = await self.researcher.conduct_research(
+        local_research = await self.researcher.conduct_research(
             task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
             repo_path=task.repo_path,
             progress_fn=progress_fn,
             attempt_id=attempt_id,
         )
+        if isinstance(local_research, TerminalToolCallOutcome):
+            return local_research
 
         # Get past failures to avoid infinite loops
         from strata.storage.models import AttemptModel, AttemptOutcome
@@ -339,18 +342,31 @@ class ImplementationModule:
                 else:
                     tool_result = f"Unsupported implementation tool call: {func_name}"
 
-                raise TaskBoundaryViolationError(
-                    public_message=(
-                        "Implementation task required another variance-bearing move after a tool interaction. "
-                        "Decompose it into smaller oneshottable tasks."
+                return TerminalToolCallOutcome(
+                    tool_name=str(func_name or ""),
+                    tool_arguments=dict(args or {}),
+                    tool_result_preview=str(tool_result or "")[:1200],
+                    tool_result_full=str(tool_result if len(str(tool_result or "")) <= 12000 else ""),
+                    next_step_hint=(
+                        "Consume the inherited tool result in a new explicit implementation step. "
+                        "Do not implicitly continue in the same model turn."
                     ),
-                    autopsy=self._build_task_boundary_autopsy(
-                        task=task,
-                        response=response,
-                        variant=variant,
-                        tool_call=call,
-                        tool_result_preview=tool_result,
+                    source_module="implementation",
+                    metadata={
+                        "task_id": task_id,
+                        "variant_id": str(variant.get("variant_id") or "generic"),
+                    },
+                    continuation_title=f"Continue implementation after {str(func_name or 'tool')}",
+                    continuation_description=(
+                        f"Continue implementation after the prior step executed `{str(func_name or 'tool')}`. "
+                        "Read the inherited tool result first, then either produce the implementation artifact or take one new bounded tool action."
                     ),
+                    continuation_task_type="IMPL",
+                    continuation_constraints={
+                        "terminal_tool_step": True,
+                        "allow_inherited_tool_result": True,
+                        "step_role": "consume_tool_result",
+                    },
                 )
 
             from uuid import uuid4

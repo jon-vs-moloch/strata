@@ -54,6 +54,7 @@ The system consists of:
 - Long-running work, deterministic or non-deterministic, must emit progress telemetry so the operator can see forward motion.
 - Deterministic handoff between tasks matters. If a parent attempt already gathered useful evidence, child tasks should inherit an explicit deterministic handoff rather than spending a new variance-bearing attempt re-acquiring the same state.
 - DAG structure determines handoff shape. Serial edges may hand deterministic state directly to the next node; parallel edges must merge through parent-owned branch state.
+- Tool calls terminate a step. If a model emits a tool call, deterministic tool execution belongs to that same attempt, but any later model interpretation of the tool result must happen in a new explicit step or child task.
 
 ## 3. Task
 

@@ -85,6 +85,11 @@ def _attempt_observability_payload(artifact: AttemptObservabilityArtifactModel) 
         recommendation = str(payload.get("recommendation") or "").strip()
         rationale = _clip(payload.get("rationale"), 180)
         summary = " | ".join(part for part in [plan_health, recommendation, rationale] if part)
+    elif artifact.artifact_kind == "terminal_tool_call":
+        tool_name = str(((payload.get("tool_call") or {}).get("name")) or "").strip()
+        preview = _clip(payload.get("tool_result_preview"), 180)
+        next_step_hint = _clip(payload.get("next_step_hint"), 180)
+        summary = " | ".join(part for part in [tool_name, preview, next_step_hint] if part)
     return {
         "artifact_id": artifact.id,
         "task_id": artifact.task_id,
