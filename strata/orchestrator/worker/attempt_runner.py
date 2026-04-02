@@ -999,6 +999,8 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
     dependency_handoff_updated = _inherit_dependency_handoff(storage, task)
     # Start a new Attempt
     attempt = storage.attempts.create(task_id=task.task_id)
+    attempt.artifacts = dict(getattr(attempt, "artifacts", {}) or {})
+    attempt.evidence = dict(getattr(attempt, "evidence", {}) or {})
     constraints_updated = _ensure_procedure_item_source_hints(task)
     if task.state != TaskState.WORKING:
         task.state = TaskState.WORKING
