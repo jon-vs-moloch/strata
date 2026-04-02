@@ -175,6 +175,54 @@ def _tooling_target_for_repeated_failure(task: TaskModel, error: Exception) -> s
     return "task_runtime"
 
 
+def _suggest_tooling_target_files(target: str) -> List[str]:
+    normalized = str(target or "").strip().lower()
+    if not normalized:
+        return []
+    if normalized.startswith("resolution_analysis:"):
+        return [
+            "strata/orchestrator/worker/resolution_policy.py",
+            "strata/schemas/core.py",
+        ]
+    if normalized == "procedure_step_research":
+        return [
+            "strata/orchestrator/research.py",
+            "strata/orchestrator/worker/attempt_runner.py",
+            "strata/experimental/trace_review.py",
+        ]
+    if normalized == "research_execution":
+        return [
+            "strata/orchestrator/research.py",
+            "strata/orchestrator/worker/attempt_runner.py",
+        ]
+    if normalized == "task_decomposition_policy":
+        return [
+            "strata/orchestrator/worker/resolution_policy.py",
+            "strata/orchestrator/background.py",
+            "strata/experimental/trace_review.py",
+        ]
+    if normalized == "task_decomposition":
+        return [
+            "strata/orchestrator/worker/resolution_policy.py",
+            "strata/orchestrator/worker/plan_review.py",
+        ]
+    if normalized == "task_runtime":
+        return [
+            "strata/orchestrator/background.py",
+            "strata/orchestrator/worker/attempt_runner.py",
+            "strata/experimental/trace_review.py",
+        ]
+    tool_name = normalized.removeprefix("resolution_analysis:").strip()
+    if tool_name and re.fullmatch(r"[a-z0-9_]+", tool_name):
+        return [
+            f"strata/tools/{tool_name}.py",
+            f"strata/tools/{tool_name}.experimental.py",
+            f"strata/tools/manifests/{tool_name}.json",
+            f"strata/tools/tests/test_{tool_name}_smoke.py",
+        ]
+    return []
+
+
 def _build_blocked_question(task: TaskModel, *, storage, reasoning: str, error_text: str = "") -> tuple[str, dict]:
     focus = _recovery_focus_task(storage, task)
     focus_title = str(getattr(focus, "title", "") or getattr(task, "title", "") or "this task").strip()
@@ -640,13 +688,16 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         target = resolution_data.tool_modification_target or "unknown_tool"
         improvement_reason = resolution_data.tool_improvement_reason or "unknown"
         repair_prefix, repair_type = _tool_repair_shape(improvement_reason)
+        target_files = _suggest_tooling_target_files(target)
         task.state = TaskState.BLOCKED
         repair_task = storage.tasks.create(
             title=f"{repair_prefix}: {target}",
             description=(
                 "The Orchestrator failed an objective because a tool lane needs intervention. "
                 f"Target: {target}. Improvement reason: {improvement_reason}. "
-                f"Reasoning: {resolution_data.reasoning}."
+                f"Reasoning: {resolution_data.reasoning}. "
+                "Prefer a bounded repair that either updates the responsible runtime files directly or uses the tool-edit "
+                "meta-tools to create/update an experimental tool, manifest, and smoke test before promotion."
             ),
             session_id=task.session_id,
             state=TaskState.PENDING,
@@ -661,6 +712,8 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                 "tool_modification_target": target,
                 "tool_improvement_reason": improvement_reason,
                 "tool_improvement_reasoning": resolution_data.reasoning,
+                "target_files": target_files,
+                "tooling_repair_mode": "direct_or_meta_tool",
             },
         )
         storage.commit()
