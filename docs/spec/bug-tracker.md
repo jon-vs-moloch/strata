@@ -77,6 +77,7 @@ Suggested severity labels:
   - lane snapshot reconciliation against durable task/attempt state is safer now
 - Remaining problem:
   - UI derivation still is not fully scope-independent and truthful in all cases
+  - top lane/scope cards should present the same runtime truth regardless of which scope the operator is currently viewing; scoped drill-down logic must not leak into those summary cards
 
 ### `P1` Desktop updater path is still not trustworthy
 

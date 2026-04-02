@@ -160,6 +160,7 @@ Near-term product backlog:
 - replace raw structured metadata blobs with purpose-built displays wherever the structure is known
 - age completed work automatically from recent -> legacy -> archived without requiring user cleanup
 - summarize and archive stale message/task clutter automatically rather than expecting user housekeeping
+- distinguish canonical knowledge pages from durable sources and ephemeral sources explicitly in the product; manuals/specs/reference docs should read differently from ingest candidates like reports, traces, or scratch notes
 - reduce the right-rail operational telemetry panel to a lightweight status summary once the task pane itself communicates task state well; verbose telemetry should move to dedicated inspection surfaces instead of dominating the default task view
 - eventually support capability/profile gating across shells, including simplified user modes, power-user/developer modes, and stricter enterprise-managed visibility/control profiles
 - maintain a first-class bug tracker so runtime defects and truthfulness gaps become durable system work rather than ephemeral thread-local observations; see [bug-tracker.md](/Users/jon/Projects/strata/docs/spec/bug-tracker.md)
@@ -219,6 +220,7 @@ Follow-up work remains and should stay on the roadmap:
 - harden inbound communication safety: sandbox and inspect incoming communications/attachments, and probe for prompt injection or similar hostile control attempts before granting them trusted status
 - support website publishing as a default showcase capability; "Strata made my website" should be a normal out-of-the-box product story
 - add a low-motion visual polish pass for the shell, including the option for an almost-static geological/strata background treatment that reads as wallpaper first and animation second
+- add an alpha-polish and repo-hygiene push for early external distribution: remove stale build artifacts from the product path, tighten repo cleanliness, improve packaging truthfulness, and make the repo/app presentable to testers and partners before full release
 - add an explicit alpha-polish/release-readiness track: remove stale build artifacts, shrink accidental repo noise, harden packaging surfaces, and prepare the project for early testers and partner demos without pretending it is GA-ready
 - audit unnecessary, duplicated, and inefficient work as a first-class product/runtime concern; start with prompt/context guidance and telemetry, then add code rails only where softer interventions demonstrably fail
 
