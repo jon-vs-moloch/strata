@@ -99,14 +99,16 @@ class ModelAdapter:
             return {
                 "status": response.status,
                 "content": response.content,
+                "message": response.content if response.status == "error" else "",
                 "tool_calls": response.tool_calls,
                 "model": response.model,
                 "provider": response.provider,
                 "usage": response.usage or {},
+                "error": response.error or {},
             }
         except Exception as e:
             persist_provider_telemetry_snapshot()
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": str(e), "content": str(e), "error": {"kind": e.__class__.__name__}}
 
     def extract_yaml(self, raw_content: str) -> Dict[str, Any]:
         """

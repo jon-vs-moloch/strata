@@ -43,6 +43,9 @@ class ModelResponse(BaseModel):
     model: str = Field(...)
     provider: str = Field(...)
     usage: Optional[Dict[str, Any]] = Field(default=None)
+    message: Optional[str] = Field(default=None)
+    error: Optional[Dict[str, Any]] = Field(default=None)
+    error: Optional[Dict[str, Any]] = Field(default=None)
 
 @dataclass
 class ThrottleState:
@@ -278,6 +281,32 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             return 0.9
         return 0.8
 
+    def _payload_summary(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        tools = [str(((item or {}).get("function") or {}).get("name") or "") for item in list(payload.get("tools") or [])]
+        messages = list(payload.get("messages") or [])
+        return {
+            "model": str(payload.get("model") or ""),
+            "message_count": len(messages),
+            "message_roles": [str((item or {}).get("role") or "") for item in messages[-6:]],
+            "tool_names": [name for name in tools if name],
+            "has_response_format": "response_format" in payload,
+            "reasoning_effort": payload.get("reasoning_effort"),
+            "has_reasoning_config": "reasoning" in payload,
+            "max_tokens": payload.get("max_tokens"),
+            "temperature": payload.get("temperature"),
+            "top_p": payload.get("top_p"),
+        }
+
+    def _parse_error_body(self, response: httpx.Response) -> Dict[str, Any]:
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                return body
+            return {"raw": body}
+        except Exception:
+            text = str(response.text or "").strip()
+            return {"raw_text": text[:4000]}
+
     def _local_greedy_probe_multiplier(self, telemetry: ProviderTelemetryState) -> float:
         policy = self.get_runtime_policy()
         if str(policy.get("throttle_mode") or "hard").strip().lower() != "greedy":
@@ -400,6 +429,22 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                 ]
         return normalized
 
+    def _request_summary(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        messages = list(payload.get("messages") or [])
+        return {
+            "model": str(payload.get("model") or self.model_id),
+            "message_count": len(messages),
+            "roles": [str((item or {}).get("role") or "") for item in messages[-6:]],
+            "tool_names": [
+                str(((item or {}).get("function") or {}).get("name") or "")
+                for item in list(payload.get("tools") or [])
+            ],
+            "has_response_format": "response_format" in payload,
+            "temperature": payload.get("temperature"),
+            "top_p": payload.get("top_p"),
+            "max_tokens": payload.get("max_tokens"),
+        }
+
     async def complete(self, messages: List[Dict[str, str]], **kwargs) -> ModelResponse:
         max_retries = kwargs.get("max_retries", 3)
         backoff_time = 2.0
@@ -471,9 +516,18 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         )
                 except httpx.HTTPStatusError as e:
                     status_code = e.response.status_code
+                    response_text = str(e.response.text or "").strip()
+                    clipped_body = response_text[:4000]
+                    response_json: Optional[Dict[str, Any]] = None
+                    try:
+                        parsed = e.response.json()
+                        if isinstance(parsed, dict):
+                            response_json = parsed
+                    except Exception:
+                        response_json = None
                     telemetry.error_count += 1
                     telemetry.last_status_code = status_code
-                    telemetry.last_error = str(e)
+                    telemetry.last_error = f"HTTP {status_code}: {clipped_body or str(e)}"
                     telemetry.total_latency_s += asyncio.get_running_loop().time() - started_at
                     retry_after = e.response.headers.get("retry-after")
                     retry_after_s = 0.0
@@ -502,10 +556,17 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                     self._mark_telemetry_dirty()
                     return ModelResponse(
                         status="error",
-                        content=f"HTTP {status_code}: {e.response.text}",
+                        content=f"HTTP {status_code}: {clipped_body or str(e)}",
                         model=self.model_id,
                         provider=self.provider_id,
                         usage={},
+                        error={
+                            "kind": "http_status_error",
+                            "http_status": status_code,
+                            "response_body": clipped_body,
+                            "response_json": response_json,
+                            "request_summary": self._request_summary(payload),
+                        },
                     )
                 except Exception as e:
                     telemetry.error_count += 1
@@ -525,6 +586,10 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         model=self.model_id,
                         provider=self.provider_id,
                         usage={},
+                        error={
+                            "kind": e.__class__.__name__,
+                            "request_summary": self._request_summary(payload),
+                        },
                     )
                 finally:
                     self._mark_telemetry_dirty()
@@ -536,6 +601,10 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             model=self.model_id, 
             provider=self.provider_id,
             usage={},
+            error={
+                "kind": "max_retries_reached",
+                "request_summary": self._request_summary(payload),
+            },
         )
 
 class LocalProvider(GenericOpenAICompatibleProvider):

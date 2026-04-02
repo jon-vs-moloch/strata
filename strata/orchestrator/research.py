@@ -1004,7 +1004,13 @@ class ResearchModule:
                 flush_observability_writes()
 
         if response.get("status") == "error":
-            err_msg = response.get("message", "Unknown model adapter error.")
+            err_msg = str(response.get("message") or response.get("content") or "Unknown model adapter error.").strip()
+            error_details = dict(response.get("error") or {})
+            if error_details:
+                raise Exception(
+                    f"Research loop aborted: Model adapter returned error: {err_msg}. "
+                    f"Context: {json.dumps(error_details, sort_keys=True)[:1600]}"
+                )
             raise Exception(f"Research loop aborted: Model adapter returned error: {err_msg}")
 
         tool_calls = response.get("tool_calls") or []
