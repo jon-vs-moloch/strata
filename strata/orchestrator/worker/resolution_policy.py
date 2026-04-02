@@ -10,6 +10,7 @@ import re
 from typing import Optional, List
 from strata.core.lanes import infer_lane_from_task
 from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, AttemptOutcome, TaskState, TaskType
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
@@ -620,6 +621,23 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
             failover_title = f"Recovery Plan for {focus_title}"
             failover = _matching_pending_child(title=failover_title, task_type=TaskType.DECOMP)
             if failover is None:
+                failover_constraints = bind_system_procedure(
+                    {
+                        **({"lane": task_lane} if task_lane else {}),
+                        "recovery_focus_task_id": getattr(focus, "task_id", None),
+                        "recovery_focus_title": focus_title,
+                        "recovery_focus_description": focus_description,
+                        "avoid_generic_recovery_shell": True,
+                        "lineage_root_task_id": str(
+                            (dict(getattr(task, "constraints", {}) or {}).get("lineage_root_task_id"))
+                            or getattr(task, "task_id", "")
+                            or ""
+                        ).strip(),
+                    },
+                    procedure_id=canonical_system_procedure_id(task_type="DECOMP"),
+                    capability_kind="procedure",
+                    capability_name="decomposition",
+                )
                 failover = storage.tasks.create(
                     title=failover_title,
                     description=(
@@ -636,13 +654,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
                     type=TaskType.DECOMP,
                     state=TaskState.PENDING,
                     depth=task.depth + 1,
-                    constraints={
-                        **({"lane": task_lane} if task_lane else {}),
-                        "recovery_focus_task_id": getattr(focus, "task_id", None),
-                        "recovery_focus_title": focus_title,
-                        "recovery_focus_description": focus_description,
-                        "avoid_generic_recovery_shell": True,
-                    } if task_lane or focus_title else None,
+                    constraints=failover_constraints,
                 )
             spawned_child_ids.append(failover.task_id)
             storage.commit()
