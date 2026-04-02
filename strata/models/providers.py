@@ -175,6 +175,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         adaptive_ms = 0.0
         if avg_latency_ms >= 2500.0:
             adaptive_ms = max(adaptive_ms, min(15000.0, avg_latency_ms * 0.25))
+        if avg_latency_ms >= 15000.0:
+            adaptive_ms = max(adaptive_ms, min(45000.0, avg_latency_ms * 0.45))
         if error_rate >= 0.15:
             adaptive_ms = max(adaptive_ms, min(20000.0, 1500.0 + (avg_latency_ms * 0.2)))
         return adaptive_ms
@@ -189,7 +191,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         ambient_noise_masking = bool(context.get("ambient_noise_masking", False))
 
         multiplier = {
-            "quiet": 1.5,
+            "quiet": 2.0,
             "balanced": 1.0,
             "aggressive": 0.75,
         }.get(profile, 1.0)
@@ -211,8 +213,22 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             multiplier *= 1.4
         elif str(memory.get("pressure") or "nominal").strip().lower() == "moderate":
             multiplier *= 1.15
+        load_avg = list(cpu.get("load_avg") or [])
+        cpu_count = max(1.0, float(cpu.get("cpu_count") or 1.0))
+        if load_avg:
+            normalized_load = float(load_avg[0] or 0.0) / cpu_count
+            if normalized_load >= 3.0:
+                multiplier *= 1.35
+            elif normalized_load >= 2.0:
+                multiplier *= 1.18
+            elif normalized_load >= 1.25:
+                multiplier *= 1.08
+        if machine_in_use and profile == "quiet":
+            multiplier *= 1.2
         if float(cpu.get("normalized_percent") or 0.0) >= 85.0:
             multiplier *= 1.2
+        elif float(cpu.get("normalized_percent") or 0.0) >= 50.0 and profile == "quiet":
+            multiplier *= 1.1
         return max(0.5, min(multiplier, 2.5))
 
     def _cloud_greedy_probe_multiplier(self, telemetry: ProviderTelemetryState) -> float:
