@@ -11,6 +11,12 @@ The system allows users or internal agents to "pin" specific workspace files int
 - **Budgeting**: The pinning system enforces a default budget (`DEFAULT_LOADED_CONTEXT_BUDGET_TOKENS = 3200`). This is meant for compact, high-value artifacts (standards, manifests, specific module interfaces).
 - **Tool Logic**: The `load_context_file` and `unload_context_file` tools used by the chat interface interact directly with this system.
 
+This should not remain purely automatic or implicit.
+
+- Strata should support deliberate context management as an explicit operator/agent capability.
+- The system should be able to retrieve the original source behind a compacted memory, open new context into the active working set, close stale context, merge related context items, and summarize context items deliberately rather than only through background policy.
+- Automatic context management and deliberate context management should complement each other: background policy keeps context healthy, while explicit tools let the operator or the model reason about context as an object of work.
+
 ---
 
 ## 2. Context-Pressure Observability
@@ -35,3 +41,17 @@ When context reaches dangerous levels (as measured by the `observability` layer)
 - **Truncation**: Snippets are reduced or omitted in favor of page slugs.
 - **Progressive Disclosure**: Force-reads of specific pages instead of wide-context research loops.
 - **Deeper Decomposition**: Automatically breaking the task into smaller subtasks to keep local context windows narrow and "clean."
+
+## 5. Deliberate Context Operations
+
+Context should eventually be searchable, inspectable, and directly operable from inside Strata.
+
+Near-term capability direction:
+
+- search existing context items and compacted memories
+- reopen the original source behind a compacted or summarized context item
+- load a new file/page/artifact into active context deliberately
+- unload or demote a stale context item deliberately
+- merge overlapping context items into a cleaner working bundle
+- summarize or re-summarize a context item for budget reduction
+- expose current active context budget, priorities, and pressure clearly enough that both the user and the model can make informed tradeoffs

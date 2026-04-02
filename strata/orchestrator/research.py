@@ -439,6 +439,37 @@ def _render_task_graph_prompt_block(task_graph_context: Optional[Dict[str, Any]]
     )
 
 
+def _render_research_judgment_block(
+    *,
+    handoff_context: Optional[Dict[str, Any]] = None,
+    task_graph_context: Optional[Dict[str, Any]] = None,
+) -> str:
+    handoff = dict(handoff_context or {})
+    graph = dict(task_graph_context or {})
+    current = dict(graph.get("current_task") or {})
+    depth = int(current.get("depth") or 0)
+    lines = [
+        "[RESEARCH JUDGMENT]",
+        "- Use common sense about what kind of step this is.",
+        "- Search when you are still missing a specific fact or source needed to complete the task.",
+        "- Synthesize when you already have enough evidence from the current branch to explain the answer clearly.",
+        "- Report when the current evidence is already sufficient for the user, the parent task, or durable knowledge storage.",
+        "- Treat another lookup as the exception, not the default. Only do one more lookup if the current evidence is genuinely insufficient.",
+        "- If the current branch has already gathered enough to answer at a useful level, prefer `finalize_research` instead of extending the branch.",
+        "- If the current branch has produced a user-relevant conclusion, prefer reporting or communicating that conclusion rather than silently continuing internal work.",
+        "- If the current branch has produced a durable reusable finding, prefer writing/queuing knowledge maintenance instead of re-reading adjacent files without a clear gap.",
+    ]
+    if handoff:
+        lines.append("- Start by asking: did the inherited tool result already answer the question or narrow it enough that I should synthesize rather than search again?")
+    if depth >= 4:
+        lines.append("- This branch is already fairly deep. Be biased toward synthesis, reporting, or knowledge write-back unless a very specific missing fact blocks completion.")
+    if depth >= 6:
+        lines.append("- This branch is deep enough that another generic lookup is a smell. Only continue searching if you can name the exact missing fact and why the current evidence cannot support a useful answer.")
+    if depth >= 8:
+        lines.append("- At this depth, strongly prefer returning a result, communicating a conclusion, or explicitly escalating uncertainty rather than continuing to forage.")
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def _build_prompt_snapshot_payload(
     *,
     prompt_kind: str,
@@ -576,6 +607,10 @@ def _build_research_system_prompt(
         - Do NOT perform a broad repo scan after inheriting a focused tool result unless you can justify why the inherited result was insufficient.
 """
     task_graph_block = _render_task_graph_prompt_block(task_graph_context)
+    research_judgment_block = _render_research_judgment_block(
+        handoff_context=handoff_context,
+        task_graph_context=task_graph_context,
+    )
 
     return f"""You are an Expert Research Agent building a persistent knowledge library.
 Your primary goal is to decompose the user's research task and iteratively gather data.
@@ -598,7 +633,7 @@ Your current tools: list_directory, read_file, search_web, write_library_file, l
 [LOCAL CONTEXT]
 - Repository paths are relative to the repo root.
 - Canonical spec paths for this task:
-{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{task_graph_block}{codebase_nudge}{continuation_nudge}
+{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{task_graph_block}{research_judgment_block}{codebase_nudge}{continuation_nudge}
 
 When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
 Focus area: {target_scope.upper()} scope."""

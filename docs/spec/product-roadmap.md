@@ -145,14 +145,18 @@ Near-term product backlog:
 - add a scoped chronological `History` view that acts as a queryable event log for both operators and the system
 - make `History` a true provenance ledger: every consequential action should record authority, cause, derived-from links, and governing spec/user references
 - add a first-class operator `Workbench` surface (working title; effectively a universal debugger) that can step through any Strata process end-to-end, pause at arbitrary nodes, inspect exact inputs/context/tool results, regenerate outputs from a chosen node, branch from modified context, and run downstream consequences side-by-side
+- add first-class deliberate context-management surfaces and tools so operators and agents can search context, reopen compacted sources, load/unload context items, merge overlapping context items, and summarize context items intentionally rather than depending only on background policy
 - add a first-class `Tools` view
+- add first-class tool search so the system does not rely on dumping ever-growing tool lists into prompts or UI panels
 - add a first-class `Procedures` view so durable workflows are visible, inspectable, and eventually editable/promotable
+- add first-class procedure search so long-lived workflows remain discoverable and composable as the procedure library grows
 - add a first-class `Kits` surface for bundled artifact groups such as tool packs, procedure bundles, eval suites, or higher-level capability bundles
 - add first-class comms-lane surfaces for email, Slack, Discord, and similar integrations once the underlying routing/safety substrate is ready
 - add first-class schedule/calendar surfaces so Strata can represent both the operator's schedule and its own queued commitments before deeper external calendar integration exists
 - add first-class utility/app surfaces for day-1 tools such as calculator, image generation, website publishing, and similar "it should just work" capability bundles
 - treat all of these work surfaces as interactive operator tooling rather than passive dashboards; `History`, `Tasks`, `Procedures`, `Tools`, and `Knowledge` should all be able to grow bounded edit/control actions over time
 - extend that same interactive rule to the `Workbench`: it should not only replay or inspect flows, but also let the operator substitute tools, models, context, and branching decisions, then observe how downstream execution changes
+- ensure tool and procedure search always surfaces meta-tools and meta-procedures too, so "no exact match" still exposes options like creating, repairing, or extending the capability set
 - replace raw structured metadata blobs with purpose-built displays wherever the structure is known
 - age completed work automatically from recent -> legacy -> archived without requiring user cleanup
 - summarize and archive stale message/task clutter automatically rather than expecting user housekeeping
