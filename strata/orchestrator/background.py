@@ -569,6 +569,100 @@ def _attach_task_incident(task: TaskModel, incident: Dict[str, object]) -> None:
     task.constraints = constraints
 
 
+def _upsert_verification_task(
+    storage,
+    *,
+    task: TaskModel,
+    attempt,
+    verification: Dict[str, object],
+    signal_id: Optional[str] = None,
+    queued_review_task_id: Optional[str] = None,
+    direct_audit_task_id: Optional[str] = None,
+    incident_id: Optional[str] = None,
+) -> TaskModel:
+    normalized_attempt_id = str(getattr(attempt, "attempt_id", "") or "").strip()
+    if not normalized_attempt_id:
+        raise ValueError("attempt_id is required for verification task projection")
+
+    existing = None
+    for row in storage.session.query(TaskModel).filter(TaskModel.parent_task_id == task.task_id).all():
+        constraints = dict(getattr(row, "constraints", {}) or {})
+        if str(constraints.get("inline_process_kind") or "").strip().lower() != "verification":
+            continue
+        if str(constraints.get("verification_attempt_id") or "").strip() != normalized_attempt_id:
+            continue
+        existing = row
+        break
+
+    verdict = str(verification.get("verdict") or "uncertain").strip().lower() or "uncertain"
+    recommended_action = str(verification.get("recommended_action") or "verify_more").strip().lower() or "verify_more"
+    confidence = float(verification.get("confidence") or 0.0)
+    mechanism_failure_kind = str(verification.get("mechanism_failure_kind") or "").strip().lower()
+    failure_modes = list(verification.get("failure_modes") or [])
+    title = f"Verification Review: {str(task.title or task.task_id)[:72]}"
+    description_bits = [
+        f"Verification completed for attempt {normalized_attempt_id[-6:]}.",
+        f"Verdict: {verdict}.",
+        f"Recommended action: {recommended_action}.",
+    ]
+    if mechanism_failure_kind:
+        description_bits.append(f"Mechanism failure: {mechanism_failure_kind}.")
+    if failure_modes:
+        description_bits.append(f"Failure modes: {', '.join(str(item) for item in failure_modes)}.")
+    description = " ".join(description_bits)
+    constraints = bind_system_procedure({
+        "lane": infer_lane_from_task(task),
+        "source_task_id": task.task_id,
+        "inline_process_kind": "verification",
+        "verification_attempt_id": normalized_attempt_id,
+        "verification_recorded_at": str(verification.get("recorded_at") or "").strip(),
+        "verification_summary": {
+            "verdict": verdict,
+            "confidence": confidence,
+            "recommended_action": recommended_action,
+            "failure_modes": failure_modes,
+            "mechanism_failure_kind": mechanism_failure_kind,
+        },
+        "attention_signal_id": str(signal_id or "").strip() or None,
+        "queued_review_task_id": str(queued_review_task_id or "").strip() or None,
+        "direct_audit_task_id": str(direct_audit_task_id or "").strip() or None,
+        "capability_incident_id": str(incident_id or "").strip() or None,
+        "provenance": _provenance_record(
+            source_kind="verifier_review",
+            source_actor="lightweight_verifier",
+            authority_kind="spec_policy",
+            authority_ref="project_inline_verification_as_task",
+            derived_from=[f"task:{task.task_id}", f"attempt:{normalized_attempt_id}"],
+            note=f"Projected inline verification into canonical task history with verdict={verdict}.",
+        ),
+    },
+    procedure_id=canonical_system_procedure_id(process_name="verification_process"),
+    capability_kind="process",
+    capability_name="verification_process")
+
+    if existing is not None:
+        existing.title = title
+        existing.description = description
+        existing.state = TaskState.COMPLETE
+        existing.type = TaskType.JUDGE
+        existing.constraints = constraints
+        return existing
+
+    created = storage.tasks.create(
+        title=title,
+        description=description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.COMPLETE,
+        type=TaskType.JUDGE,
+        depth=int(getattr(task, "depth", 0) or 0) + 1,
+        priority=float(getattr(task, "priority", 0.0) or 0.0),
+        constraints=constraints,
+        flush=False,
+    )
+    return created
+
+
 def _mark_degraded_process(
     storage,
     task: TaskModel,
@@ -1873,18 +1967,30 @@ class BackgroundWorker:
                                     task.task_id,
                                     verification.get("verdict"),
                                 )
+                        queued_review_task_id = None
                         if verifier_signal:
                             queued_review = await queue_task_attention_review(
                                 storage,
                                 task=task,
                                 signal=verifier_signal,
                             )
+                            queued_review_task_id = str((queued_review or {}).get("task_id") or "").strip() or None
                             logger.info(
                                 "Verifier flagged task %s as %s%s",
                                 task.task_id,
                                 verification.get("verdict"),
                                 f" and queued review {queued_review.get('task_id')}" if queued_review else "",
                             )
+                        _upsert_verification_task(
+                            storage,
+                            task=task,
+                            attempt=attempt,
+                            verification=verification,
+                            signal_id=str((verifier_signal or {}).get("signal_id") or "").strip() or None,
+                            queued_review_task_id=queued_review_task_id,
+                            direct_audit_task_id=str((direct_audit or {}).get("task_id") or "").strip() or None,
+                            incident_id=str(verification.get("incident_id") or "").strip() or None,
+                        )
                         storage.commit()
                 except Exception as verifier_err:
                     try:
