@@ -26,7 +26,11 @@ from strata.orchestrator.worker.telemetry import synthesize_model_performance
 from strata.orchestrator.worker.attempt_runner import run_attempt
 from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
 from strata.orchestrator.worker.plan_review import generate_plan_review
-from strata.orchestrator.capability_incidents import record_capability_incident
+from strata.orchestrator.capability_incidents import (
+    annotate_capability_incident,
+    get_capability_incident,
+    record_capability_incident,
+)
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.orchestrator.worker.routing_policy import select_model_tier
 from strata.eval.job_runner import run_eval_job_task
@@ -445,6 +449,25 @@ def _should_queue_direct_audit(verification: Dict[str, object]) -> bool:
     return False
 
 
+def _incident_queue_latched(
+    storage,
+    *,
+    incident_id: str,
+    task_key: str,
+) -> bool:
+    normalized_incident_id = str(incident_id or "").strip()
+    if not normalized_incident_id:
+        return False
+    incident = get_capability_incident(storage, incident_id=normalized_incident_id)
+    if not incident or str(incident.get("status") or "").strip().lower() == "closed":
+        return False
+    metadata = dict(incident.get("metadata") or {})
+    latched_task_id = str(metadata.get(task_key) or "").strip()
+    if not latched_task_id:
+        return False
+    return True
+
+
 async def queue_direct_audit_review(storage, *, task: TaskModel, verification: Dict[str, object]) -> Optional[dict]:
     try:
         from strata.api.main import _queue_eval_system_job
@@ -462,12 +485,14 @@ async def queue_direct_audit_review(storage, *, task: TaskModel, verification: D
         reason_bits.append(f"mechanism_failure_kind={mechanism_failure_kind}")
     session_id = str(task.session_id or "").strip() or None
     incident_id = str(verification.get("incident_id") or "").strip()
+    if incident_id and _incident_queue_latched(storage, incident_id=incident_id, task_key="audit_task_id"):
+        return None
     derived_from = [
         f"task:{task.task_id}",
         *([f"attempt:{verification.get('attempt_id')}"] if verification.get("attempt_id") else []),
         *([f"incident:{incident_id}"] if incident_id else []),
     ]
-    return await _queue_eval_system_job(
+    audit_task = await _queue_eval_system_job(
         storage,
         kind="trace_review",
         title=f"Audit Now: {str(task.title or task.task_id)[:84]}",
@@ -509,6 +534,17 @@ async def queue_direct_audit_review(storage, *, task: TaskModel, verification: D
             "incident_id": incident_id or None,
         },
     )
+    if incident_id and audit_task:
+        annotate_capability_incident(
+            storage,
+            incident_id=incident_id,
+            metadata={
+                "audit_task_id": audit_task.get("task_id"),
+                "audit_requested_at": datetime.now(timezone.utc).isoformat(),
+                "audit_trigger": "verifier_direct_audit",
+            },
+        )
+    return audit_task
 
 
 def _attach_task_incident(task: TaskModel, incident: Dict[str, object]) -> None:
@@ -594,6 +630,13 @@ async def queue_process_repair_task(
     target = str(process_name or "").strip()
     if not target:
         return None
+    normalized_incident_id = str(incident_id or "").strip()
+    if normalized_incident_id and _incident_queue_latched(
+        storage,
+        incident_id=normalized_incident_id,
+        task_key="repair_task_id",
+    ):
+        return None
 
     for existing in storage.session.query(TaskModel).all():
         constraints = dict(getattr(existing, "constraints", {}) or {})
@@ -654,6 +697,16 @@ async def queue_process_repair_task(
     storage.commit()
     storage.tasks.add_dependency(task.task_id, repair_task.task_id)
     storage.commit()
+    if normalized_incident_id:
+        annotate_capability_incident(
+            storage,
+            incident_id=normalized_incident_id,
+            metadata={
+                "repair_task_id": repair_task.task_id,
+                "repair_requested_at": datetime.now(timezone.utc).isoformat(),
+                "repair_target": target,
+            },
+        )
     await enqueue_fn(repair_task.task_id)
     return repair_task
 

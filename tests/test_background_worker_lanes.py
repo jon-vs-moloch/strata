@@ -7,9 +7,12 @@ import asyncio
 from strata.orchestrator.background import (
     BackgroundWorker,
     _preflight_lane_model,
+    queue_direct_audit_review,
+    queue_process_repair_task,
     ensure_blocked_weak_task_review,
     resolution_from_plan_review,
 )
+from strata.orchestrator.capability_incidents import get_capability_incident, record_capability_incident
 from strata.schemas.core import AttemptResolutionSchema
 from strata.orchestrator.worker.idle_policy import run_idle_tasks
 from strata.orchestrator.worker.attempt_runner import _run_decomposition
@@ -415,7 +418,117 @@ def test_lane_idle_policies_can_seed_weak_even_when_other_lane_is_busy(monkeypat
 
 
 def test_runtime_defaults_replay_pending_tasks_on_startup():
-    assert GLOBAL_SETTINGS["replay_pending_tasks_on_startup"] is True
+    assert GLOBAL_SETTINGS["replay_pending_tasks_on_startup"] is False
+
+
+def test_queue_direct_audit_review_latches_open_incident(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Review branch output",
+        description="Verify current task output.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    incident = record_capability_incident(
+        storage,
+        capability_kind="task_output",
+        capability_name=task.task_id,
+        status="degraded",
+        reason="Verifier requested audit.",
+        task_id=task.task_id,
+        session_id=task.session_id,
+    )
+    storage.commit()
+
+    queued = []
+
+    async def fake_queue_eval_system_job(*_args, **_kwargs):
+        queued.append("audit")
+        return {"status": "queued", "task_id": "audit-task-1"}
+
+    monkeypatch.setattr("strata.api.main._queue_eval_system_job", fake_queue_eval_system_job)
+
+    verification = {
+        "attempt_id": "attempt-1",
+        "verdict": "uncertain",
+        "recommended_action": "audit",
+        "incident_id": incident["incident_id"],
+    }
+
+    first = asyncio.run(queue_direct_audit_review(storage, task=task, verification=verification))
+    second = asyncio.run(queue_direct_audit_review(storage, task=task, verification=verification))
+
+    incident_after = get_capability_incident(storage, incident_id=incident["incident_id"])
+
+    assert first is not None
+    assert first["task_id"] == "audit-task-1"
+    assert second is None
+    assert queued == ["audit"]
+    assert incident_after is not None
+    assert incident_after["metadata"]["audit_task_id"] == "audit-task-1"
+
+
+def test_queue_process_repair_task_latches_open_incident(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Verifier branch",
+        description="A verifier failure needs repair.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+    incident = record_capability_incident(
+        storage,
+        capability_kind="process",
+        capability_name="verification_process",
+        status="degraded",
+        reason="Repeated verifier machinery failures.",
+        task_id=task.task_id,
+        session_id=task.session_id,
+    )
+    storage.commit()
+
+    enqueued = []
+
+    async def fake_enqueue(task_id: str):
+        enqueued.append(task_id)
+
+    first = asyncio.run(
+        queue_process_repair_task(
+            storage,
+            task=task,
+            process_name="verification_process",
+            reason="Repeated verifier machinery failures.",
+            enqueue_fn=fake_enqueue,
+            incident_id=incident["incident_id"],
+        )
+    )
+    storage.commit()
+
+    assert first is not None
+    first.state = TaskState.COMPLETE
+    storage.commit()
+
+    second = asyncio.run(
+        queue_process_repair_task(
+            storage,
+            task=task,
+            process_name="verification_process",
+            reason="Repeated verifier machinery failures.",
+            enqueue_fn=fake_enqueue,
+            incident_id=incident["incident_id"],
+        )
+    )
+
+    incident_after = get_capability_incident(storage, incident_id=incident["incident_id"])
+
+    assert second is None
+    assert enqueued == [first.task_id]
+    assert incident_after is not None
+    assert incident_after["metadata"]["repair_task_id"] == first.task_id
 
 
 def test_preflight_lane_model_treats_error_status_as_failure():

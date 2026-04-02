@@ -208,6 +208,36 @@ def resolve_capability_incident(
     return _store_incident(storage, incident)
 
 
+def get_capability_incident(storage, *, incident_id: str) -> Optional[Dict[str, Any]]:
+    detail_key = f"{CAPABILITY_INCIDENT_DETAIL_KEY_PREFIX}:{str(incident_id or '').strip()}"
+    current = storage.parameters.peek_parameter(detail_key, default_value=None)
+    if not isinstance(current, dict):
+        return None
+    return dict(current)
+
+
+def annotate_capability_incident(
+    storage,
+    *,
+    incident_id: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    snapshot: Optional[Dict[str, Any]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    current = get_capability_incident(storage, incident_id=incident_id)
+    if not current:
+        return None
+    incident = dict(current)
+    incident["last_seen_at"] = _now_iso()
+    incident["metadata"] = {**dict(incident.get("metadata") or {}), **dict(metadata or {})}
+    incident["snapshot"] = {**dict(incident.get("snapshot") or {}), **dict(snapshot or {})}
+    if provenance:
+        incident["provenance"] = _normalize_provenance(
+            {**dict(incident.get("provenance") or {}), **dict(provenance or {})}
+        )
+    return _store_incident(storage, incident)
+
+
 def list_capability_incidents(
     storage,
     *,

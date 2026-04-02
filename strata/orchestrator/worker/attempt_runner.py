@@ -217,11 +217,13 @@ async def _resume_parent_repair_task_if_supported(storage, task: TaskModel, enqu
     parent = storage.tasks.get_by_id(parent_task_id)
     if parent is None or getattr(parent, "type", None) not in {TaskType.BUG_FIX, TaskType.REFACTOR, TaskType.IMPL}:
         return False
+    parent_constraints = dict(getattr(parent, "constraints", {}) or {})
+    if parent_constraints.get("procedure_checklist") or parent_constraints.get("procedure_checklist_item"):
+        return False
     parent.active_child_ids = [task_id for task_id in list(getattr(parent, "active_child_ids", []) or []) if task_id != task.task_id]
     if not parent.active_child_ids:
         parent.active_child_ids = []
     parent.state = TaskState.PENDING
-    parent_constraints = dict(getattr(parent, "constraints", {}) or {})
     parent_constraints["recovered_from_stale_decomposition"] = {
         "at": datetime.now(timezone.utc).isoformat(),
         "source_task_id": str(task.task_id),
