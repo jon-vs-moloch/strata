@@ -3021,8 +3021,8 @@ function App() {
     if (activeNav === 'dashboard' || currentScope === 'home') return visibleTaskTree;
     const path = getFocusedTaskPath(currentScope);
     if (!path.length) return visibleTaskTree;
-    const contextNode = path.length > 1 ? path[path.length - 2] : path[0];
-    return contextNode ? [contextNode] : visibleTaskTree;
+    const branchRoot = path[0];
+    return branchRoot ? [branchRoot] : visibleTaskTree;
   }, [activeNav, currentScope, visibleTaskTree, activeTaskTree, laneDetails, fullTaskTree]);
   const loopMeta = routingSummary?.supervision?.active_jobs?.length
     ? `${routingSummary.supervision.active_jobs.length} active bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
@@ -4147,10 +4147,19 @@ const TopModeTab = ({
     },
   };
   const theme = palette[accent] || palette.neutral;
+  const normalizedStatus = String(status || '').trim().toUpperCase();
+  const normalizedProgressState = String(progress?.currentStateLabel || '').trim().toUpperCase();
+  const hasBlockedWork = normalizedProgressState === 'BLOCKED'
+    || /blocked/i.test(String(progress?.countLabel || ''))
+    || /blocked/i.test(String(progress?.label || ''));
   const displayStatus = apiStatus === 'error'
     ? 'API DOWN'
     : agentSuppressedByGlobal && status !== 'STOPPED'
     ? 'PAUSED (GLOBAL)'
+    : normalizedStatus === 'IDLE' && (normalizedProgressState === 'GENERATING' || normalizedProgressState === 'WORKING')
+    ? normalizedProgressState
+    : normalizedStatus === 'IDLE' && hasBlockedWork
+    ? 'BLOCKED'
     : status === 'IDLE' && progress?.taskActionable
     ? (progress?.taskPaused ? 'TASK PAUSED' : 'READY')
     : (status || 'UNKNOWN');
