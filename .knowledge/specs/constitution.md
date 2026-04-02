@@ -36,6 +36,7 @@ Current durable guidance:
 - `Verifier` should be callable at any step on any artifact, including task drafts, chat turns, tool outputs, verifier outputs, and audit outputs; lowercase `verification` remains the generic activity, while `Verifier` names the system capability
 - let surprise itself be audited; if the system is surprised, that surprise should remain reviewable evidence rather than a terminal judgment, because even the act of noticing something can be miscalibrated
 - prefer extending or unifying existing systems over creating parallel ones; introduce a new subsystem only when it is a reusable primitive that can serve multiple parts of Strata rather than a one-off special case
+- as much of Strata's machinery as possible should itself be built out of Strata's own primitives and substrates; the long-term direction is "Strata all the way down," not a permanent split between user-facing machinery and hidden special-case internals
 - if the system has a meaningful capability, it should be available in the UI unless it is deliberately excluded by policy, profile, or unfinished safety gating; hidden capability should be the exception, not the default
 - when verifier findings repeatedly say an output is flawed or uncertain, supervision should escalate into a corrective intervention quickly; do not allow the system to normalize repeated verifier warnings into passive retry loops
 - if a reviewer or verifier cannot produce perfect structured output, preserve the strongest grounded fallback judgment available instead of discarding the review entirely

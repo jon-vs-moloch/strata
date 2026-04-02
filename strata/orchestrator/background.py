@@ -792,6 +792,7 @@ class BackgroundWorker:
         self._lane_models: Dict[str, object] = {lane: self._model_adapter_factory() for lane in LANE_NAMES}
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
         self._tier_health = {"trainer": "unknown", "agent": "unknown"}
+        self._tier_retry_after_s: Dict[str, float] = {lane: 0.0 for lane in LANE_NAMES}
 
     def _default_model_adapter_factory(self, template_adapter):
         def _factory():
@@ -819,6 +820,49 @@ class BackgroundWorker:
         except Exception as exc:
             logger.error(f"Failed to read worker settings; using defaults. ({exc})")
             return {}
+
+    async def _retry_lane_preflight_if_due(self, lane: str) -> bool:
+        normalized_lane = normalize_lane(lane) or "agent"
+        now = asyncio.get_running_loop().time()
+        if now < float(self._tier_retry_after_s.get(normalized_lane) or 0.0):
+            return False
+
+        from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
+
+        context = (
+            TrainerExecutionContext(run_id=f"recheck_{normalized_lane}")
+            if normalized_lane == "trainer"
+            else AgentExecutionContext(run_id=f"recheck_{normalized_lane}")
+        )
+        settings = self._settings()
+        lane_model = self._lane_model(normalized_lane)
+        try:
+            ok, reason = await _preflight_lane_model(
+                normalized_lane,
+                lane_model,
+                context,
+                auto_swap_local_missing=bool(
+                    dict(settings.get("model_catalog_policy") or {}).get("auto_swap_local_missing", False)
+                ),
+                allow_endpoint_failover=True,
+            )
+        except Exception as exc:
+            ok, reason = False, str(exc)
+
+        if ok:
+            self._tier_health[normalized_lane] = "ok"
+            self._tier_retry_after_s[normalized_lane] = 0.0
+            logger.warning("Lane '%s' recovered after background preflight retry.", normalized_lane)
+            return True
+
+        self._tier_health[normalized_lane] = "error"
+        self._tier_retry_after_s[normalized_lane] = now + 60.0
+        logger.warning(
+            "Lane '%s' remains unavailable after background preflight retry: %s",
+            normalized_lane,
+            reason or "unknown preflight error",
+        )
+        return False
 
     async def start(self):
         if self._running:
@@ -851,12 +895,14 @@ class BackgroundWorker:
                     raise RuntimeError(reason)
                 logger.info(f"  -> {name} tier is reachable.")
                 self._tier_health[name] = "ok"
+                self._tier_retry_after_s[name] = 0.0
             except Exception as e:
                 # Special case: if the trainer-agent tier is missing a cloud key,
                 # we do not necessarily want to hard-fail if the local agent tier is alive.
                 # We still log it loudly so the operator knows bootstrap quality is degraded.
                 logger.error(f"  -> {name} tier FAILED check: {e}")
                 self._tier_health[name] = "error"
+                self._tier_retry_after_s[name] = asyncio.get_running_loop().time() + 60.0
                 logger.warning("Worker proceeding with lane '%s' unavailable until its configured transport is healthy again.", name)
 
         if all(status == "error" for status in self._tier_health.values()):
@@ -1246,6 +1292,7 @@ class BackgroundWorker:
                 await asyncio.sleep(0.5)
                 continue
             if self._tier_health.get(normalized_lane) == "error":
+                await self._retry_lane_preflight_if_due(normalized_lane)
                 await asyncio.sleep(1.0)
                 continue
 

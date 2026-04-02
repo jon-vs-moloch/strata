@@ -8,6 +8,11 @@ What are the named things in this system, what do they do, and where do they liv
 
 This page is intentionally high-level. It is not a full implementation guide for every module. It is the map that helps humans and models orient before drilling into code.
 
+System direction:
+
+- as much of Strata as possible should eventually be made from first-class Strata substrates rather than bespoke hidden machinery
+- the target is "Strata all the way down": Procedures, tools, Knowledge, Kits, policies, audits, verifiers, and other reusable artifacts should increasingly explain and implement the system's own internals
+
 ## Naming
 
 Strata uses proper nouns for first-class architectural artifacts and subsystems.
