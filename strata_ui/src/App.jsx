@@ -2200,6 +2200,28 @@ function App() {
     setSendError('');
   };
 
+  const loadPreviousHomeSession = useCallback(() => {
+    const previousSession = visibleSessionList.find((session) => persistedSessionHasContent(session));
+    if (!previousSession) {
+      setCurrentScope('home');
+      setActiveNav('chat');
+      startNewChat();
+      return;
+    }
+    const nextSessionId = previousSession.session_id;
+    setCurrentScope('home');
+    setChatLane(laneForSessionId(nextSessionId));
+    setScopeSessionIds((prev) => ({ ...prev, home: nextSessionId }));
+    setActiveNav('chat');
+    setSendError('');
+  }, [startNewChat, visibleSessionList]);
+
+  const startNewHomeSession = useCallback(() => {
+    setCurrentScope('home');
+    setActiveNav('chat');
+    startNewChat();
+  }, [startNewChat]);
+
   const deleteSession = async (idToDelete) => {
     if (isDraftSessionId(idToDelete)) {
       const draftLane = laneForSessionId(idToDelete);
@@ -3312,13 +3334,29 @@ function App() {
                 onReplayTask: handleReplayTask,
                 onBranchTask: handleBranchTask,
                 onMutateTask: handleMutateTask,
-                onMutateProcedure: handleMutateProcedure,
                 onOpenSession: (nextSessionId) => {
                   const nextLane = laneForSessionId(nextSessionId);
                   setCurrentScope(nextLane);
                   setChatLane(nextLane);
                   setScopeSessionIds((prev) => ({ ...prev, [nextLane]: nextSessionId }));
                   setActiveNav('chat');
+                },
+                onSendMessage: (msg) => {
+                  if (msg.simulation) {
+                    setMessages(prev => [...prev, {
+                      id: `sim-${Date.now()}`,
+                      role: msg.role,
+                      content: msg.content,
+                      session_id: msg.session_id || null,
+                      created_at: new Date().toISOString(),
+                      message_metadata: {
+                        simulation: true,
+                        ...(msg.message_metadata || {}),
+                      }
+                    }]);
+                  } else {
+                    // fall back to normal send logic if needed, but workbench has its own
+                  }
                 },
                 onSendWorkbenchPrompt: async ({ prompt, responseMode: requestedResponseMode, target, task, procedure }) => {
                   const linkedSessionId = String(target?.sessionId || '').trim();
@@ -3672,6 +3710,10 @@ function App() {
               laneDetails={laneDetails}
               laneCurrentTaskTitles={laneCurrentTaskTitles}
               providerTelemetry={providerTelemetry}
+              showStartupActions={currentScope === 'home' && activeNav === 'tasks' && (!sessionId || isDraftSession)}
+              hasPersistedSessions={visibleSessionList.some((session) => persistedSessionHasContent(session))}
+              onLoadPreviousSession={loadPreviousHomeSession}
+              onStartNewSession={startNewHomeSession}
               onOpenProcedure={(procedureId) => {
                 setSelectedProcedureId(procedureId);
                 setActiveNav('procedures');

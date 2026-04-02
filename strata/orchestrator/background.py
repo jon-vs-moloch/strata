@@ -47,6 +47,22 @@ def _models_endpoint_from_chat_endpoint(endpoint: str) -> str:
     return urlunparse(parsed._replace(path=path))
 
 
+def _candidate_endpoints_for_context(lane_model, ctx):
+    pool = lane_model.registry.pools.get(ctx.mode)
+    if pool is None:
+        return []
+    allow_cloud = pool.allow_cloud if ctx.allow_cloud is None else bool(ctx.allow_cloud)
+    allow_local = pool.allow_local if ctx.allow_local is None else bool(ctx.allow_local)
+    endpoints = []
+    for endpoint in pool.endpoints:
+        if endpoint.transport == "cloud" and not allow_cloud:
+            continue
+        if endpoint.transport == "local" and not allow_local:
+            continue
+        endpoints.append(endpoint)
+    return endpoints
+
+
 async def _preflight_local_model_catalog(lane_model, *, timeout_s: float = 3.0) -> tuple[bool, str]:
     endpoint = str(getattr(lane_model, "endpoint", "") or "").strip()
     model_id = str(getattr(lane_model, "active_model", "") or "").strip()
@@ -66,11 +82,48 @@ async def _preflight_local_model_catalog(lane_model, *, timeout_s: float = 3.0) 
     return False, f"local model '{model_id}' not present in {models_endpoint}"
 
 
-async def _preflight_lane_model(name: str, lane_model, ctx, *, timeout_s: float = 6.0) -> tuple[bool, str]:
+async def _preflight_lane_model(
+    name: str,
+    lane_model,
+    ctx,
+    *,
+    timeout_s: float = 6.0,
+    auto_swap_local_missing: bool = False,
+    allow_endpoint_failover: bool = False,
+) -> tuple[bool, str]:
     lane_model.bind_execution_context(ctx)
     endpoint = str(getattr(lane_model, "endpoint", "") or "").strip().lower()
     if endpoint.startswith("http://127.0.0.1:") or endpoint.startswith("http://localhost:"):
-        return await _preflight_local_model_catalog(lane_model, timeout_s=min(timeout_s, 3.0))
+        ok, reason = await _preflight_local_model_catalog(lane_model, timeout_s=min(timeout_s, 3.0))
+        if ok or not auto_swap_local_missing or "not present" not in reason:
+            return ok, reason
+
+        models_endpoint = _models_endpoint_from_chat_endpoint(getattr(lane_model, "endpoint", "") or "")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(min(timeout_s, 3.0))) as client:
+                response = await client.get(models_endpoint)
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            return False, f"{reason}; auto-swap probe failed: {exc}"
+
+        available_ids = [
+            str(item.get("id") or "").strip()
+            for item in list(payload.get("data") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        if not available_ids:
+            return False, reason
+
+        missing_model_id = str(getattr(lane_model, "active_model", "") or "").strip()
+        lane_model.active_model = available_ids[0]
+        logger.warning(
+            "Local model '%s' for lane '%s' was unavailable; auto-swapping to '%s'.",
+            missing_model_id or "unknown",
+            name,
+            available_ids[0],
+        )
+        return True, ""
     try:
         response = await asyncio.wait_for(
             lane_model.chat(
@@ -81,15 +134,46 @@ async def _preflight_lane_model(name: str, lane_model, ctx, *, timeout_s: float 
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
-        return False, f"{name} preflight timed out after {timeout_s:.1f}s"
+        ok, reason = False, f"{name} preflight timed out after {timeout_s:.1f}s"
     except Exception as exc:
-        return False, str(exc)
+        ok, reason = False, str(exc)
+    else:
+        if not isinstance(response, dict):
+            ok, reason = False, f"{name} preflight returned invalid response type"
+        elif str(response.get("status") or "").strip().lower() != "success":
+            ok, reason = False, str(response.get("message") or response.get("content") or f"{name} preflight returned non-success status")
+        else:
+            return True, ""
 
-    if not isinstance(response, dict):
-        return False, f"{name} preflight returned invalid response type"
-    if str(response.get("status") or "").strip().lower() != "success":
-        return False, str(response.get("message") or response.get("content") or f"{name} preflight returned non-success status")
-    return True, ""
+    if not allow_endpoint_failover:
+        return ok, reason
+
+    original_model = str(getattr(lane_model, "active_model", "") or "").strip()
+    for candidate in _candidate_endpoints_for_context(lane_model, ctx):
+        candidate_model = str(getattr(candidate, "model", "") or "").strip()
+        if not candidate_model or candidate_model == original_model:
+            continue
+        lane_model.active_model = candidate_model
+        fallback_ok, fallback_reason = await _preflight_lane_model(
+            name,
+            lane_model,
+            ctx,
+            timeout_s=timeout_s,
+            auto_swap_local_missing=auto_swap_local_missing,
+            allow_endpoint_failover=False,
+        )
+        if fallback_ok:
+            logger.warning(
+                "Primary model '%s' for lane '%s' failed preflight; falling back to '%s'.",
+                original_model or "unknown",
+                name,
+                candidate_model,
+            )
+            return True, ""
+        reason = f"{reason}; fallback '{candidate_model}' failed: {fallback_reason}"
+
+    lane_model.active_model = original_model
+    return False, reason
 
 
 def _parse_timestamp(value) -> Optional[datetime]:
@@ -479,7 +563,15 @@ class BackgroundWorker:
             logger.info(f"Checking {name} model tier...")
             lane_model = self._lane_model(name)
             try:
-                ok, reason = await _preflight_lane_model(name, lane_model, ctx)
+                ok, reason = await _preflight_lane_model(
+                    name,
+                    lane_model,
+                    ctx,
+                    auto_swap_local_missing=bool(
+                        dict(settings.get("model_catalog_policy") or {}).get("auto_swap_local_missing", False)
+                    ),
+                    allow_endpoint_failover=True,
+                )
                 if not ok:
                     raise RuntimeError(reason)
                 logger.info(f"  -> {name} tier is reachable.")

@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { 
-  Activity, BookOpen, GitBranch, Pencil, Plus, Play, Wrench, 
+import {
+  Activity, BookOpen, GitBranch, Pencil, Plus, Play, Wrench,
   RotateCcw, History, Route, Zap, Search, MessageCircle, AlertCircle, X, ChevronRight, CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -68,6 +68,12 @@ const stripInlineMarkdown = (content) => {
     .replace(/\n+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+};
+
+const workbenchSimulationSessionId = (target) => {
+  if (target?.procedureId) return `workbench:procedure:${target.procedureId}`;
+  if (target?.taskId) return `workbench:task:${target.taskId}`;
+  return 'workbench:general';
 };
 
 const summarizeBootstrapReasons = (items = []) => {
@@ -1341,7 +1347,7 @@ const ContextSnapshotSnapshot = ({ artifact }) => {
       <div style={{ fontSize: '11px', color: '#6f7183', fontFamily: "'JetBrains Mono', monospace" }}>
         Captured at: {payload.timestamp || artifact.created_at}
       </div>
-      
+
       <div style={{ display: 'flex', gap: '8px' }}>
         <RoutePill label="MESSAGES" value={payload.messages?.length || 0} />
         <RoutePill label="TOOLS" value={payload.tools?.length || 0} tone="success" />
@@ -1353,7 +1359,7 @@ const ContextSnapshotSnapshot = ({ artifact }) => {
         <div style={{ fontSize: '12px', color: '#a9aaba', whiteSpace: 'pre-wrap', maxHeight: expanded ? 'none' : '100px', overflow: 'hidden' }}>
           {payload.messages?.[0]?.content?.slice(0, 500)}...
         </div>
-        <button 
+        <button
           onClick={() => setExpanded(!expanded)}
           style={{ background: 'none', border: 'none', color: '#60a5fa', cursor: 'pointer', fontSize: '11px', padding: 0, marginTop: '8px' }}
         >
@@ -1509,28 +1515,28 @@ const AttemptTimeline = ({ stepHistory = [], outcome, reason }) => {
             <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start' }}>
               <div style={{ position: 'relative', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 {(!outcome && idx === stepHistory.length - 1) ? (
-                  <motion.div 
+                  <motion.div
                     animate={{ scale: [1, 1.4, 1], opacity: [0.6, 1, 0.6] }}
                     transition={{ repeat: Infinity, duration: 2 }}
-                    style={{ 
-                      width: '10px', height: '10px', borderRadius: '999px', 
-                      background: '#8257e5', 
+                    style={{
+                      width: '10px', height: '10px', borderRadius: '999px',
+                      background: '#8257e5',
                       border: '2px solid #141418',
                       zIndex: 2, marginTop: '12px',
                       boxShadow: '0 0 8px rgba(130,87,229,0.4)'
-                    }} 
+                    }}
                   />
                 ) : (
-                  <div style={{ 
-                    width: '10px', height: '10px', borderRadius: '999px', 
-                    background: idx === 0 ? '#8257e5' : 'rgba(255,255,255,0.1)', 
+                  <div style={{
+                    width: '10px', height: '10px', borderRadius: '999px',
+                    background: idx === 0 ? '#8257e5' : 'rgba(255,255,255,0.1)',
                     border: '2px solid #141418',
                     zIndex: 1, marginTop: '12px'
                   }} />
                 )}
                 {idx < stepHistory.length - 1 && (
-                  <div style={{ 
-                    position: 'absolute', top: '22px', bottom: '-12px', 
+                  <div style={{
+                    position: 'absolute', top: '22px', bottom: '-12px',
                     width: '2px', background: 'rgba(255,255,255,0.05)'
                   }} />
                 )}
@@ -1542,8 +1548,8 @@ const AttemptTimeline = ({ stepHistory = [], outcome, reason }) => {
                 </div>
                 <div style={{ fontSize: '12px', color: '#8d8ea1', paddingLeft: '4px' }}>{step.detail}</div>
                 {durationDisplay && (
-                  <div style={{ 
-                    fontSize: '9px', fontWeight: 800, color: '#333', 
+                  <div style={{
+                    fontSize: '9px', fontWeight: 800, color: '#333',
                     letterSpacing: '0.05em', marginTop: '8px', marginBottom: '-16px',
                     marginLeft: '-46px', textAlign: 'center', width: '32px',
                     background: '#141418', position: 'relative', zIndex: 1
@@ -1591,22 +1597,22 @@ const ReplayControl = ({ task, onConfirm, onCancel }) => {
         <div style={{ fontSize: '13px', color: '#a9aaba' }}>
           Configure overrides for replaying <strong>{task.title}</strong>. This will spawn a new attempt with the specified variances.
         </div>
-        
+
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <label style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>MODEL OVERRIDE</label>
-            <input 
-              type="text" 
-              placeholder="e.g. gpt-4o" 
-              value={model} 
+            <input
+              type="text"
+              placeholder="e.g. gpt-4o"
+              value={model}
               onChange={e => setModel(e.target.value)}
               style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px', padding: '8px 12px', color: '#edeeef', fontSize: '12px' }}
             />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <label style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>TIER OVERRIDE</label>
-            <select 
-              value={tier} 
+            <select
+              value={tier}
               onChange={e => setTier(e.target.value)}
               style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px', padding: '8px 12px', color: '#edeeef', fontSize: '12px' }}
             >
@@ -1618,23 +1624,23 @@ const ReplayControl = ({ task, onConfirm, onCancel }) => {
         </div>
 
         <div style={{ display: 'flex', gap: '12px', marginTop: '4px' }}>
-          <button 
+          <button
             onClick={handleRun}
             disabled={isBusy}
-            style={{ 
-               flex: 1, height: '36px', background: 'linear-gradient(to right, #2563eb, #1d4ed8)', 
-               border: 'none', borderRadius: '8px', color: 'white', fontWeight: 700, fontSize: '13px', 
+            style={{
+               flex: 1, height: '36px', background: 'linear-gradient(to right, #2563eb, #1d4ed8)',
+               border: 'none', borderRadius: '8px', color: 'white', fontWeight: 700, fontSize: '13px',
                cursor: 'pointer', transition: 'all 0.2s', opacity: isBusy ? 0.6 : 1
             }}
           >
             {isBusy ? 'Starting...' : 'Run Replay Attempt'}
           </button>
-          <button 
+          <button
             onClick={onCancel}
             disabled={isBusy}
-            style={{ 
-               padding: '0 16px', height: '36px', background: 'rgba(255,255,255,0.05)', 
-               border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', color: '#a9aaba', 
+            style={{
+               padding: '0 16px', height: '36px', background: 'rgba(255,255,255,0.05)',
+               border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', color: '#a9aaba',
                fontWeight: 700, fontSize: '13px', cursor: 'pointer'
             }}
           >
@@ -1646,13 +1652,13 @@ const ReplayControl = ({ task, onConfirm, onCancel }) => {
   );
 };
 
-const TaskTargetCard = ({ 
-  task, 
-  onOpenTask, 
-  onOpenProcedure, 
-  onPauseTask, 
-  onResumeTask, 
-  onStopTask, 
+const TaskTargetCard = ({
+  task,
+  onOpenTask,
+  onOpenProcedure,
+  onPauseTask,
+  onResumeTask,
+  onStopTask,
   onReplayTask,
   activeTool,
   onSendWorkbenchPrompt,
@@ -1666,11 +1672,11 @@ const TaskTargetCard = ({
        onSendWorkbenchPrompt(activeTool, { task });
     }
   };
-  
+
   return (
-    <div 
+    <div
       onClick={handleTaskClick}
-      style={{ 
+      style={{
         display: 'flex', flexDirection: 'column', gap: '16px', padding: '4px',
         cursor: activeTool ? 'pointer' : 'default',
         borderRadius: '12px',
@@ -1773,9 +1779,9 @@ const TaskTargetCard = ({
       </div>
 
       {isReplaying && (
-        <ReplayControl 
-          task={task} 
-          onCancel={() => setIsReplaying(false)} 
+        <ReplayControl
+          task={task}
+          onCancel={() => setIsReplaying(false)}
           onConfirm={async (overrides) => {
              if (onReplayTask) {
                await onReplayTask(task.id || task.task_id, overrides);
@@ -1792,10 +1798,10 @@ const TaskTargetCard = ({
           <button
             type="button"
             onClick={() => onOpenTask && onOpenTask(task.parent_task_id)}
-            style={{ 
-              background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', 
-              borderRadius: '999px', padding: '6px 12px', fontSize: '10px', 
-              color: '#8d8ea1', cursor: 'pointer' 
+            style={{
+              background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '999px', padding: '6px 12px', fontSize: '10px',
+              color: '#8d8ea1', cursor: 'pointer'
             }}
           >
             PARENT: #{task.parent_task_id}
@@ -1835,7 +1841,7 @@ const TaskTargetCard = ({
           {task.updated_at && task.updated_at !== task.created_at && ` · Last updated ${formatAbsoluteTime(task.updated_at)}`}
         </div>
       </div>
-      
+
       {/* Task 2.5: Child Work Drilldown */}
       {task.children?.length > 0 && (
         <DashboardPanel title="CHILD WORK">
@@ -1845,11 +1851,11 @@ const TaskTargetCard = ({
                {task.procedure_id && <RoutePill label="PROCEDURE" value={task.procedure_id} tone="success" />}
             </div>
             {task.children.map(child => (
-              <button 
-                key={child.task_id} 
+              <button
+                key={child.task_id}
                 onClick={() => onOpenTask && onOpenTask(child.task_id)}
-                style={{ 
-                   background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', 
+                style={{
+                   background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)',
                    textAlign: 'left', cursor: 'pointer', borderRadius: '12px', padding: '10px 14px',
                    display: 'flex', justifyContent: 'space-between', alignItems: 'center'
                 }}
@@ -1874,14 +1880,14 @@ const TaskTargetCard = ({
           </div>
         </DashboardPanel>
       )}
-      
+
       {task.attempts?.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '12px' }}>
           <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Attempt History ({task.attempts.length})</div>
           {task.attempts.map((attempt, idx) => (
-            <AttemptTargetCard 
-              key={`${attempt.attempt_id}-${idx}`} 
-              attempt={attempt} 
+            <AttemptTargetCard
+              key={`${attempt.attempt_id}-${idx}`}
+              attempt={attempt}
               onSendWorkbenchPrompt={onSendWorkbenchPrompt}
             />
           ))}
@@ -1910,18 +1916,18 @@ const AttemptTargetCard = ({ attempt, onSendWorkbenchPrompt }) => {
   };
 
   return (
-    <div 
-      style={{ 
-        background: 'rgba(255,255,255,0.02)', 
-        border: '1px solid rgba(255,255,255,0.05)', 
-        borderRadius: '12px', 
+    <div
+      style={{
+        background: 'rgba(255,255,255,0.02)',
+        border: '1px solid rgba(255,255,255,0.05)',
+        borderRadius: '12px',
         padding: '12px',
         display: 'flex',
         flexDirection: 'column',
         gap: '10px'
       }}
     >
-      <div 
+      <div
         style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
         onClick={() => setExpanded(!expanded)}
       >
@@ -1956,13 +1962,13 @@ const AttemptTargetCard = ({ attempt, onSendWorkbenchPrompt }) => {
             <RoutePill label="PROVIDER" value={attempt.artifacts?.provider || 'unknown'} />
             <RoutePill label="DURATION" value={`${attempt.artifacts?.duration_s || '—'}s`} />
           </div>
-          
+
           {attempt.artifacts?.step_history?.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Execution Timeline</div>
-              <AttemptTimeline 
-                stepHistory={attempt.artifacts.step_history} 
-                outcome={attempt.outcome} 
+              <AttemptTimeline
+                stepHistory={attempt.artifacts.step_history}
+                outcome={attempt.outcome}
                 reason={attempt.reason}
               />
             </div>
@@ -1977,42 +1983,155 @@ const AttemptTargetCard = ({ attempt, onSendWorkbenchPrompt }) => {
   );
 };
 
-const ProcedureTargetCard = ({ procedure }) => {
+const ProcedureTargetCard = ({ procedure, onSendWorkbenchPrompt }) => {
+  const [expandedStepId, setExpandedStepId] = useState(null);
+  const [playingStepId, setPlayingStepId] = useState(null);
+
   if (!procedure) return null;
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '4px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', padding: '4px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
-          <div style={{ fontSize: '20px', fontWeight: 700, color: '#edeeef', lineHeight: 1.2 }}>{procedure.title}</div>
-          <div style={{ fontSize: '14px', color: '#a9aaba', lineHeight: 1.6 }}>{procedure.summary}</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
+          <div style={{ fontSize: '24px', fontWeight: 800, color: '#edeeef', letterSpacing: '-0.02em', lineHeight: 1.1 }}>{procedure.title}</div>
+          <div style={{ fontSize: '15px', color: '#8d8ea1', lineHeight: 1.6, maxWidth: '700px' }}>{procedure.summary}</div>
         </div>
-        <RoutePill label="STATE" value={procedure.lifecycle_state || 'draft'} tone={procedureLifecycleTone(procedure.lifecycle_state)} />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '12px' }}>
+          <RoutePill label="STATE" value={procedure.lifecycle_state || 'draft'} tone={procedureLifecycleTone(procedure.lifecycle_state)} />
+          <button
+            onClick={() => onSendWorkbenchPrompt && onSendWorkbenchPrompt('play_procedure', { procedure })}
+            style={{
+              background: 'linear-gradient(135deg, #8257e5, #6341b0)', color: 'white', border: 'none', borderRadius: '10px',
+              padding: '10px 20px', fontSize: '13px', fontWeight: 800, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 4px 12px rgba(130,87,229,0.3)'
+            }}
+          >
+            <Play size={14} fill="currentColor" />
+            PLAY PROCEDURE
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
         <RoutePill label="PROCEDURE ID" value={procedure.procedure_id} tone="success" />
         <RoutePill label="LINEAGE" value={procedure.lineage_id} />
-        <RoutePill label="VARIANT" value={procedure.variant_id} />
+        {procedure.variant_id && <RoutePill label="VARIANT" value={procedure.variant_id} />}
       </div>
 
       {procedure.description && (
-        <div style={{ fontSize: '13px', color: '#c7c8d6', lineHeight: 1.6, background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '10px' }}>
+        <div style={{ fontSize: '13px', color: '#c7c8d6', lineHeight: 1.6, background: 'rgba(255,255,255,0.02)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.04)' }}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{procedure.description}</ReactMarkdown>
         </div>
       )}
 
       {procedure.checklist?.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Checklist Steps</div>
-          {procedure.checklist.map((item, idx) => (
-            <div key={item.id || idx} style={{ display: 'flex', gap: '12px', background: 'rgba(255,255,255,0.01)', padding: '10px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.03)' }}>
-              <div style={{ fontSize: '14px', fontWeight: 800, color: '#8257e5' }}>{idx + 1}</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <div style={{ fontSize: '13px', fontWeight: 700, color: '#ececf2' }}>{item.title}</div>
-                <div style={{ fontSize: '12px', color: '#8d8ea1' }}>Verify: {item.verification}</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ fontSize: '12px', color: '#444', fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Checklist Steps</div>
+          {procedure.checklist.map((item, idx) => {
+            const isExpanded = expandedStepId === item.id;
+            const isPlaying = playingStepId === item.id;
+
+            return (
+              <div
+                key={item.id || idx}
+                style={{
+                  background: isExpanded ? 'rgba(130,87,229,0.04)' : 'rgba(255,255,255,0.02)',
+                  border: isExpanded ? '1px solid rgba(130,87,229,0.2)' : '1px solid rgba(255,255,255,0.04)',
+                  borderRadius: '14px', overflow: 'hidden',
+                  transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)'
+                }}
+              >
+                <div
+                  onClick={() => setExpandedStepId(isExpanded ? null : item.id)}
+                  style={{ cursor: 'pointer', padding: '16px', display: 'flex', gap: '16px', alignItems: 'flex-start' }}
+                >
+                  <div style={{
+                    flexShrink: 0, width: '28px', height: '28px', borderRadius: '8px',
+                    background: isExpanded ? '#8257e5' : 'rgba(255,255,255,0.05)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '14px', fontWeight: 800, color: isExpanded ? 'white' : '#555'
+                  }}>
+                    {idx + 1}
+                  </div>
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ fontSize: '15px', fontWeight: 700, color: isExpanded ? '#edeeef' : '#8d8ea1' }}>{item.title}</div>
+                    <div style={{ fontSize: '13px', color: '#666', lineHeight: 1.5 }}>
+                      <span style={{ color: '#444', fontWeight: 800, marginRight: '8px', fontSize: '11px' }}>VERIFY:</span>
+                      {item.verification}
+                    </div>
+                  </div>
+                  <ChevronRight size={20} color="#333" style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', marginTop: '4px' }} />
+                </div>
+
+                <AnimatePresence>
+                  {isExpanded && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      style={{ overflow: 'hidden' }}
+                    >
+                      <div style={{ padding: '0 16px 16px 60px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onSendWorkbenchPrompt && onSendWorkbenchPrompt('preview_step', { procedure, step: item }); }}
+                            style={{
+                              background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                              borderRadius: '8px', padding: '8px 16px', fontSize: '11px', fontWeight: 800,
+                              color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px'
+                            }}
+                          >
+                            <Search size={14} />
+                            PREVIEW PROMPT
+                          </button>
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              setPlayingStepId(item.id);
+                              try {
+                                await onSendWorkbenchPrompt?.('play_step', { procedure, step: item });
+                              } finally {
+                                setPlayingStepId((current) => (current === item.id ? null : current));
+                              }
+                            }}
+                            disabled={isPlaying}
+                            style={{
+                              background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)',
+                              borderRadius: '8px', padding: '8px 16px', fontSize: '11px', fontWeight: 800,
+                              color: '#dccfff', cursor: isPlaying ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: '8px',
+                              opacity: isPlaying ? 0.65 : 1
+                            }}
+                          >
+                            <Play size={14} fill="currentColor" />
+                            {isPlaying ? 'RUNNING…' : 'DRY RUN STEP'}
+                          </button>
+                        </div>
+
+                        {isPlaying && (
+                           <div style={{
+                             background: '#0a0a0c', border: '1px solid rgba(255,255,255,0.06)',
+                             borderRadius: '10px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px'
+                           }}>
+                              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                 <motion.div
+                                   animate={{ scale: [1, 1.2, 1], opacity: [0.6, 1, 0.6] }}
+                                   transition={{ repeat: Infinity, duration: 2 }}
+                                   style={{ width: '10px', height: '10px', borderRadius: '999px', background: '#8257e5', boxShadow: '0 0 8px #8257e5' }}
+                                 />
+                                 <span style={{ fontSize: '11px', fontWeight: 800, color: '#8257e5', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Dry Run In Progress...</span>
+                              </div>
+                              <div style={{ fontSize: '12px', color: '#555', fontStyle: 'italic', lineHeight: 1.5 }}>
+                                 This samples the step prompt with the model only. It does not execute the full Strata runtime or create a persistent task.
+                              </div>
+                           </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -2041,7 +2160,7 @@ const SessionTargetCard = ({ messages, metadata }) => {
               const isSystem = msg.role === 'system';
               const bg = isAssistant ? 'rgba(130,87,229,0.03)' : (isSystem ? 'rgba(255,184,77,0.03)' : 'transparent');
               const border = isAssistant ? 'rgba(130,87,229,0.1)' : (isSystem ? 'rgba(255,184,77,0.1)' : 'rgba(255,255,255,0.05)');
-              
+
               return (
                 <div key={idx} style={{ padding: '12px', borderRadius: '12px', background: bg, border: `1px solid ${border}` }}>
                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -2078,6 +2197,7 @@ const WorkbenchView = ({
   onStopTask,
   onReplayTask,
   onMutateTask,
+  onSendMessage,
 }) => {
   const [draftPrompt, setDraftPrompt] = useState('');
   const [sendingPrompt, setSendingPrompt] = useState(false);
@@ -2089,7 +2209,7 @@ const WorkbenchView = ({
 
   const allTasks = flattenTaskTree([...(activeTasks || []), ...(finishedTasks || [])]);
   const taskMatchBase = target?.taskId ? allTasks.find((task) => String(task.id) === String(target.taskId)) : null;
-  
+
   // Merge in detailed data if we have it
   const taskMatch = detailedTask ? {
     ...taskMatchBase,
@@ -2103,11 +2223,12 @@ const WorkbenchView = ({
   const procedureMatch = target?.procedureId
     ? (Array.isArray(procedures) ? procedures.map((procedure) => normalizeProcedureRecord(procedure)).find((procedure) => procedure?.procedure_id === target.procedureId) : null)
     : null;
-  const sessionMatch = target?.sessionId
-    ? (Array.isArray(messages) ? messages.filter((message) => String(message.session_id) === String(target.sessionId)).slice(-5) : [])
+  const simulationSessionId = workbenchSimulationSessionId(target);
+  const sessionMatch = Array.isArray(messages)
+    ? (target?.sessionId
+        ? messages.filter((message) => String(message.session_id) === String(target.sessionId)).slice(-5)
+        : messages.filter((message) => message?.message_metadata?.workbench_session === simulationSessionId).slice(-5))
     : [];
-  const title = target?.title || taskMatch?.title || procedureMatch?.title || 'Workbench target';
-  const summary = target?.summary || (taskMatch?.description ? stripInlineMarkdown(taskMatch.description).slice(0, 120) + '...' : null) || procedureMatch?.summary || 'Inspect, replay, and branch this flow from here.';
   const metadata = target?.metadata || taskMatch || procedureMatch || null;
   const hasTarget = Boolean(target || taskMatch || procedureMatch);
 
@@ -2134,19 +2255,126 @@ const WorkbenchView = ({
     }
   };
 
-  const handleContextualAction = (action, item) => {
-     const prompt = buildWorkbenchPrompt(
-       action, 
-       null, 
-       item?.task || (item?.id ? item : null), 
-       null, // procedure
-       item?.attempt || (item?.attempt_id ? item : null)
-     );
-     void handleSendPrompt({ 
-       prompt, 
-       task: item?.task || (item?.task_id ? item : taskMatch),
-       target: item?.attempt ? { kind: 'task', taskId: item.attempt.task_id, sessionId: target?.sessionId } : target
-     });
+  const handleContextualAction = async (action, item) => {
+    if (action === 'preview_step') {
+      try {
+        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/preview`);
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          onSendMessage && onSendMessage({
+            role: 'system',
+            content: `Prompt preview for "${item.step.title}"\n\nSYSTEM\n${data.messages[0].content}\n\nUSER\n${data.messages[1].content}`,
+            session_id: simulationSessionId,
+            simulation: true,
+            message_metadata: {
+              source_kind: 'workbench_preview',
+              workbench_session: simulationSessionId,
+              procedure_id: item.procedure.procedure_id,
+              step_id: item.step.id,
+            },
+          });
+        }
+      } catch (err) {
+        console.error('Failed to preview step:', err);
+        onSendMessage && onSendMessage({
+          role: 'system',
+          content: `Prompt preview failed for "${item.step.title}". ${err?.message || 'Unknown error.'}`,
+          session_id: simulationSessionId,
+          simulation: true,
+          message_metadata: {
+            source_kind: 'workbench_error',
+            workbench_session: simulationSessionId,
+            procedure_id: item.procedure.procedure_id,
+            step_id: item.step.id,
+          },
+        });
+      }
+      return;
+    }
+
+    if (action === 'play_step') {
+      try {
+        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/execute`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          const modelResp = data.response;
+          onSendMessage && onSendMessage({
+            role: 'assistant',
+            content: `Dry run result for "${item.step.title}"\n\nMODEL\n${modelResp.content || '(no content)'}\n\n${modelResp.tool_calls?.length ? `TOOL CALLS\n${modelResp.tool_calls.map((tc) => `- ${tc.function.name}(${tc.function.arguments})`).join('\n')}` : 'No tool calls returned.'}`,
+            session_id: simulationSessionId,
+            simulation: true,
+            message_metadata: {
+              source_kind: 'workbench_dry_run',
+              workbench_session: simulationSessionId,
+              procedure_id: item.procedure.procedure_id,
+              step_id: item.step.id,
+            },
+          });
+        } else {
+          onSendMessage && onSendMessage({
+            role: 'system',
+            content: `Dry run failed for "${item.step.title}". ${data.message || 'Unknown error.'}`,
+            session_id: simulationSessionId,
+            simulation: true,
+            message_metadata: {
+              source_kind: 'workbench_error',
+              workbench_session: simulationSessionId,
+              procedure_id: item.procedure.procedure_id,
+              step_id: item.step.id,
+            },
+          });
+        }
+      } catch (err) {
+        console.error('Failed to play step:', err);
+        onSendMessage && onSendMessage({
+          role: 'system',
+          content: `Dry run failed for "${item.step.title}". ${err?.message || 'Unknown error.'}`,
+          session_id: simulationSessionId,
+          simulation: true,
+          message_metadata: {
+            source_kind: 'workbench_error',
+            workbench_session: simulationSessionId,
+            procedure_id: item.procedure.procedure_id,
+            step_id: item.step.id,
+          },
+        });
+      }
+      return;
+    }
+
+    if (action === 'play_procedure') {
+       try {
+         const procedureId = item.procedure?.procedure_id || item.procedure_id;
+         const resp = await fetch(`${apiBase}/admin/procedures/${procedureId}/queue`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({
+             lane: target?.lane || item.procedure?.target_lane,
+             session_id: target?.sessionId || undefined,
+           })
+         });
+         const data = await resp.json();
+         if (data.status === 'queued') {
+            onOpenTask && onOpenTask(data.task_id);
+         }
+       } catch (err) {
+         console.error('Failed to play procedure:', err);
+       }
+       return;
+    }
+
+    const prompt = buildWorkbenchPrompt(
+      action,
+      null,
+      item?.task || (item?.id ? item : null),
+      null, // procedure
+      item?.attempt || (item?.attempt_id ? item : null)
+    );
+    void handleSendPrompt({
+      prompt,
+      task: item?.task || (item?.task_id ? item : taskMatch),
+      target: item?.attempt ? { kind: 'task', taskId: item.attempt.task_id, sessionId: target?.sessionId } : target
+    });
   };
 
   return (
@@ -2184,13 +2412,13 @@ const WorkbenchView = ({
                    const label = h.taskId ? `#${h.taskId}` : (h.procedureId ? h.procedureId : (h.sessionId ? `Session ${h.sessionId.slice(0, 4)}` : 'Node'));
                    return (
                     <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <button 
+                      <button
                         onClick={() => onInspectTarget && onInspectTarget(h)}
-                        style={{ 
-                          background: 'transparent', border: 'none', 
-                          color: isActive ? '#8257e5' : '#666', 
-                          fontSize: '11px', fontWeight: isActive ? 800 : 400, 
-                          cursor: 'pointer', textDecoration: isActive ? 'none' : 'underline' 
+                        style={{
+                          background: 'transparent', border: 'none',
+                          color: isActive ? '#8257e5' : '#666',
+                          fontSize: '11px', fontWeight: isActive ? 800 : 400,
+                          cursor: 'pointer', textDecoration: isActive ? 'none' : 'underline'
                         }}
                       >
                         {label}
@@ -2212,8 +2440,8 @@ const WorkbenchView = ({
             <div style={{ padding: '20px', textAlign: 'center', color: '#f87171', fontSize: '12px' }}>{fetchError}</div>
           )}
           {taskMatch && (
-            <TaskTargetCard 
-              task={taskMatch} 
+            <TaskTargetCard
+              task={taskMatch}
               onOpenTask={onOpenTask}
               onOpenProcedure={onOpenProcedure}
               onPauseTask={onPauseTask}
@@ -2225,7 +2453,12 @@ const WorkbenchView = ({
               onSendWorkbenchPrompt={handleContextualAction}
             />
           )}
-          {!taskMatch && procedureMatch && <ProcedureTargetCard procedure={procedureMatch} />}
+          {!taskMatch && procedureMatch && (
+            <ProcedureTargetCard
+              procedure={procedureMatch}
+              onSendWorkbenchPrompt={handleContextualAction}
+            />
+          )}
           {!taskMatch && !procedureMatch && target?.sessionId && <SessionTargetCard messages={sessionMatch} metadata={target.metadata} />}
           {!hasTarget && (
             <div style={{ padding: '60px 40px', textAlign: 'center' }}>
@@ -2254,7 +2487,7 @@ const WorkbenchView = ({
           <div style={{ fontSize: '11px', color: '#555', fontWeight: 800, letterSpacing: '0.08em' }}>ACTION CONSOLE</div>
           <div style={{ display: 'flex', gap: '8px' }}>
              {activeTool && (
-               <button 
+               <button
                  onClick={() => setActiveTool(null)}
                  style={{ background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)', color: '#f87171', borderRadius: '999px', padding: '4px 10px', fontSize: '10px', fontWeight: 800, cursor: 'pointer' }}
                >
@@ -2304,7 +2537,7 @@ const WorkbenchView = ({
                     const isAssistant = msg.role === 'assistant';
                     const isSystem = msg.role === 'system';
                     const bg = isAssistant ? 'rgba(130,87,229,0.03)' : (isSystem ? 'rgba(255,184,77,0.03)' : 'transparent');
-                    
+
                     return (
                       <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

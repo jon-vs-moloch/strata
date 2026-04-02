@@ -19,6 +19,7 @@ from typing import Dict, Any, Optional
 import asyncio
 import os
 from sqlalchemy.exc import OperationalError
+from strata.env import load_local_env
 from strata.storage.services.main import StorageManager
 from strata.storage.models import TaskModel, TaskType, TaskState, ParameterModel, task_state_api_value
 from strata.storage.retention import get_retention_policy, get_retention_runtime, run_retention_maintenance
@@ -73,6 +74,7 @@ from strata.orchestrator.user_questions import (
 )
 
 logger = logging.getLogger(__name__)
+load_local_env()
 
 # ── Module-level singletons ────────────────────────────────────────────────────
 _model = ModelAdapter()

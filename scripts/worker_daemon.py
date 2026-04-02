@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 
+from strata.env import load_local_env
 from strata.memory.semantic import SemanticMemory
 from strata.models.adapter import ModelAdapter
 from strata.models.providers import GenericOpenAICompatibleProvider
@@ -32,6 +33,7 @@ from strata.storage.services.main import StorageManager
 
 
 logger = logging.getLogger("strata.worker_daemon")
+load_local_env(Path(__file__).resolve().parents[1])
 
 
 def _configure_logging() -> None:

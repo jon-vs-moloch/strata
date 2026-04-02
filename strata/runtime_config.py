@@ -12,7 +12,7 @@ GLOBAL_SETTINGS: Dict[str, Any] = {
     "max_sync_tool_iterations": 3,
     "automatic_task_generation": True,
     "testing_mode": False,
-    "replay_pending_tasks_on_startup": True,
+    "replay_pending_tasks_on_startup": False,
     "heavy_reflection_mode": False,
     "inference_throttle_policy": {
         "throttle_mode": "hard",

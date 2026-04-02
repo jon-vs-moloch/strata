@@ -549,6 +549,13 @@ def register_runtime_admin_routes(
             raise HTTPException(status_code=404, detail="task not found or not resumable")
         return {"status": "running", "task_id": task_id}
 
+    @app.post("/admin/tasks/{task_id}/stop")
+    async def stop_task(task_id: str):
+        stopped = worker.stop_task(task_id)
+        if not stopped:
+            raise HTTPException(status_code=404, detail="task not found or not stoppable")
+        return {"status": "stopped", "task_id": task_id}
+
     @app.post("/admin/tasks/{task_id}/replay")
     async def replay_task(task_id: str, payload: Dict[str, Any] | None = None):
         replayed = await worker.replay_task(task_id, overrides=payload)
@@ -562,12 +569,12 @@ def register_runtime_admin_routes(
         original = storage.tasks.get_by_id(task_id)
         if not original:
             raise HTTPException(status_code=404, detail="original task not found")
-            
+
         new_title = payload.get("title") or f"[BRANCH] {original.title}"
         new_desc = payload.get("description") or original.description
         new_constraints = dict(original.constraints or {})
         new_constraints.update(payload.get("constraints") or {})
-        
+
         branch = storage.tasks.create(
             title=new_title,
             description=new_desc,
@@ -586,16 +593,97 @@ def register_runtime_admin_routes(
         task = storage.tasks.get_by_id(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
-            
+
         if "title" in payload: task.title = payload["title"]
         if "description" in payload: task.description = payload["description"]
         if "constraints" in payload:
             c = dict(task.constraints or {})
             c.update(payload["constraints"])
             task.constraints = c
-            
+
         storage.commit()
         return {"status": "mutated", "task_id": task_id}
+
+    @app.get("/admin/workbench/procedures/{procedure_id}/steps/{step_id}/preview")
+    async def preview_procedure_step(procedure_id: str, step_id: str, storage=Depends(get_storage)):
+        from strata.procedures.registry import get_procedure
+        try:
+            procedure = get_procedure(storage, procedure_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        step = next((s for s in procedure.get("checklist", []) if s["id"] == step_id), None)
+        if not step:
+            raise HTTPException(status_code=404, detail=f"Step {step_id} not found in procedure {procedure_id}")
+
+        system_prompt = (
+            f"You are an Expert Agent executing a specific step of the procedure: {procedure['title']}.\n"
+            f"Procedure Summary: {procedure.get('summary', '')}\n"
+            f"Overall Instructions: {procedure.get('instructions', '')}\n\n"
+            "Your goal is to satisfy the verification criteria for this step."
+        )
+        user_prompt = (
+            f"STEP: {step['title']}\n"
+            f"VERIFICATION: {step['verification']}\n\n"
+            "Please analyze the current state and determine if this step is complete or if further action is required."
+        )
+        return {
+            "status": "ok",
+            "procedure_id": procedure_id,
+            "step_id": step_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+
+    @app.post("/admin/workbench/procedures/{procedure_id}/steps/{step_id}/execute")
+    async def execute_procedure_step(procedure_id: str, step_id: str, storage=Depends(get_storage)):
+        from strata.procedures.registry import get_procedure
+        try:
+            procedure = get_procedure(storage, procedure_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        step = next((s for s in procedure.get("checklist", []) if s["id"] == step_id), None)
+        if not step:
+            raise HTTPException(status_code=404, detail=f"Step {step_id} not found in procedure {procedure_id}")
+
+        system_prompt = (
+            f"You are an Expert Agent executing a specific step of the procedure: {procedure['title']}.\n"
+            f"Procedure Summary: {procedure.get('summary', '')}\n"
+            f"Overall Instructions: {procedure.get('instructions', '')}\n\n"
+            "Your goal is to satisfy the verification criteria for this step."
+        )
+        user_prompt = (
+            f"STEP: {step['title']}\n"
+            f"VERIFICATION: {step['verification']}\n\n"
+            "Please analyze the current state and determine if this step is complete or if further action is required."
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = await model_adapter.chat(messages)
+        if response.get("status") != "ok":
+            return {
+                "status": "error",
+                "procedure_id": procedure_id,
+                "step_id": step_id,
+                "execution_mode": "dry_run",
+                "messages": messages,
+                "message": response.get("message") or "Dry-run execution failed",
+                "response": response,
+            }
+        return {
+            "status": "ok",
+            "procedure_id": procedure_id,
+            "step_id": step_id,
+            "execution_mode": "dry_run",
+            "messages": messages,
+            "response": response,
+        }
 
     @app.post("/admin/registry/procedures/{id}/mutate")
     async def mutate_procedure(id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
@@ -604,7 +692,7 @@ def register_runtime_admin_routes(
             procedure = get_procedure(storage, id)
         except KeyError:
             raise HTTPException(status_code=404, detail="procedure not found")
-            
+
         updated = {**procedure, **payload}
         save_procedure(storage, updated)
         storage.commit()
@@ -734,6 +822,8 @@ def register_runtime_admin_routes(
             "mutate_task": mutate_task,
             "mutate_procedure": mutate_procedure,
             "get_task_detail": get_task_detail,
+            "preview_procedure_step": preview_procedure_step,
+            "execute_procedure_step": execute_procedure_step,
             "sse_events": sse_events,
         }
     )

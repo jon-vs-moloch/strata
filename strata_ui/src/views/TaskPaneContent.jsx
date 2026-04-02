@@ -33,6 +33,10 @@ export default function TaskPaneContent({
   onOpenProcedure,
   onOpenTask,
   onOpenWorkbench,
+  showStartupActions = false,
+  hasPersistedSessions = false,
+  onLoadPreviousSession,
+  onStartNewSession,
 }) {
   const scopeLaneDetail = currentScope === 'home' ? null : (laneDetails?.[currentScope] || null);
   const scopeModeLabel = currentScope === 'home'
@@ -162,6 +166,44 @@ export default function TaskPaneContent({
           <div style={{ fontSize: '13px', color: '#333' }}>
             {laneFinishedTasks.length > 0 || scopeHasAnyTasks ? 'No current tasks' : 'No tasks yet'}
           </div>
+          {showStartupActions && (
+            <div style={{ display: 'flex', gap: '10px', marginTop: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+              {hasPersistedSessions ? (
+                <button
+                  type="button"
+                  onClick={onLoadPreviousSession}
+                  style={{
+                    borderRadius: '999px',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    background: 'rgba(255,255,255,0.04)',
+                    color: '#d7d9e6',
+                    padding: '10px 16px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Load Previous Session
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={onStartNewSession}
+                style={{
+                  borderRadius: '999px',
+                  border: '1px solid rgba(130,87,229,0.28)',
+                  background: 'rgba(130,87,229,0.14)',
+                  color: '#dccfff',
+                  padding: '10px 16px',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Start New
+              </button>
+            </div>
+          )}
         </div>
       )}
 

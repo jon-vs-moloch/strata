@@ -133,6 +133,7 @@ Near-term product backlog:
 
 - redesign the `Tasks` surface around present work, queued work, recently completed work, legacy work, and archived work
 - keep task progress visible even when a task is expanded and keep lane progress visible even when another scope is focused
+- move throttle controls off the global header and onto the relevant agent/lane surfaces, because throttle posture should be scoped to the workstream it affects rather than presented as an app-global switch
 - show task provenance explicitly: why the task exists, who/what spawned it, and what caused retries, decomposition, review, or verification
 - render attempts as expandable context -> result narratives rather than only status chips, while still keeping concise attempt metadata visible when collapsed
 - nest verification, audits, reviews, and other spawned child work under the task or attempt that created it
@@ -147,6 +148,7 @@ Near-term product backlog:
 - replace raw structured metadata blobs with purpose-built displays wherever the structure is known
 - age completed work automatically from recent -> legacy -> archived without requiring user cleanup
 - summarize and archive stale message/task clutter automatically rather than expecting user housekeeping
+- reduce the right-rail operational telemetry panel to a lightweight status summary once the task pane itself communicates task state well; verbose telemetry should move to dedicated inspection surfaces instead of dominating the default task view
 - eventually support capability/profile gating across shells, including simplified user modes, power-user/developer modes, and stricter enterprise-managed visibility/control profiles
 - maintain a first-class bug tracker so runtime defects and truthfulness gaps become durable system work rather than ephemeral thread-local observations; see [bug-tracker.md](/Users/jon/Projects/strata/docs/spec/bug-tracker.md)
 - make reflection arbitrarily deep: operator surfaces should eventually drill all the way down into Strata's own source, so tools, Procedures, Knowledge artifacts, runtime policies, and even the UI itself can be inspected and edited from inside Strata
@@ -160,6 +162,9 @@ Near-term product backlog:
 - emit a fast conversational acknowledgement before long-running work begins, so the user immediately knows the system accepted the request and what it is about to do
 - treat non-thinking responses as `instant` responses throughout the system vocabulary and UI
 - add an explicit fast routing decision for `instant` vs thinking responses, with the option to skip the router entirely when a flow is already known to be safely `instant`
+- move `instant`/thinking selection out of the chat composer; chat should route automatically unless a future debugging/control surface explicitly says otherwise
+- treat `instant`/thinking as a workbench/runtime configuration control for bounded processes, so operators can deliberately short-circuit reasoning on procedures or flows where non-thinking execution is sufficient
+- build a first-class "decide to think or not" routing module and treat explicit `instant` overrides as policy inputs to that module rather than as chat-global UI state
 - narrate tool use conversationally in user-facing chat when the model is performing a lookup, inspection, or other multi-step process
 - emit periodic progress updates for longer chat work so silence is never confused with idleness
 - push long-running or backgroundable chat work onto the background worker instead of holding the foreground request open unnecessarily
