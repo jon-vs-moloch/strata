@@ -188,13 +188,12 @@ def register_runtime_admin_routes(
 
     @app.get("/admin/health")
     async def health_check():
-        from sqlalchemy import text
         from strata.storage.services.main import StorageManager
 
         storage = StorageManager()
         try:
-            db = storage.session
-            db.execute(text("SELECT 1"))
+            with storage.engine.connect() as connection:
+                connection.exec_driver_sql("SELECT 1")
             worker_status = dict(getattr(worker, "status", {}) or {})
             worker_alive = str(worker_status.get("worker") or "").upper() in {"RUNNING", "PAUSED"}
             return {
