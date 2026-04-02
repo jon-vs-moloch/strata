@@ -454,15 +454,20 @@ const friendlyModelLabel = (model) => {
 };
 
 const normalizeCommunicativeAct = (message) => String(message?.message_metadata?.communicative_act || '').trim().toLowerCase();
+const normalizeMessageSourceActor = (message) => String(message?.message_metadata?.source_actor || '').trim().toLowerCase();
+const normalizeMessageSourceKind = (message) => String(message?.message_metadata?.source_kind || '').trim().toLowerCase();
 
 const isDirectCommunication = (message) => {
   if (message?.role === 'user') return true;
   if (message?.role === 'assistant') {
-    const sourceKind = String(message?.message_metadata?.source_kind || '').trim().toLowerCase();
-    const sourceActor = String(message?.message_metadata?.source_actor || '').trim().toLowerCase();
+    const sourceKind = normalizeMessageSourceKind(message);
+    const sourceActor = normalizeMessageSourceActor(message);
     const act = normalizeCommunicativeAct(message);
     if (sourceActor === 'task_runner' && act !== 'response' && act !== 'question') {
       return false;
+    }
+    if (sourceActor === 'chat_runtime' || sourceActor === 'agent') {
+      return true;
     }
     if (!sourceKind || sourceKind === 'chat_reply' || sourceKind === 'chat_error' || (sourceKind === 'tool_progress' && sourceActor === 'chat_runtime')) {
       return true;
@@ -473,23 +478,18 @@ const isDirectCommunication = (message) => {
 };
 
 const shouldHideFromChatRail = (message) => {
-  const metadata = message?.message_metadata || {};
-  const sourceKind = String(metadata.source_kind || '').trim().toLowerCase();
-  const sourceActor = String(metadata.source_actor || '').trim().toLowerCase();
+  const sourceKind = normalizeMessageSourceKind(message);
+  const sourceActor = normalizeMessageSourceActor(message);
   const act = normalizeCommunicativeAct(message);
   if (sourceActor === 'task_runner' && act !== 'response' && act !== 'question') return true;
   return false;
 };
 
 const eventAlignmentForMessage = (message) => {
-  const metadata = message?.message_metadata || {};
-  const sourceKind = String(metadata.source_kind || '').trim().toLowerCase();
-  const sourceActor = String(metadata.source_actor || '').trim().toLowerCase();
+  const sourceKind = normalizeMessageSourceKind(message);
+  const sourceActor = normalizeMessageSourceActor(message);
   if (sourceKind === 'feedback_event' || sourceActor === 'user_opened' || sourceActor === 'message_feedback') {
     return 'right';
-  }
-  if (sourceKind.includes('tool') || sourceKind.includes('task_') || sourceActor === 'task_runner' || sourceActor === 'chat_runtime') {
-    return 'left';
   }
   return 'center';
 };

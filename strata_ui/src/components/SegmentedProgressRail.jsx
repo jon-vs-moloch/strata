@@ -56,7 +56,7 @@ export default function SegmentedProgressRail({
   const normalizedPercent = clampPercent(percent);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+    <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flex: 1, width: '100%' }}>
       <div style={{ flex: 1, height: `${railHeight}px`, borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden', position: 'relative' }}>
         <div
           style={{
