@@ -49,6 +49,7 @@ class ChatToolExecutor:
         except Exception:
             args = {}
         reason = str(args.get("reason") or "").strip()
+        progress_message = str(args.get("progress_message") or "").strip()
         lane = infer_lane_from_session_id(session_id)
         referenced_task_id = str(args.get("task_id") or args.get("source_id") or "").strip()
         referenced_task = storage.tasks.get_by_id(referenced_task_id) if referenced_task_id else None
@@ -86,6 +87,7 @@ class ChatToolExecutor:
                 "tool_outputs_generated": False,
                 "async_task_id": None,
                 "tool_reason": reason,
+                "tool_progress_message": progress_message,
                 "tool_name": func_name,
             }
 
@@ -566,12 +568,13 @@ class ChatToolExecutor:
                 storage.session.rollback()
                 tool_content = f"Spec proposal rejected: {exc}"
                 return {
-                    "tool_message": {"role": "tool", "tool_call_id": tool_call_id, "name": func_name, "content": tool_content},
-                    "tool_outputs_generated": tool_outputs_generated,
-                    "async_task_id": async_task_id,
-                    "tool_reason": reason,
-                    "tool_name": func_name,
-                }
+                "tool_message": {"role": "tool", "tool_call_id": tool_call_id, "name": func_name, "content": tool_content},
+                "tool_outputs_generated": tool_outputs_generated,
+                "async_task_id": async_task_id,
+                "tool_reason": reason,
+                "tool_progress_message": progress_message,
+                "tool_name": func_name,
+            }
             task.constraints["spec_proposal_id"] = proposal["proposal_id"]
             storage.commit()
             await self.deps["worker"].enqueue(task.task_id)
@@ -604,5 +607,6 @@ class ChatToolExecutor:
             "tool_outputs_generated": tool_outputs_generated,
             "async_task_id": async_task_id,
             "tool_reason": reason,
+            "tool_progress_message": progress_message,
             "tool_name": func_name,
         }

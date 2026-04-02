@@ -9,6 +9,7 @@ stay small and declarative.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from strata.communication.primitives import build_communication_decision, deliver_communication_decision
@@ -576,12 +577,35 @@ Available Tools:
                 async_task_ids: List[str] = []
                 messages.append({"role": "assistant", "content": chain_of_thought or None, "tool_calls": tool_calls})
                 invocation_updates: List[str] = []
+                immediate_updates: List[str] = []
+                for call in tool_calls:
+                    call_args: Dict[str, Any] = {}
+                    try:
+                        call_args = json.loads(call.get("function", {}).get("arguments", "{}"))
+                    except Exception:
+                        call_args = {}
+                    immediate_update = str(call_args.get("progress_message") or call_args.get("reason") or "").strip()
+                    if immediate_update:
+                        immediate_updates.append(immediate_update)
+                if immediate_updates:
+                    preview = " ".join(
+                        sentence if sentence.endswith((".", "!", "?")) else f"{sentence}."
+                        for sentence in immediate_updates[:3]
+                    )
+                    await self.emit_chat_communication(
+                        storage,
+                        session_id=session_id,
+                        content=preview,
+                        communicative_act="notification",
+                        response_kind="progress",
+                        source_kind="tool_progress",
+                    )
                 for call in tool_calls:
                     result = await self.tool_executor.execute_tool_call(
                         storage, call=call, session_id=session_id, content=content, knowledge_pages=knowledge_pages
                     )
                     messages.append(result["tool_message"])
-                    reason = str(result.get("tool_reason") or "").strip()
+                    reason = str(result.get("tool_progress_message") or result.get("tool_reason") or "").strip()
                     if reason:
                         invocation_updates.append(reason)
                     elif not chain_of_thought.strip():

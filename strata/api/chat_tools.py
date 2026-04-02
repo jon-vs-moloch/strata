@@ -31,11 +31,16 @@ def _with_reason_parameter(tool_schema: Dict[str, Any]) -> Dict[str, Any]:
         "type": "string",
         "description": "One short sentence describing why you are calling this tool right now. This is surfaced to the operator.",
     }
+    properties["progress_message"] = {
+        "type": "string",
+        "description": "Optional short status update shown to the operator immediately before the tool runs.",
+    }
     parameters["properties"] = properties
     function["parameters"] = parameters
     function["description"] = (
         str(function.get("description") or "")
         + " Always include a short `reason` when calling this tool so the operator can see what you are doing."
+        + " Include `progress_message` when you can phrase a natural brief update for the chat UI."
     ).strip()
     return enriched
 
