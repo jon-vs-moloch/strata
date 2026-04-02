@@ -718,6 +718,7 @@ const TasksView = ({
 
 const KnowledgeView = ({
   pages,
+  sources,
   query,
   selectedPage,
   selectedSlug,
@@ -767,7 +768,7 @@ const KnowledgeView = ({
           <div style={{ fontSize: '12px', color: '#8d8ea1' }}>
             {knowledgeMode === 'wiki'
               ? (pages.length ? `${pages.length} page${pages.length === 1 ? '' : 's'} visible` : 'No indexed pages yet')
-              : 'Source uploads and raw material should land here before integration.'}
+              : (sources.length ? `${sources.length} source${sources.length === 1 ? '' : 's'} visible` : 'No raw sources visible yet')}
           </div>
         </div>
 
@@ -837,6 +838,32 @@ const KnowledgeView = ({
               >
                 Add source note and queue integration
               </button>
+              {sources.map((source) => (
+                <div
+                  key={source.path}
+                  style={{
+                    background: 'rgba(255,255,255,0.02)',
+                    border: '1px solid rgba(255,255,255,0.06)',
+                    borderRadius: '12px',
+                    padding: '12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <div style={{ color: '#edeeef', fontSize: '12px', fontWeight: 700 }}>{source.name || source.path}</div>
+                  <div style={{ color: '#8d8ea1', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace" }}>{source.path}</div>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    <RoutePill label="UPDATED" value={source.updated_at ? formatAbsoluteTime(source.updated_at) : '—'} tone="neutral" />
+                    <RoutePill label="SIZE" value={typeof source.bytes === 'number' ? `${source.bytes}b` : '—'} tone="neutral" />
+                  </div>
+                </div>
+              ))}
+              {!sources.length && (
+                <div style={{ fontSize: '12px', color: '#8d8ea1', lineHeight: 1.6 }}>
+                  No raw knowledge sources are visible yet.
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException
@@ -57,6 +58,34 @@ def register_knowledge_admin_routes(
             limit=limit,
         )
         return {"status": "ok", "pages": pages}
+
+    @app.get("/admin/knowledge/sources")
+    async def list_knowledge_sources(limit: int = 100):
+        knowledge_dir = os.path.join(base_dir, ".knowledge")
+        sources = []
+        if os.path.isdir(knowledge_dir):
+            for root, _, files in os.walk(knowledge_dir):
+                for name in files:
+                    full_path = os.path.join(root, name)
+                    rel_path = os.path.relpath(full_path, base_dir)
+                    normalized = rel_path.replace("\\", "/")
+                    if normalized.startswith(".knowledge/specs/"):
+                        continue
+                    try:
+                        stat = os.stat(full_path)
+                    except OSError:
+                        continue
+                    sources.append(
+                        {
+                            "path": normalized,
+                            "name": name,
+                            "bytes": int(stat.st_size or 0),
+                            "updated_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+                            "kind": "knowledge_source",
+                        }
+                    )
+        sources.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return {"status": "ok", "sources": sources[: max(1, int(limit or 100))]}
 
     @app.get("/admin/knowledge/maintenance")
     async def get_knowledge_maintenance(storage=Depends(get_storage)):
@@ -139,6 +168,7 @@ def register_knowledge_admin_routes(
         {
             "compact_knowledge_base": compact_knowledge_base,
             "list_knowledge_pages": list_knowledge_pages,
+            "list_knowledge_sources": list_knowledge_sources,
             "get_knowledge_maintenance": get_knowledge_maintenance,
             "get_knowledge_page_metadata": get_knowledge_page_metadata,
             "get_knowledge_page": get_knowledge_page,

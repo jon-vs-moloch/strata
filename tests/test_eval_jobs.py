@@ -289,6 +289,105 @@ def test_run_eval_job_task_records_full_eval_source_task(monkeypatch):
     assert reloaded_task.constraints["system_job_result"]["status"] == "completed"
 
 
+def test_bootstrap_cycle_without_promotion_queues_audit(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Bootstrap Cycle",
+        description="Queued trainer-over-agent bootstrap cycle.",
+        state=TaskState.PENDING,
+        type=TaskType.JUDGE,
+        constraints={
+            "lane": "trainer",
+            "system_job": {
+                "kind": "bootstrap_cycle",
+                "payload": {
+                    "proposer_tiers": ["agent"],
+                    "auto_promote": True,
+                    "suite_name": "bootstrap_mcq_v1",
+                    "run_count": 1,
+                    "baseline_change_id": "baseline",
+                },
+            },
+        },
+        session_id="trainer:default",
+    )
+    storage.commit()
+
+    queued = {}
+
+    async def fake_generate_eval_candidate_from_tier(*_args, **_kwargs):
+        return {
+            "status": "ok",
+            "candidate_change_id": "candidate_a",
+            "proposer_tier": "agent",
+            "rationale": "Try a small prompt change.",
+            "expected_gain": "proposal quality",
+            "eval_harness_config_override": {
+                "system_prompt": "A small prompt delta.",
+                "context_files": [".knowledge/specs/project_spec.md"],
+            },
+        }
+
+    async def fake_resolve_eval_proposal_against_history(*_args, **_kwargs):
+        return {
+            "decision": "keep_both_distinct",
+            "should_evaluate": True,
+            "reason": "deterministic_distinct",
+        }
+
+    class FakeExperimentResult:
+        def __init__(self):
+            self.candidate_change_id = "candidate_a"
+            self.recommendation = "insufficient_signal"
+
+        def model_dump(self):
+            return {
+                "candidate_change_id": "candidate_a",
+                "recommendation": "insufficient_signal",
+            }
+
+    async def fake_run_full_eval_gate(*_args, **_kwargs):
+        return FakeExperimentResult()
+
+    async def fake_queue_eval_system_job(storage_obj, **kwargs):
+        queued.update(kwargs)
+        audit_task = storage_obj.tasks.create(
+            title=kwargs["title"],
+            description=kwargs["description"],
+            state=TaskState.PENDING,
+            type=TaskType.JUDGE,
+            constraints={
+                "lane": "trainer",
+                "system_job": {"kind": kwargs["kind"], "payload": kwargs["payload"]},
+            },
+            session_id=kwargs.get("session_id"),
+        )
+        storage_obj.commit()
+        return {"status": "queued", "task_id": audit_task.task_id}
+
+    monkeypatch.setattr(
+        "strata.api.experiment_runtime.generate_eval_candidate_from_tier",
+        fake_generate_eval_candidate_from_tier,
+    )
+    monkeypatch.setattr(
+        "strata.api.experiment_runtime.resolve_eval_proposal_against_history",
+        fake_resolve_eval_proposal_against_history,
+    )
+    monkeypatch.setattr("strata.eval.job_runner.ExperimentRunner.run_full_eval_gate", fake_run_full_eval_gate)
+    monkeypatch.setattr("strata.api.main._queue_eval_system_job", fake_queue_eval_system_job)
+
+    result = asyncio.run(run_eval_job_task(task, storage, model_adapter=None))
+    storage.session.expire_all()
+    reloaded_task = storage.tasks.get_by_id(task.task_id)
+
+    assert result["promoted"] == []
+    assert queued["kind"] == "trace_review"
+    assert queued["payload"]["trace_kind"] == "bootstrap_cycle"
+    assert queued["payload"]["source_task_id"] == task.task_id
+    assert queued["payload"]["trace_payload"]["recommendation_counts"]["insufficient_signal"] == 1
+    assert reloaded_task.constraints["system_job_result"]["status"] == "completed"
+
+
 def test_trace_review_job_enqueues_blocked_task_question_when_review_stays_unavailable(monkeypatch):
     storage = make_storage()
     blocked = storage.tasks.create(

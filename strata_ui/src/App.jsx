@@ -1231,6 +1231,7 @@ function App() {
   const [specsSnapshot, setSpecsSnapshot] = useState(null);
   const [specProposalSnapshot, setSpecProposalSnapshot] = useState([]);
   const [knowledgePagesSnapshot, setKnowledgePagesSnapshot] = useState([]);
+  const [knowledgeSources, setKnowledgeSources] = useState([]);
   const [knowledgeQuery, setKnowledgeQuery] = useState('');
   const [knowledgePages, setKnowledgePages] = useState([]);
   const [selectedKnowledgeSlug, setSelectedKnowledgeSlug] = useState('');
@@ -1586,12 +1587,9 @@ function App() {
       try {
         const sessionParams = activeNav === 'chat' && currentScope !== 'home' ? { lane: effectiveLane } : undefined;
         const taskParams = { attempt_limit: 8, include_evidence: false };
-        if (currentScope !== 'home' && activeNav !== 'dashboard') {
-          taskParams.lane = effectiveLane;
-        }
         const needsDashboardData = activeNav === 'dashboard';
         const needsChatBannerData = activeNav === 'chat';
-        const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, retentionRes, variantRatingsRes, predictionTrustRes, proposalConfigRes, evalJobsRes] = await Promise.all([
+        const [tasksRes, msgsRes, sessionsRes, telemetryRes, providerTelemetryRes, dashboardRes, loadedContextRes, routingRes, specsRes, specProposalsRes, knowledgePagesRes, knowledgeSourcesRes, retentionRes, variantRatingsRes, predictionTrustRes, proposalConfigRes, evalJobsRes] = await Promise.all([
           axios.get(`${API}/tasks`, { params: taskParams }),
           !sessionId || isDraftSession ? Promise.resolve({ data: [] }) : axios.get(`${API}/messages?session_id=${sessionId}`),
           axios.get(`${API}/sessions`, { params: sessionParams }),
@@ -1603,6 +1601,7 @@ function App() {
           needsDashboardData ? axios.get(`${API}/admin/specs`) : Promise.resolve({ data: { specs: null } }),
           (needsDashboardData || needsChatBannerData) ? axios.get(`${API}/admin/spec_proposals?limit=6`) : Promise.resolve({ data: { proposals: [] } }),
           needsDashboardData ? axios.get(`${API}/admin/knowledge/pages?limit=6&audience=operator`) : Promise.resolve({ data: { pages: [] } }),
+          activeNav === 'knowledge' ? axios.get(`${API}/admin/knowledge/sources?limit=100`) : Promise.resolve({ data: { sources: [] } }),
           needsDashboardData ? axios.get(`${API}/admin/storage/retention`) : Promise.resolve({ data: null }),
           needsDashboardData ? axios.get(`${API}/admin/variants/ratings`) : Promise.resolve({ data: null }),
           needsDashboardData ? axios.get(`${API}/admin/predictions/trust`) : Promise.resolve({ data: null }),
@@ -1650,6 +1649,7 @@ function App() {
           setSpecsSnapshot(specsRes.data.specs || null);
           setSpecProposalSnapshot(specProposalsRes.data.proposals || []);
           setKnowledgePagesSnapshot(knowledgePagesRes.data.pages || []);
+          setKnowledgeSources(knowledgeSourcesRes.data.sources || []);
           setRetentionSnapshot(retentionRes.data || null);
           setVariantRatingsSnapshot(variantRatingsRes?.data?.ratings || null);
           setPredictionTrustSnapshot(predictionTrustRes?.data?.trust || null);
@@ -1821,7 +1821,21 @@ function App() {
       }
     };
 
-    void loadKnowledge();
+    const loadKnowledgeSources = async () => {
+      try {
+        const sourcesRes = await axios.get(`${API}/admin/knowledge/sources`, {
+          params: { limit: 100 },
+        });
+        if (cancelled) return;
+        setKnowledgeSources(sourcesRes.data.sources || []);
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Failed to load knowledge sources', err);
+        setKnowledgeSources([]);
+      }
+    };
+
+    void Promise.all([loadKnowledge(), loadKnowledgeSources()]);
     return () => {
       cancelled = true;
     };
@@ -3251,6 +3265,7 @@ function App() {
               }}
               knowledgeProps={{
                 pages: knowledgePages,
+                sources: knowledgeSources,
                 query: knowledgeQuery,
                 selectedPage: selectedKnowledgePage,
                 selectedSlug: selectedKnowledgeSlug,

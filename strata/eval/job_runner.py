@@ -374,6 +374,61 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                 "skipped": skipped,
                 "auto_promote": auto_promote,
             }
+            if not promoted:
+                from strata.api.main import _queue_eval_system_job
+
+                evaluated_candidates = [item.get("proposal", {}) for item in evaluated]
+                recommendation_counts: Dict[str, int] = {}
+                for item in evaluated:
+                    recommendation = str((item.get("result") or {}).get("recommendation") or "unknown").strip() or "unknown"
+                    recommendation_counts[recommendation] = recommendation_counts.get(recommendation, 0) + 1
+                await _queue_eval_system_job(
+                    storage,
+                    kind="trace_review",
+                    title=f"Audit Bootstrap Cycle: {str(task.title or 'bootstrap')[:64]}",
+                    description=(
+                        "Bootstrap cycle completed without a promotable result. Audit why the cycle failed to cash out "
+                        "and identify the next repair, calibration, or spec intervention."
+                    ),
+                    payload={
+                        "trace_kind": "bootstrap_cycle",
+                        "task_id": task.task_id,
+                        "associated_task_ids": [task.task_id, *(payload.get("associated_task_ids") or [])],
+                        "reviewer_tier": "trainer",
+                        "emit_followups": True,
+                        "persist_to_task": True,
+                        "spec_scope": "project",
+                        "source_task_id": task.task_id,
+                        "trace_payload": {
+                            "kind": "bootstrap_cycle",
+                            "current_eval_harness_config": current_config,
+                            "evaluated_candidate_ids": [str(item.get("candidate_change_id") or "") for item in evaluated_candidates if str(item.get("candidate_change_id") or "").strip()],
+                            "recommendation_counts": recommendation_counts,
+                            "promoted_candidate_ids": [str(item.get("candidate_change_id") or item.get("candidate_change", "") or "") for item in promoted],
+                            "skipped_count": len(skipped),
+                            "auto_promote": auto_promote,
+                        },
+                        "provenance": {
+                            "source_kind": "bootstrap_cycle",
+                            "source_actor": "trainer",
+                            "authority_kind": "spec_policy",
+                            "authority_ref": "bootstrap_cycle_no_promotion_audit",
+                            "derived_from": [f"task:{task.task_id}"],
+                            "governing_spec_refs": [
+                                ".knowledge/specs/constitution.md",
+                                ".knowledge/specs/project_spec.md",
+                                "docs/spec/step-runtime-flow.md",
+                            ],
+                            "note": "Bootstrap cycle ended without a promotable candidate and should be audited instead of silently normalizing the miss.",
+                        },
+                    },
+                    session_id=task.session_id,
+                    dedupe_signature={
+                        "task_id": task.task_id,
+                        "trace_kind": "bootstrap_cycle",
+                        "source_task_id": task.task_id,
+                    },
+                )
         elif kind == "eval_matrix":
             _progress(step="system_job", label="Running eval matrix", detail=str(payload.get("suite_name") or "mmlu_mini_v1"), progress_label="eval matrix")
             report = await run_eval_matrix(
