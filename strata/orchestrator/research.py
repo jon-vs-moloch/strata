@@ -40,6 +40,8 @@ DEFAULT_RESEARCH_ITERATION_POLICY = {
     "default_reattempt_limit": 3,
     "recovery_shell_reattempt_limit": 1,
     "lineage_iteration_limit": 4,
+    "repeated_failure_tooling_limit": 3,
+    "resolution_analysis_retry_limit": 3,
 }
 
 
@@ -89,6 +91,14 @@ def load_research_iteration_policy(storage) -> Dict[str, int]:
         "lineage_iteration_limit": _sanitize_positive_int(
             policy.get("lineage_iteration_limit"),
             DEFAULT_RESEARCH_ITERATION_POLICY["lineage_iteration_limit"],
+        ),
+        "repeated_failure_tooling_limit": _sanitize_positive_int(
+            policy.get("repeated_failure_tooling_limit"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["repeated_failure_tooling_limit"],
+        ),
+        "resolution_analysis_retry_limit": _sanitize_positive_int(
+            policy.get("resolution_analysis_retry_limit"),
+            DEFAULT_RESEARCH_ITERATION_POLICY["resolution_analysis_retry_limit"],
         ),
     }
 

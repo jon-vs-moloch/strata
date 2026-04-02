@@ -6,6 +6,7 @@
 
 import logging
 import asyncio
+import re
 from typing import Optional, List
 from strata.core.lanes import infer_lane_from_task
 from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
@@ -20,6 +21,9 @@ from strata.orchestrator.user_questions import (
 )
 
 logger = logging.getLogger(__name__)
+
+_UUIDISH_PATTERN = re.compile(r"\b[0-9a-f]{8,}(?:-[0-9a-f]{4,}){0,4}\b", re.IGNORECASE)
+_INTEGER_PATTERN = re.compile(r"\b\d+\b")
 
 
 async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> None:
@@ -130,6 +134,47 @@ def _clip_text(value: str, limit: int = 220) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _normalize_failure_reason(error: Exception) -> str:
+    text = str(error or "").strip().lower()
+    if not text:
+        return ""
+    text = _UUIDISH_PATTERN.sub("<id>", text)
+    text = _INTEGER_PATTERN.sub("<n>", text)
+    return " ".join(text.split())
+
+
+def _count_consecutive_matching_failures(storage, task: TaskModel, fingerprint: str) -> int:
+    if storage is None or not hasattr(storage, "attempts") or not fingerprint:
+        return 0
+    attempts = list(storage.attempts.get_by_task_id(task.task_id) or [])
+    if not attempts:
+        return 0
+    attempts.sort(key=lambda row: str(getattr(row, "started_at", "") or ""), reverse=True)
+    total = 0
+    for attempt in attempts:
+        if getattr(getattr(attempt, "outcome", None), "value", None) != AttemptOutcome.FAILED.value:
+            break
+        attempt_reason = _normalize_failure_reason(str(getattr(attempt, "reason", "") or ""))
+        if attempt_reason != fingerprint:
+            break
+        total += 1
+    return total
+
+
+def _tooling_target_for_repeated_failure(task: TaskModel, error: Exception) -> str:
+    title = str(getattr(task, "title", "") or "").strip().lower()
+    failure_kind = _failure_kind(error)
+    if failure_kind == "task_boundary_violation":
+        return "task_decomposition_policy"
+    if task.type == TaskType.RESEARCH and title.startswith("procedure step:"):
+        return "procedure_step_research"
+    if task.type == TaskType.RESEARCH:
+        return "research_execution"
+    if task.type == TaskType.DECOMP:
+        return "task_decomposition"
+    return "task_runtime"
+
+
 def _build_blocked_question(task: TaskModel, *, storage, reasoning: str, error_text: str = "") -> tuple[str, dict]:
     focus = _recovery_focus_task(storage, task)
     focus_title = str(getattr(focus, "title", "") or getattr(task, "title", "") or "this task").strip()
@@ -231,6 +276,8 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
     failure_kind = _failure_kind(error)
     iteration_autopsy = _iteration_autopsy(error)
     lineage_iteration_failures = _count_iteration_limit_failures_in_lineage(storage, task)
+    failure_fingerprint = _normalize_failure_reason(error)
+    repeated_failure_count = _count_consecutive_matching_failures(storage, task, failure_fingerprint)
     
     # A. Parse Errors -> internal_replan
     if any(x in err_str for x in ["syntaxerror", "parse error", "invalid json"]):
@@ -334,6 +381,21 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
             resolution="blocked"
         )
 
+    repeated_failure_limit = int(policy.get("repeated_failure_tooling_limit", 3) or 3)
+    if repeated_failure_count >= repeated_failure_limit:
+        target = _tooling_target_for_repeated_failure(task, error)
+        return AttemptResolutionSchema(
+            reasoning=(
+                f"The task has failed {repeated_failure_count} consecutive times with the same normalized error "
+                f"fingerprint ('{failure_fingerprint[:120]}'). Stop reattempting the branch and degrade into a "
+                f"tooling/procedure repair path for {target}."
+            ),
+            resolution="improve_tooling",
+            tool_modification_target=target,
+            tool_improvement_reason="tool_broken",
+            new_subtasks=[],
+        )
+
     # 2. LLM-BASED ANALYSIS (Fallback/Override)
     logger.info("Falling back to LLM for complex failure analysis.")
     attempt_intelligence = render_attempt_intelligence(
@@ -368,30 +430,49 @@ Do not normalize semantically different next steps as repeated attempts of the s
 Return only one JSON object matching the requested schema.
 Do not add prose before or after the object.
 """
-    try:
-        response = await model_adapter.chat(
-            messages=[{"role": "system", "content": prompt}],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "attempt_resolution",
-                    "strict": True,
-                    "schema": AttemptResolutionSchema.model_json_schema()
+    analysis_retry_limit = int(policy.get("resolution_analysis_retry_limit", 3) or 3)
+    analysis_errors = []
+    for attempt_index in range(max(1, analysis_retry_limit)):
+        try:
+            response = await model_adapter.chat(
+                messages=[{"role": "system", "content": prompt}],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "attempt_resolution",
+                        "strict": True,
+                        "schema": AttemptResolutionSchema.model_json_schema()
+                    }
                 }
-            }
-        )
-        raw_content = response.get("content", "{}")
-        data = model_adapter.extract_structured_object(raw_content)
-        if "error" in data:
-            raise ValueError(data["error"])
-        return AttemptResolutionSchema(**data)
-    except Exception as e:
-        logger.error(f"Failed to parse structured LLM resolution: {e}. Falling back to REATTEMPT.")
-        return AttemptResolutionSchema(
-            reasoning=f"Resolution analysis failed: {e}",
-            resolution="reattempt",
-            new_subtasks=[]
-        )
+            )
+            raw_content = response.get("content", "{}")
+            data = model_adapter.extract_structured_object(raw_content)
+            if "error" in data:
+                raise ValueError(data["error"])
+            return AttemptResolutionSchema(**data)
+        except Exception as e:
+            analysis_errors.append(str(e))
+            logger.error(
+                "Failed to parse structured LLM resolution on analysis attempt %s/%s: %s",
+                attempt_index + 1,
+                max(1, analysis_retry_limit),
+                e,
+            )
+            if attempt_index + 1 >= max(1, analysis_retry_limit):
+                break
+            await asyncio.sleep(min(0.25 * (attempt_index + 1), 1.0))
+
+    target = f"resolution_analysis:{_tooling_target_for_repeated_failure(task, error)}"
+    return AttemptResolutionSchema(
+        reasoning=(
+            "Resolution analysis failed repeatedly, so retrying the task would only hide a control-loop problem. "
+            f"Analysis errors: {' | '.join(analysis_errors[:3])}"
+        ),
+        resolution="improve_tooling",
+        tool_modification_target=target,
+        tool_improvement_reason="tool_broken",
+        new_subtasks=[],
+    )
 
 async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSchema, error: Exception, storage, enqueue_fn):
     """
