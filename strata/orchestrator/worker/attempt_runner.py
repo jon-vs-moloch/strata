@@ -27,6 +27,27 @@ DEFAULT_CONTINUATION_AUDIT_INTERVAL = 3
 DEFAULT_MAX_DECOMPOSITION_DEPTH = 3
 
 
+def _process_provenance_record(
+    *,
+    source_kind: str,
+    source_actor: str,
+    authority_kind: str,
+    authority_ref: str,
+    derived_from: Optional[List[str]] = None,
+    note: str = "",
+) -> Dict[str, Any]:
+    return {
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "source_kind": str(source_kind or "").strip(),
+        "source_actor": str(source_actor or "").strip() or "system",
+        "authority_kind": str(authority_kind or "").strip() or "unspecified",
+        "authority_ref": str(authority_ref or "").strip(),
+        "derived_from": [str(item).strip() for item in list(derived_from or []) if str(item).strip()],
+        "governing_spec_refs": [],
+        "note": str(note or "").strip(),
+    }
+
+
 async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> None:
     try:
         await enqueue_fn(task_id, front=front)
@@ -37,6 +58,75 @@ async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> Non
 def _lineage_task_id(task: TaskModel) -> str:
     constraints = dict(getattr(task, "constraints", {}) or {})
     return str(constraints.get("lineage_root_task_id") or getattr(task, "task_id", "") or "").strip()
+
+
+def _upsert_decomposition_history_task(
+    storage,
+    *,
+    task: TaskModel,
+    attempt_id: Optional[str],
+    phase_id: str,
+    title: str,
+    description: str,
+    summary: Optional[Dict[str, Any]] = None,
+) -> TaskModel:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    normalized_phase_id = str(phase_id or "").strip()
+    existing = None
+    for row in storage.session.query(TaskModel).filter(TaskModel.parent_task_id == task.task_id).all():
+        constraints = dict(getattr(row, "constraints", {}) or {})
+        if str(constraints.get("inline_process_kind") or "").strip().lower() != "decomposition_phase":
+            continue
+        if str(constraints.get("decomposition_attempt_id") or "").strip() != normalized_attempt_id:
+            continue
+        if str(constraints.get("decomposition_phase_id") or "").strip() != normalized_phase_id:
+            continue
+        existing = row
+        break
+
+    constraints = bind_system_procedure(
+        {
+            "lane": infer_lane_from_task(task),
+            "source_task_id": task.task_id,
+            "inline_process_kind": "decomposition_phase",
+            "decomposition_attempt_id": normalized_attempt_id,
+            "decomposition_phase_id": normalized_phase_id,
+            "decomposition_summary": dict(summary or {}),
+            "provenance": _process_provenance_record(
+                source_kind="decomposition_phase",
+                source_actor="decomposition_runtime",
+                authority_kind="spec_policy",
+                authority_ref="project_decomposition_visible_history",
+                derived_from=[f"task:{task.task_id}"] + ([f"attempt:{normalized_attempt_id}"] if normalized_attempt_id else []),
+                note=f"Projected decomposition phase [{normalized_phase_id}] into canonical task history.",
+            ),
+        },
+        procedure_id=canonical_system_procedure_id(task_type="DECOMP"),
+        capability_kind="procedure",
+        capability_name="decomposition",
+    )
+
+    if existing is not None:
+        existing.title = title
+        existing.description = description
+        existing.state = TaskState.COMPLETE
+        existing.type = TaskType.DECOMP
+        existing.constraints = constraints
+        return existing
+
+    created = storage.tasks.create(
+        title=title,
+        description=description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.COMPLETE,
+        type=TaskType.DECOMP,
+        depth=int(getattr(task, "depth", 0) or 0) + 1,
+        priority=float(getattr(task, "priority", 0.0) or 0.0),
+        constraints=constraints,
+        flush=False,
+    )
+    return created
 
 
 def _count_ancestor_tasks(storage, task: TaskModel, *, task_types: Optional[set[TaskType]] = None) -> int:
@@ -1103,7 +1193,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
         if task.type == TaskType.RESEARCH:
             execution_result = await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.DECOMP:
-            execution_result = await _run_decomposition(task, storage, model_adapter, enqueue_fn)
+            execution_result = await _run_decomposition(task, storage, model_adapter, enqueue_fn, attempt_id=attempt.attempt_id)
         elif task.type in {TaskType.IMPL, TaskType.BUG_FIX, TaskType.REFACTOR}:
             execution_result = await _run_implementation(task, storage, model_adapter, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
         elif task.type == TaskType.JUDGE:
@@ -1276,13 +1366,30 @@ async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn
     storage.commit()
     return report
 
-async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
+async def _run_decomposition(task, storage, model_adapter, enqueue_fn, *, attempt_id=None):
     if await _resume_parent_repair_task_if_supported(storage, task, enqueue_fn):
         return
     constraints = dict(getattr(task, "constraints", {}) or {})
     max_decomposition_depth = max(1, int(constraints.get("max_decomposition_depth") or DEFAULT_MAX_DECOMPOSITION_DEPTH))
     decomposition_depth = _count_ancestor_tasks(storage, task, task_types={TaskType.DECOMP})
     if decomposition_depth >= max_decomposition_depth:
+        _upsert_decomposition_history_task(
+            storage,
+            task=task,
+            attempt_id=attempt_id,
+            phase_id="guardrail_depth",
+            title="Decomposition Issue: Recursive depth guardrail",
+            description=(
+                f"Decomposition ancestry depth {decomposition_depth} met or exceeded the configured max {max_decomposition_depth}. "
+                "Escalated to audit instead of generating another decomposition layer."
+            ),
+            summary={
+                "kind": "guardrail",
+                "guardrail": "max_decomposition_depth",
+                "decomposition_depth": decomposition_depth,
+                "max_decomposition_depth": max_decomposition_depth,
+            },
+        )
         await _queue_trace_review_guardrail(
             storage,
             task,
@@ -1302,7 +1409,26 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
         return
     decomp_mod = DecompositionModule(model_adapter, storage)
     decomp = await decomp_mod.decompose_task(task.title, task.description)
+    framing = getattr(decomp, "framing", None)
+    _upsert_decomposition_history_task(
+        storage,
+        task=task,
+        attempt_id=attempt_id,
+        phase_id="frame_task",
+        title="Decomposition Step: Frame task",
+        description=(
+            "Captured the task framing and success criteria used for this decomposition run. "
+            f"Problem statement: {str(getattr(framing, 'problem_statement', '') or task.description).strip()}"
+        ),
+        summary={
+            "repository_context": str(getattr(framing, "repository_context", "") or "").strip(),
+            "problem_statement": str(getattr(framing, "problem_statement", "") or task.description).strip(),
+            "constraints": list(getattr(framing, "constraints", []) or []),
+            "success_criteria": list(getattr(framing, "success_criteria", []) or []),
+        },
+    )
     actionable = []
+    rejected = []
     for tid, proto in (decomp.subtasks or {}).items():
         if _is_non_actionable_recovery_subtask(proto):
             logger.warning(
@@ -1310,11 +1436,58 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
                 task.task_id,
                 getattr(proto, "title", tid),
             )
+            rejected.append(
+                {
+                    "id": str(tid),
+                    "title": str(getattr(proto, "title", tid) or tid).strip(),
+                    "reason": "non_actionable_recovery_placeholder",
+                }
+            )
             continue
         actionable.append((tid, proto))
+    _upsert_decomposition_history_task(
+        storage,
+        task=task,
+        attempt_id=attempt_id,
+        phase_id="emit_leaf_tasks",
+        title="Decomposition Step: Emit leaf tasks",
+        description=(
+            f"Decomposition proposed {len(list((decomp.subtasks or {}).keys()))} subtasks, "
+            f"with {len(actionable)} actionable leaves retained and {len(rejected)} rejected as non-actionable."
+        ),
+        summary={
+            "raw_subtask_count": len(list((decomp.subtasks or {}).keys())),
+            "actionable_subtask_count": len(actionable),
+            "rejected_subtasks": rejected,
+            "retained_subtasks": [
+                {
+                    "id": str(tid),
+                    "title": str(getattr(proto, "title", "") or "").strip(),
+                    "dependencies": list(getattr(proto, "dependencies", []) or []),
+                    "target_files": list(getattr(proto, "target_files", []) or []),
+                }
+                for tid, proto in actionable
+            ],
+        },
+    )
     if not actionable:
         item_fallback = _procedure_item_recovery_subtasks(storage, task)
         if item_fallback:
+            _upsert_decomposition_history_task(
+                storage,
+                task=task,
+                attempt_id=attempt_id,
+                phase_id="preserve_workflow",
+                title="Decomposition Step: Preserve workflow",
+                description=(
+                    "Decomposition emitted no actionable leaves, so the runtime recovered by expanding the current "
+                    "procedure checklist item into a bounded inspect/decide/cash-out chain."
+                ),
+                summary={
+                    "preservation_mode": "procedure_item_recovery_chain",
+                    "spawned_recovery_subtasks": [str(item.get("title") or "").strip() for item in item_fallback],
+                },
+            )
             spawned_by_proto_id = {}
             spawned_ids = []
             for item in item_fallback:
@@ -1349,6 +1522,21 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             return
         procedure_fallback = _procedure_checklist_subtasks(storage, task)
         if procedure_fallback:
+            _upsert_decomposition_history_task(
+                storage,
+                task=task,
+                attempt_id=attempt_id,
+                phase_id="preserve_workflow",
+                title="Decomposition Step: Preserve workflow",
+                description=(
+                    "Decomposition emitted no actionable leaves, so the runtime recovered by expanding the canonical "
+                    "procedure checklist into explicit child steps."
+                ),
+                summary={
+                    "preservation_mode": "procedure_checklist_expansion",
+                    "spawned_recovery_subtasks": [str(item.get("title") or "").strip() for item in procedure_fallback],
+                },
+            )
             spawned_ids = []
             for item in procedure_fallback:
                 sub = storage.tasks.create(
@@ -1369,6 +1557,22 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
             for task_id in spawned_ids:
                 await _enqueue_task(enqueue_fn, task_id, front=True)
             return
+        _upsert_decomposition_history_task(
+            storage,
+            task=task,
+            attempt_id=attempt_id,
+            phase_id="issue_no_actionable_output",
+            title="Decomposition Issue: No actionable output",
+            description=(
+                "This decomposition run produced no actionable subtasks and no bounded procedure fallback. "
+                "Treat this as a recoverable planning failure."
+            ),
+            summary={
+                "kind": "planning_failure",
+                "raw_subtask_count": len(list((decomp.subtasks or {}).keys())),
+                "actionable_subtask_count": 0,
+            },
+        )
         raise RuntimeError(
             "Decomposition produced no actionable subtasks. Treat this as a recoverable planning failure and generate a more concrete recovery plan instead of escalating by default."
         )
@@ -1398,6 +1602,23 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
         procedure_id=str(draft_procedure.get("procedure_id") or canonical_system_procedure_id(task_type="DECOMP")).strip(),
         capability_kind="procedure",
         capability_name="decomposition",
+    )
+    _upsert_decomposition_history_task(
+        storage,
+        task=task,
+        attempt_id=attempt_id,
+        phase_id="preserve_workflow",
+        title="Decomposition Step: Preserve workflow",
+        description=(
+            f"Retained {len(actionable)} actionable leaves and recorded the decomposition lineage under Procedure "
+            f"'{str(draft_procedure.get('title') or draft_procedure.get('procedure_id') or 'Task Decomposition').strip()}'."
+        ),
+        summary={
+            "preservation_mode": "draft_procedure",
+            "procedure_id": str(draft_procedure.get("procedure_id") or "").strip(),
+            "procedure_title": str(draft_procedure.get("title") or "").strip(),
+            "checklist_count": len(list(draft_procedure.get("checklist") or [])),
+        },
     )
     spawned_ids = []
     spawned_by_proto_id = {}

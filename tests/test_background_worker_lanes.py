@@ -808,17 +808,26 @@ def test_run_decomposition_falls_back_to_procedure_checklist_subtasks():
     asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
 
     created = [task for task in storage.session.query(TaskModel).all() if task.parent_task_id == decomp_task.task_id]
-    assert len(created) == 2
-    assert all(task.type == TaskType.RESEARCH for task in created)
-    assert all("procedure_checklist_item" in dict(task.constraints or {}) for task in created)
-    runtime_posture_task = next(task for task in created if "runtime posture" in task.title.lower())
+    process_children = [
+        child for child in created if dict(child.constraints or {}).get("inline_process_kind") == "decomposition_phase"
+    ]
+    spawned_children = [child for child in created if child not in process_children]
+    assert len(spawned_children) == 2
+    assert all(task.type == TaskType.RESEARCH for task in spawned_children)
+    assert all("procedure_checklist_item" in dict(task.constraints or {}) for task in spawned_children)
+    runtime_posture_task = next(task for task in spawned_children if "runtime posture" in task.title.lower())
     runtime_hints = dict((runtime_posture_task.constraints or {}).get("source_hints") or {})
     assert "strata/api/main.py" in list(runtime_hints.get("preferred_paths") or [])
     assert runtime_posture_task.constraints.get("disallow_broad_repo_scan") is None
     assert len(queued) == 2
     assert decomp_task.state == TaskState.PUSHED
-    assert sorted(decomp_task.active_child_ids) == sorted(task.task_id for task in created)
+    assert sorted(decomp_task.active_child_ids) == sorted(task.task_id for task in spawned_children)
     assert all(front is True for _, front in queued)
+    assert [child.title for child in process_children] == [
+        "Decomposition Step: Frame task",
+        "Decomposition Step: Emit leaf tasks",
+        "Decomposition Step: Preserve workflow",
+    ]
 
 
 def test_run_decomposition_persists_dependency_edges():
@@ -841,8 +850,12 @@ def test_run_decomposition_persists_dependency_edges():
     asyncio.run(_run_decomposition(task, storage, DependentDecompModel(), enqueue_fn))
 
     created = [child for child in storage.session.query(TaskModel).all() if child.parent_task_id == task.task_id]
-    assert len(created) == 2
-    by_title = {child.title: child for child in created}
+    process_children = [
+        child for child in created if dict(child.constraints or {}).get("inline_process_kind") == "decomposition_phase"
+    ]
+    spawned_children = [child for child in created if child not in process_children]
+    assert len(spawned_children) == 2
+    by_title = {child.title: child for child in spawned_children}
     inspect_task = by_title["Inspect current settings"]
     persist_task = by_title["Persist runtime posture"]
 
@@ -850,8 +863,26 @@ def test_run_decomposition_persists_dependency_edges():
     assert persist_task.task_id in [task_id for task_id, _ in queued]
     assert inspect_task in persist_task.dependencies
     assert task.state == TaskState.PUSHED
-    assert sorted(task.active_child_ids) == sorted(child.task_id for child in created)
+    assert sorted(task.active_child_ids) == sorted(child.task_id for child in spawned_children)
     assert all(front is True for _, front in queued)
+
+    phase_children = [
+        child
+        for child in created
+        if dict(child.constraints or {}).get("inline_process_kind") == "decomposition_phase"
+    ]
+    assert [child.title for child in phase_children] == [
+        "Decomposition Step: Frame task",
+        "Decomposition Step: Emit leaf tasks",
+        "Decomposition Step: Preserve workflow",
+    ]
+    assert all(child.type == TaskType.DECOMP for child in phase_children)
+    emit_phase = next(child for child in phase_children if child.title == "Decomposition Step: Emit leaf tasks")
+    emit_summary = dict((emit_phase.constraints or {}).get("decomposition_summary") or {})
+    assert emit_summary.get("actionable_subtask_count") == 2
+    preserve_phase = next(child for child in phase_children if child.title == "Decomposition Step: Preserve workflow")
+    preserve_summary = dict((preserve_phase.constraints or {}).get("decomposition_summary") or {})
+    assert preserve_summary.get("preservation_mode") == "draft_procedure"
 
 
 def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
@@ -911,15 +942,19 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
     asyncio.run(_run_decomposition(decomp_task, storage, DummyDecompModel(), enqueue_fn))
 
     created = [child for child in storage.session.query(TaskModel).all() if child.parent_task_id == decomp_task.task_id]
-    assert len(created) == 5
-    by_title = {child.title: child for child in created}
+    phase_children = [
+        child for child in created if dict(child.constraints or {}).get("inline_process_kind") == "decomposition_phase"
+    ]
+    spawned_children = [child for child in created if child not in phase_children]
+    assert len(spawned_children) == 5
+    by_title = {child.title: child for child in spawned_children}
     inspect_task = by_title["Inspect .knowledge/specs/project_spec.md for Confirm local/cloud and quiet-hardware preferences"]
     second_inspect = by_title["Inspect strata/api/main.py for Confirm local/cloud and quiet-hardware preferences"]
     third_inspect = by_title["Inspect strata/models/providers.py for Confirm local/cloud and quiet-hardware preferences"]
     decide_task = by_title["Decide status for Confirm local/cloud and quiet-hardware preferences"]
     cash_out_task = by_title["Cash out Confirm local/cloud and quiet-hardware preferences"]
 
-    assert all(child.task_id in [task_id for task_id, _ in queued] for child in created)
+    assert all(child.task_id in [task_id for task_id, _ in queued] for child in spawned_children)
     assert inspect_task in decide_task.dependencies
     assert second_inspect in decide_task.dependencies
     assert third_inspect in decide_task.dependencies
@@ -932,8 +967,23 @@ def test_run_decomposition_falls_back_to_procedure_item_recovery_chain():
     assert handoff.get("avoid_repeating_first_tool", {}).get("name") == "list_directory"
     assert inspect_task.constraints.get("inspect_target_path") == ".knowledge/specs/project_spec.md"
     assert decomp_task.state == TaskState.PUSHED
-    assert sorted(decomp_task.active_child_ids) == sorted(child.task_id for child in created)
+    assert sorted(decomp_task.active_child_ids) == sorted(child.task_id for child in spawned_children)
     assert all(front is True for _, front in queued)
+
+    phase_children = [
+        child
+        for child in created
+        if dict(child.constraints or {}).get("inline_process_kind") == "decomposition_phase"
+    ]
+    assert [child.title for child in phase_children] == [
+        "Decomposition Step: Frame task",
+        "Decomposition Step: Emit leaf tasks",
+        "Decomposition Step: Preserve workflow",
+    ]
+    preserve_phase = next(child for child in phase_children if child.title == "Decomposition Step: Preserve workflow")
+    preserve_summary = dict((preserve_phase.constraints or {}).get("decomposition_summary") or {})
+    assert preserve_summary.get("preservation_mode") == "procedure_item_recovery_chain"
+    assert len(list(preserve_summary.get("spawned_recovery_subtasks") or [])) == 5
 
 
 def test_blocked_weak_task_review_skips_when_no_new_evidence_after_review():
