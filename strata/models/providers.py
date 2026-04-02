@@ -109,7 +109,15 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
     _last_persisted_at: float = 0.0
     _runtime_policy: Dict[str, Any] = dict(DEFAULT_RUNTIME_POLICY)
 
-    def _throttle_key(self) -> str:
+    def _throttle_partition(self, kwargs: Optional[Dict[str, Any]] = None) -> str:
+        if not self._is_local_transport():
+            return "shared"
+        explicit = str((kwargs or {}).get("throttle_partition") or "").strip().lower()
+        if explicit:
+            return explicit
+        return "chat" if self._request_origin(kwargs) == "foreground" else "worker"
+
+    def _throttle_key(self, kwargs: Optional[Dict[str, Any]] = None) -> str:
         return ":".join([
             self.provider_id,
             self.model_id,
@@ -117,10 +125,11 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             str(self.requests_per_minute or ""),
             str(self.max_concurrency or ""),
             str(self.min_interval_ms or ""),
+            self._throttle_partition(kwargs),
         ])
 
-    def _get_throttle_state(self) -> ThrottleState:
-        key = self._throttle_key()
+    def _get_throttle_state(self, kwargs: Optional[Dict[str, Any]] = None) -> ThrottleState:
+        key = self._throttle_key(kwargs)
         if key not in self._throttle_states:
             concurrency = max(1, int(self.max_concurrency or 16))
             self._throttle_states[key] = ThrottleState(
@@ -129,8 +138,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             )
         return self._throttle_states[key]
 
-    def _get_telemetry_state(self) -> ProviderTelemetryState:
-        key = self._throttle_key()
+    def _get_telemetry_state(self, kwargs: Optional[Dict[str, Any]] = None) -> ProviderTelemetryState:
+        key = self._throttle_key(kwargs)
         if key not in self._telemetry_states:
             self._telemetry_states[key] = ProviderTelemetryState()
         return self._telemetry_states[key]
@@ -426,8 +435,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         if "response_format" in kwargs:
             payload["response_format"] = kwargs["response_format"]
 
-        state = self._get_throttle_state()
-        telemetry = self._get_telemetry_state()
+        state = self._get_throttle_state(kwargs)
+        telemetry = self._get_telemetry_state(kwargs)
 
         async with state.semaphore:
             for retry in range(max_retries):
