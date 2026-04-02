@@ -12,6 +12,9 @@ Current project intent:
 - keep bootstrap progress measurable through evals, telemetry, promotion evidence, and explainable provenance
 - all durable system actions should carry provenance that explains authority, causal chain, and governing policy, not only outcome
 - treat deterministic preprocessing as part of the product, not just an optimization; inference should receive already-structured, evidence-rich tasks whenever possible
+- prefer softer interventions before hard enforcement rails: improve prompts, context composition, trajectory memory, and other guidance surfaces before adding brittle code constraints, unless a deterministic replacement is already clearly superior
+- deterministic code is especially welcome when it improves telemetry, provenance, or context quality for later model decisions; code that helps the model make a better choice is usually safer than code that silently removes its choices
+- every new constraint should be evaluated for brittleness, not just apparent correctness; a fast rail that creates fragile failure modes is often worse than a slower but resilient guidance change
 
 Normal operating mode:
 - agent Strata handles normal user-facing work and bounded autonomous self-improvement activity inside the harness
@@ -45,6 +48,7 @@ Normal operating mode:
 - partial success should not be discarded; useful decompositions, clarified subgoals, successful recoveries, and reusable intermediate structure should be captured into durable artifacts such as Procedures, knowledge, or policy updates
 - failures should metabolize into durable improvements too; repeated failure modes, blocked branches, verifier findings, and recovery dead ends should cash out into Procedures, tool health, policy changes, or other persistent system adaptations
 - repeated failures of reusable machinery, whether a tool or a higher-level process, should degrade that capability and route toward explicit repair of the owning artifact
+- unnecessary, duplicated, or low-yield work should be treated as its own failure class; the system should explicitly audit for wasteful recursion, repeated lookups, redundant decomposition, and other inefficient work patterns
 - durable capability history should include enough versioning or snapshots to let later audits ask “was this actually broken at the time of incident?” rather than inferring from a later repaired state
 - notifying the trainer is not, by itself, a recovery. When an autonomous branch fails to decompose or plan cleanly, the system should continue pursuing bounded self-recovery unless the branch is truly blocked on required external input or permission
 - failures should always produce an explicit "what's next" decision. The system should never treat a failed attempt as the end of the line without choosing a concrete continuation path such as decomposition, replanning, remediation, escalation, or other bounded follow-on work
@@ -95,12 +99,16 @@ Operational guidance:
 - plugin and module interfaces should be explicit and versioned so interchangeable product surfaces are normal behavior, not bespoke glue code
 - long-term dependency posture should trend toward self-hosted, inspectable, reproducible code rather than casually importing opaque third-party packages; when external code is needed, it should be treated as something to inspect, reproduce, constrain, or eventually replace
 - deterministic mutation search over mutable config fields should be treated as part of the system's evolutionary hardware; search that space deliberately before escalating to prompt or code mutation
+- when considering a deterministic replacement for a model step, "can be replaced" is not enough; prefer the replacement only when it preserves or improves robustness, learning velocity, and overall system capability rather than merely shaving latency
+- repo/distribution quality matters as a capability multiplier: removing stale build artifacts, reducing accidental complexity, and preparing the tree for early external testers is real product work, not cosmetic cleanup
 - inference throttling should support at least two explicit postures: `hard` ("do not exceed this limit") and `greedy` ("push up to the best currently believed safe/provider-friendly limit while probing carefully to improve that estimate")
 - local-resource policy should optimize for operator comfort rather than raw throughput alone; for local inference, the default target should be "not annoying" under current conditions, with ambiguous cases resolved in favor of quieter/lighter operation unless the operator has explicitly opted in to more aggressive behavior
 - the system should treat comfort constraints such as fan noise, memory pressure, and similar resource-side effects as measurable control surfaces, not merely informal preferences
 - the system should not depend on the user for routine housekeeping; stale tasks, stale channels, and other clutter should summarize, compact, age, and archive automatically unless the user explicitly intervenes
 - operator visibility and control should be profile-aware over time: Strata should be able to support simple chat-only operation, power-user/developer operation, and stricter managed/enterprise profiles without changing the underlying system model
 - bugs and regressions should live in a durable tracker rather than only in thread history; active runtime defects, truthfulness gaps, and operator pain points should be recorded in [bug-tracker.md](/Users/jon/Projects/strata/docs/spec/bug-tracker.md) so trainer/alignment work can consume them as real backlog
+- Knowledge should distinguish canonical wiki state from source material explicitly: durable source docs/manuals and ephemeral reports/notes may both feed the wiki, but they should not be conflated in retention policy or operator presentation
+- the product should move toward early external readiness before formal release: improve repo hygiene, reduce stale build/distribution artifacts, and raise UI/runtime polish toward an honest alpha-quality bar for testers and partners
 - operator-facing surfaces such as `History`, `Tasks`, `Procedures`, `Tools`, and `Knowledge` should not remain read-only viewers by default; they should evolve toward bounded interaction and editing surfaces where the operator can inspect, modify, queue, verify, audit, or otherwise act on the underlying artifacts
 - `History` should evolve toward a true append-only event ledger with lifecycle provenance for reads, writes, edits, redactions, compactions, opens, closes, and other consequential interactions
 - Strata should eventually expose a first-class operator `Workbench` surface: a universal debugger-like environment where any Strata process can be replayed, stepped, paused, branched, regenerated from intermediate context, and re-run under different tools, models, or inputs

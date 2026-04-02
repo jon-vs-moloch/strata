@@ -2699,8 +2699,9 @@ function App() {
       };
     }
 
-    const path = getFocusedTaskPath(scopeId);
     const laneDetail = scopeId === 'home' ? null : (laneDetails?.[scopeId] || defaultLaneDetail);
+    const laneTaskId = String(laneDetail?.current_task_id || '').trim();
+    const path = laneTaskId ? findTaskPathById(fullTaskTree, laneTaskId) : [];
     const root = path[0];
     if (!root) {
       const blocked = tasks.filter((task) => laneForTask(task) === scopeId && task.status === 'blocked').length;
@@ -2809,6 +2810,63 @@ function App() {
       taskId: leaf.id,
       taskPaused: leafPaused,
       taskActionable: true,
+    };
+  };
+  const buildTopScopeCardProgress = (scopeId) => {
+    if (scopeId === 'home') {
+      return buildScopeTaskProgress('home');
+    }
+    const laneDetail = laneDetails?.[scopeId] || defaultLaneDetail;
+    const laneMode = String(laneDetail?.activity_mode || laneStatuses?.[scopeId] || '').trim().toUpperCase();
+    const laneTasks = tasks.filter((task) => laneForTask(task) === scopeId);
+    const blocked = laneTasks.filter((task) => task.status === 'blocked').length;
+    const working = laneTasks.filter((task) => task.status === 'working').length;
+    const pending = laneTasks.filter((task) => task.status === 'pending').length;
+    const currentTitle = String(laneCurrentTaskTitles?.[scopeId] || laneDetail?.current_task_title || '').trim();
+    const stalledReason = String(laneDetail?.step_detail || laneDetail?.step_label || '').trim();
+    const activeTaskId = String(laneDetail?.current_task_id || '').trim();
+    const percent = laneMode === 'STALLED'
+      ? 72
+      : laneMode === 'GENERATING'
+      ? 64
+      : laneMode === 'RUNNING'
+      ? 58
+      : laneMode === 'QUEUED'
+      ? 20
+      : working > 0
+      ? 48
+      : pending > 0
+      ? 16
+      : blocked > 0
+      ? 18
+      : 0;
+    return {
+      percent,
+      summary: working > 0
+        ? `${working} working`
+        : pending > 0
+        ? `${pending} queued`
+        : blocked > 0
+        ? `${blocked} blocked`
+        : '',
+      currentTitle: currentTitle || 'No active task',
+      currentStateLabel: laneMode === 'STALLED'
+        ? (stalledReason || 'waiting for progress')
+        : blocked > 0
+        ? 'blocked'
+        : laneMode === 'QUEUED'
+        ? 'queued'
+        : laneMode === 'GENERATING'
+        ? 'generating'
+        : laneMode === 'RUNNING'
+        ? 'working'
+        : 'idle',
+      label: currentTitle || 'No active task',
+      countLabel: blocked > 0 ? 'Needs attention' : (laneDetail?.activity_label || 'No active task'),
+      pathSegments: [],
+      taskId: activeTaskId || null,
+      taskPaused: Boolean(laneDetail?.paused),
+      taskActionable: Boolean(activeTaskId) || blocked > 0 || pending > 0 || working > 0,
     };
   };
   const focusedTaskPaneTree = React.useMemo(() => {
@@ -2959,7 +3017,7 @@ function App() {
             const active = currentScope === tab.id;
             const showGlobalControls = tab.id === 'home';
             const isLane = tab.id === 'trainer' || tab.id === 'agent';
-            const progress = buildScopeTaskProgress(tab.id);
+            const progress = buildTopScopeCardProgress(tab.id);
             const agentEnabled = tab.id === 'home'
               ? desiredGlobalEnabled
               : desiredLaneEnabled[tab.id];
@@ -3195,17 +3253,36 @@ function App() {
               </div>
             )}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '18px', flexShrink: 0, minWidth: activeNav === 'knowledge' ? 'min(420px, 42vw)' : 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: '18px', flexShrink: 0, minWidth: activeNav === 'knowledge' ? 'min(620px, 62vw)' : 0 }}>
             {activeNav === 'knowledge' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px', padding: '10px 14px', width: '100%' }}>
-                <Search size={15} color="#696a7b" />
-                <input
-                  type="text"
-                  value={knowledgeQuery}
-                  onChange={(event) => setKnowledgeQuery(event.target.value)}
-                  placeholder="Search wiki titles, tags, aliases..."
-                  style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px' }}
-                />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#141418', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '14px', padding: '10px 14px', flex: 1, minWidth: 0 }}>
+                  <Search size={15} color="#696a7b" />
+                  <input
+                    type="text"
+                    value={knowledgeQuery}
+                    onChange={(event) => setKnowledgeQuery(event.target.value)}
+                    placeholder="Search wiki titles, tags, aliases..."
+                    style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#edeeef', fontSize: '13px' }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCreateKnowledgePage}
+                  style={{ background: 'rgba(130,87,229,0.18)', border: '1px solid rgba(130,87,229,0.28)', color: '#f1e8ff', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', whiteSpace: 'nowrap' }}
+                >
+                  <Plus size={14} />
+                  Add Page
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEditKnowledgePage}
+                  disabled={!selectedKnowledgePage}
+                  style={{ background: selectedKnowledgePage ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)', color: selectedKnowledgePage ? '#edeeef' : '#666a78', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: selectedKnowledgePage ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: '8px', whiteSpace: 'nowrap' }}
+                >
+                  <Pencil size={14} />
+                  Edit Page
+                </button>
               </div>
             )}
           </div>

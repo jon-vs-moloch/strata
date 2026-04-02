@@ -18,6 +18,40 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, HTTPException
 
 
+def _classify_knowledge_source(path: str, name: str) -> Dict[str, str]:
+    normalized = str(path or "").replace("\\", "/")
+    base_name = str(name or "").strip().lower()
+    if base_name == "provenance_index.json":
+        return {
+            "source_class": "ephemeral_source",
+            "source_kind": "provenance_index",
+            "integration_status": "system_generated",
+        }
+    if base_name.startswith("final_research_") or base_name.startswith("wip_research_"):
+        return {
+            "source_class": "ephemeral_source",
+            "source_kind": "research_report",
+            "integration_status": "ingest_candidate",
+        }
+    if "report" in base_name or "performance" in base_name:
+        return {
+            "source_class": "ephemeral_source",
+            "source_kind": "report",
+            "integration_status": "ingest_candidate",
+        }
+    if normalized.startswith(".knowledge/"):
+        return {
+            "source_class": "durable_source",
+            "source_kind": "note",
+            "integration_status": "reference_source",
+        }
+    return {
+        "source_class": "durable_source",
+        "source_kind": "reference",
+        "integration_status": "reference_source",
+    }
+
+
 def register_knowledge_admin_routes(
     app,
     *,
@@ -82,6 +116,7 @@ def register_knowledge_admin_routes(
                             "bytes": int(stat.st_size or 0),
                             "updated_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
                             "kind": "knowledge_source",
+                            **_classify_knowledge_source(normalized, name),
                         }
                     )
         sources.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)

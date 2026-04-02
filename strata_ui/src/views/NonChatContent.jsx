@@ -3,7 +3,7 @@ import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  Activity, BookOpen, GitBranch, Pencil, Plus, Play, Wrench,
+  Activity, BookOpen, GitBranch, Play, Wrench,
   RotateCcw, History, Route, Zap, Search, MessageCircle, AlertCircle, X, ChevronRight, CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -730,6 +730,42 @@ const KnowledgeView = ({
 }) => {
   const [knowledgeMode, setKnowledgeMode] = useState('wiki');
   const relatedPages = selectedPage?.related_pages || [];
+  const classifyWikiPage = (page) => {
+    const maintenance = page?.maintenance || {};
+    const evidenceStatus = String(maintenance?.evidence_status || '').trim().toLowerCase();
+    const provenanceKinds = new Set(
+      Array.isArray(page?.provenance)
+        ? page.provenance.map((entry) => String(entry?.kind || '').trim().toLowerCase()).filter(Boolean)
+        : []
+    );
+    const sourceCount = Number(page?.source_count || 0);
+    if (evidenceStatus === 'maintenance_report') {
+      return { label: 'Report', tone: 'warning' };
+    }
+    if (provenanceKinds.size && [...provenanceKinds].every((kind) => kind === 'durable_doc')) {
+      return { label: 'Durable source', tone: 'info' };
+    }
+    if (provenanceKinds.has('final_research') || provenanceKinds.has('wip_research') || provenanceKinds.has('telemetry') || provenanceKinds.has('misc')) {
+      return { label: 'Ingested source', tone: 'warning' };
+    }
+    if (page?.created_by === 'knowledge_compactor' && sourceCount <= 1) {
+      return { label: 'Seeded', tone: 'info' };
+    }
+    if (sourceCount > 1) {
+      return { label: 'Integrated', tone: 'success' };
+    }
+    return { label: 'Wiki', tone: 'neutral' };
+  };
+  const formatSourceClass = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return 'source';
+    return raw.replace(/_/g, ' ');
+  };
+  const formatSourceKind = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return 'reference';
+    return raw.replace(/_/g, ' ');
+  };
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: '0', minHeight: 0 }}>
@@ -800,6 +836,7 @@ const KnowledgeView = ({
                   {page.summary || 'No summary available yet.'}
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                  <RoutePill label="TYPE" value={classifyWikiPage(page).label} tone={classifyWikiPage(page).tone} />
                   <RoutePill label="DOMAIN" value={page.domain || 'project'} tone={active ? 'success' : 'neutral'} />
                   <RoutePill label="UPDATED" value={page.last_updated ? formatAbsoluteTime(page.last_updated) : '—'} tone="neutral" />
                 </div>
@@ -818,7 +855,7 @@ const KnowledgeView = ({
               <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '14px', padding: '14px' }}>
                 <div style={{ color: '#edeeef', fontSize: '13px', fontWeight: 700, marginBottom: '6px' }}>Raw source staging</div>
                 <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.6 }}>
-                  Uploaded files, notes, and unstructured artifacts should land here first. Integration into the canonical wiki should be queued, reviewed, and compacted separately.
+                  Durable sources are canonical references such as specs and manuals. Ephemeral sources are reports, notes, and transient findings that should be integrated into the wiki when useful and aged off when they are not.
                 </div>
               </div>
               <button
@@ -854,6 +891,9 @@ const KnowledgeView = ({
                   <div style={{ color: '#edeeef', fontSize: '12px', fontWeight: 700 }}>{source.name || source.path}</div>
                   <div style={{ color: '#8d8ea1', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace" }}>{source.path}</div>
                   <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    <RoutePill label="CLASS" value={formatSourceClass(source.source_class)} tone={source.source_class === 'durable_source' ? 'success' : 'warning'} />
+                    <RoutePill label="KIND" value={formatSourceKind(source.source_kind)} tone="neutral" />
+                    <RoutePill label="STATUS" value={formatSourceKind(source.integration_status)} tone={source.integration_status === 'reference_source' ? 'info' : 'warning'} />
                     <RoutePill label="UPDATED" value={source.updated_at ? formatAbsoluteTime(source.updated_at) : '—'} tone="neutral" />
                     <RoutePill label="SIZE" value={typeof source.bytes === 'number' ? `${source.bytes}b` : '—'} tone="neutral" />
                   </div>
@@ -870,45 +910,11 @@ const KnowledgeView = ({
       </div>
 
       <div style={{ minWidth: 0, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', gap: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {knowledgeMode === 'wiki' ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onCreatePage}
-                  style={{ background: 'rgba(130,87,229,0.18)', border: '1px solid rgba(130,87,229,0.28)', color: '#f1e8ff', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
-                >
-                  <Plus size={14} />
-                  Add Page
-                </button>
-                <button
-                  type="button"
-                  onClick={onEditPage}
-                  disabled={!selectedPage}
-                  style={{ background: selectedPage ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)', color: selectedPage ? '#edeeef' : '#666a78', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: selectedPage ? 'pointer' : 'default', display: 'flex', alignItems: 'center', gap: '8px' }}
-                >
-                  <Pencil size={14} />
-                  Edit Page
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={onQueueSource}
-                style={{ background: 'rgba(0,187,145,0.16)', border: '1px solid rgba(0,187,145,0.28)', color: '#d9fff6', borderRadius: '12px', padding: '10px 14px', fontSize: '12px', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                <Plus size={14} />
-                Add Source
-              </button>
-            )}
-          </div>
-        </div>
-
         {knowledgeMode === 'wiki' && selectedPage ? (
           <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <RoutePill label="TYPE" value={classifyWikiPage(selectedPage).label} tone={classifyWikiPage(selectedPage).tone} />
                 <RoutePill label="SLUG" value={selectedPage.slug || '—'} tone="neutral" />
                 <RoutePill label="DOMAIN" value={selectedPage.domain || 'project'} tone="success" />
                 <RoutePill label="CONF" value={typeof selectedPage.confidence === 'number' ? selectedPage.confidence.toFixed(2) : '—'} tone="neutral" />
@@ -982,7 +988,7 @@ const KnowledgeView = ({
             <BookOpen size={34} color="#2f3040" />
             <div style={{ fontSize: '18px', fontWeight: 700, color: '#c7c8d6' }}>Knowledge wiki is ready</div>
             <div style={{ maxWidth: '520px', fontSize: '14px', lineHeight: 1.7, color: '#8d8ea1' }}>
-              This view is wired up, but the indexed knowledge store is currently empty. Once Strata writes or compacts pages into the knowledge base, they will be navigable here like a wiki.
+              Wiki pages are the integrated layer. Durable sources and ephemeral reports can both feed it, but they should not remain indistinguishable forever.
             </div>
           </div>
         ) : (

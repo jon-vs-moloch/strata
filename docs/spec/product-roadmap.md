@@ -219,6 +219,8 @@ Follow-up work remains and should stay on the roadmap:
 - harden inbound communication safety: sandbox and inspect incoming communications/attachments, and probe for prompt injection or similar hostile control attempts before granting them trusted status
 - support website publishing as a default showcase capability; "Strata made my website" should be a normal out-of-the-box product story
 - add a low-motion visual polish pass for the shell, including the option for an almost-static geological/strata background treatment that reads as wallpaper first and animation second
+- add an explicit alpha-polish/release-readiness track: remove stale build artifacts, shrink accidental repo noise, harden packaging surfaces, and prepare the project for early testers and partner demos without pretending it is GA-ready
+- audit unnecessary, duplicated, and inefficient work as a first-class product/runtime concern; start with prompt/context guidance and telemetry, then add code rails only where softer interventions demonstrably fail
 
 ### Phase 2. Managed Engine Supervision
 
