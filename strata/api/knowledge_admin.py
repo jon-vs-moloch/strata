@@ -21,6 +21,12 @@ from fastapi import Depends, HTTPException
 def _classify_knowledge_source(path: str, name: str) -> Dict[str, str]:
     normalized = str(path or "").replace("\\", "/")
     base_name = str(name or "").strip().lower()
+    if normalized.startswith(".knowledge/specs/"):
+        return {
+            "source_class": "durable_source",
+            "source_kind": "spec_document",
+            "integration_status": "reference_source",
+        }
     if base_name == "provenance_index.json":
         return {
             "source_class": "ephemeral_source",
@@ -103,8 +109,6 @@ def register_knowledge_admin_routes(
                     full_path = os.path.join(root, name)
                     rel_path = os.path.relpath(full_path, base_dir)
                     normalized = rel_path.replace("\\", "/")
-                    if normalized.startswith(".knowledge/specs/"):
-                        continue
                     try:
                         stat = os.stat(full_path)
                     except OSError:
@@ -121,6 +125,39 @@ def register_knowledge_admin_routes(
                     )
         sources.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return {"status": "ok", "sources": sources[: max(1, int(limit or 100))]}
+
+    @app.get("/admin/knowledge/source")
+    async def get_knowledge_source(path: str):
+        normalized = str(path or "").replace("\\", "/").strip()
+        if not normalized:
+            raise HTTPException(status_code=400, detail="path is required")
+        if ".." in normalized.split("/"):
+            raise HTTPException(status_code=400, detail="invalid path")
+        if not normalized.startswith(".knowledge/"):
+            raise HTTPException(status_code=403, detail="source path is outside the allowed knowledge root")
+        full_path = os.path.normpath(os.path.join(base_dir, normalized))
+        knowledge_root = os.path.normpath(os.path.join(base_dir, ".knowledge"))
+        if not full_path.startswith(knowledge_root):
+            raise HTTPException(status_code=403, detail="source path is outside the allowed knowledge root")
+        if not os.path.isfile(full_path):
+            raise HTTPException(status_code=404, detail="Knowledge source not found")
+        try:
+            stat = os.stat(full_path)
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as handle:
+                content = handle.read()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read knowledge source: {exc}") from exc
+        return {
+            "status": "ok",
+            "source": {
+                "path": normalized,
+                "name": os.path.basename(full_path),
+                "bytes": int(stat.st_size or 0),
+                "updated_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+                "content": content,
+                **_classify_knowledge_source(normalized, os.path.basename(full_path)),
+            },
+        }
 
     @app.get("/admin/knowledge/maintenance")
     async def get_knowledge_maintenance(storage=Depends(get_storage)):
@@ -204,6 +241,7 @@ def register_knowledge_admin_routes(
             "compact_knowledge_base": compact_knowledge_base,
             "list_knowledge_pages": list_knowledge_pages,
             "list_knowledge_sources": list_knowledge_sources,
+            "get_knowledge_source": get_knowledge_source,
             "get_knowledge_maintenance": get_knowledge_maintenance,
             "get_knowledge_page_metadata": get_knowledge_page_metadata,
             "get_knowledge_page": get_knowledge_page,

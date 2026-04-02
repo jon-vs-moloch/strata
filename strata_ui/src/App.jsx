@@ -1236,6 +1236,8 @@ function App() {
   const [knowledgePages, setKnowledgePages] = useState([]);
   const [selectedKnowledgeSlug, setSelectedKnowledgeSlug] = useState('');
   const [selectedKnowledgePage, setSelectedKnowledgePage] = useState(null);
+  const [selectedKnowledgeSourcePath, setSelectedKnowledgeSourcePath] = useState('');
+  const [selectedKnowledgeSource, setSelectedKnowledgeSource] = useState(null);
   const [procedures, setProcedures] = useState([]);
   const [selectedProcedureId, setSelectedProcedureId] = useState('');
   const [workbenchTarget, setWorkbenchTarget] = useState(null);
@@ -1796,7 +1798,27 @@ function App() {
           },
         });
         if (cancelled) return;
-        const nextPages = pagesRes.data.pages || [];
+        const allPages = pagesRes.data.pages || [];
+        const nextPages = allPages.filter((page) => {
+          const maintenance = page?.maintenance || {};
+          const reviewStatus = String(maintenance?.review_status || '').trim().toLowerCase();
+          const evidenceStatus = String(maintenance?.evidence_status || '').trim().toLowerCase();
+          const createdBy = String(page?.created_by || '').trim().toLowerCase();
+          const provenanceKinds = new Set(
+            Array.isArray(page?.provenance)
+              ? page.provenance.map((entry) => String(entry?.kind || '').trim().toLowerCase()).filter(Boolean)
+              : []
+          );
+          const sourceCount = Number(page?.source_count || 0);
+          if (page?.slug === 'current-knowledge-base' || page?.slug === 'knowledge-maintenance-report') return true;
+          if (reviewStatus === 'confirmed') return true;
+          if (page?.created_by === 'operator') return true;
+          if (evidenceStatus === 'synthesized' || evidenceStatus === 'verified') return true;
+          if (createdBy === 'knowledge_compactor' && sourceCount <= 1) return false;
+          if (provenanceKinds.size && [...provenanceKinds].every((kind) => kind === 'durable_doc')) return false;
+          if (sourceCount > 1) return true;
+          return false;
+        });
         setKnowledgePages(nextPages);
 
         const hasCurrent = nextPages.some((page) => page.slug === selectedKnowledgeSlug);
@@ -1827,11 +1849,15 @@ function App() {
           params: { limit: 100 },
         });
         if (cancelled) return;
-        setKnowledgeSources(sourcesRes.data.sources || []);
+        const nextSources = sourcesRes.data.sources || [];
+        setKnowledgeSources(nextSources);
+        const hasCurrent = nextSources.some((source) => source.path === selectedKnowledgeSourcePath);
+        setSelectedKnowledgeSourcePath(hasCurrent ? selectedKnowledgeSourcePath : (nextSources[0]?.path || ''));
       } catch (err) {
         if (cancelled) return;
         console.error('Failed to load knowledge sources', err);
         setKnowledgeSources([]);
+        setSelectedKnowledgeSourcePath('');
       }
     };
 
@@ -1840,6 +1866,32 @@ function App() {
       cancelled = true;
     };
   }, [API, activeNav, knowledgeQuery, selectedKnowledgeSlug]);
+
+  useEffect(() => {
+    if (activeNav !== 'knowledge') return;
+    if (!selectedKnowledgeSourcePath) {
+      setSelectedKnowledgeSource(null);
+      return;
+    }
+    let cancelled = false;
+    const loadKnowledgeSource = async () => {
+      try {
+        const sourceRes = await axios.get(`${API}/admin/knowledge/source`, {
+          params: { path: selectedKnowledgeSourcePath },
+        });
+        if (cancelled) return;
+        setSelectedKnowledgeSource(sourceRes.data.source || null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Failed to load knowledge source', err);
+        setSelectedKnowledgeSource(null);
+      }
+    };
+    void loadKnowledgeSource();
+    return () => {
+      cancelled = true;
+    };
+  }, [API, activeNav, selectedKnowledgeSourcePath]);
 
   useEffect(() => {
     if (activeNav !== 'procedures') return;
@@ -2721,12 +2773,14 @@ function App() {
         : 0;
       const stateLabel = laneMode === 'STALLED'
         ? (stalledReason || 'waiting for progress')
-        : blocked > 0
-        ? 'blocked'
-        : laneMode === 'QUEUED'
-        ? 'queued'
         : laneMode === 'GENERATING'
         ? 'generating'
+        : laneMode === 'RUNNING'
+        ? 'working'
+        : laneMode === 'QUEUED'
+        ? 'queued'
+        : blocked > 0
+        ? 'blocked'
         : 'idle';
       return {
         percent,
@@ -2818,13 +2872,33 @@ function App() {
     }
     const laneDetail = laneDetails?.[scopeId] || defaultLaneDetail;
     const laneMode = String(laneDetail?.activity_mode || laneStatuses?.[scopeId] || '').trim().toUpperCase();
+    const activeTaskId = String(laneDetail?.current_task_id || '').trim();
+    const resolvedLivePath = activeTaskId ? findTaskPathById(fullTaskTree, activeTaskId) : [];
+    const livePath = resolvedLivePath.length ? resolvedLivePath : getFocusedTaskPath(scopeId);
     const laneTasks = tasks.filter((task) => laneForTask(task) === scopeId);
     const blocked = laneTasks.filter((task) => task.status === 'blocked').length;
     const working = laneTasks.filter((task) => task.status === 'working').length;
     const pending = laneTasks.filter((task) => task.status === 'pending').length;
-    const currentTitle = String(laneCurrentTaskTitles?.[scopeId] || laneDetail?.current_task_title || '').trim();
+    const liveLeaf = livePath.length ? livePath[livePath.length - 1] : null;
+    const currentTitle = String(liveLeaf?.title || laneCurrentTaskTitles?.[scopeId] || laneDetail?.current_task_title || '').trim();
     const stalledReason = String(laneDetail?.step_detail || laneDetail?.step_label || '').trim();
-    const activeTaskId = String(laneDetail?.current_task_id || '').trim();
+    const pathSegments = livePath.map((task) => {
+      const childSet = Array.isArray(task.children) ? task.children : [];
+      const completedChildren = childSet.filter((child) => ['complete', 'abandoned', 'cancelled'].includes(child.status)).length;
+      const totalChildren = childSet.length || 1;
+      return {
+        percent: childSet.length
+          ? Math.round((completedChildren / totalChildren) * 100)
+          : task.status === 'complete'
+          ? 100
+          : task.status === 'working'
+          ? 65
+          : task.status === 'blocked'
+          ? 25
+          : 10,
+        status: task.status,
+      };
+    });
     const percent = laneMode === 'STALLED'
       ? 72
       : laneMode === 'GENERATING'
@@ -2852,19 +2926,19 @@ function App() {
       currentTitle: currentTitle || 'No active task',
       currentStateLabel: laneMode === 'STALLED'
         ? (stalledReason || 'waiting for progress')
-        : blocked > 0
-        ? 'blocked'
-        : laneMode === 'QUEUED'
-        ? 'queued'
         : laneMode === 'GENERATING'
         ? 'generating'
         : laneMode === 'RUNNING'
         ? 'working'
+        : blocked > 0
+        ? 'blocked'
+        : laneMode === 'QUEUED'
+        ? 'queued'
         : 'idle',
       label: currentTitle || 'No active task',
       countLabel: blocked > 0 ? 'Needs attention' : (laneDetail?.activity_label || 'No active task'),
-      pathSegments: [],
-      taskId: activeTaskId || null,
+      pathSegments,
+      taskId: activeTaskId || liveLeaf?.id || null,
       taskPaused: Boolean(laneDetail?.paused),
       taskActionable: Boolean(activeTaskId) || blocked > 0 || pending > 0 || working > 0,
     };
@@ -3346,8 +3420,11 @@ function App() {
                 query: knowledgeQuery,
                 selectedPage: selectedKnowledgePage,
                 selectedSlug: selectedKnowledgeSlug,
+                selectedSource: selectedKnowledgeSource,
+                selectedSourcePath: selectedKnowledgeSourcePath,
                 onQueryChange: setKnowledgeQuery,
                 onSelectSlug: setSelectedKnowledgeSlug,
+                onSelectSource: setSelectedKnowledgeSourcePath,
                 onCreatePage: handleCreateKnowledgePage,
                 onEditPage: handleEditKnowledgePage,
                 onQueueSource: handleQueueKnowledgeSource,

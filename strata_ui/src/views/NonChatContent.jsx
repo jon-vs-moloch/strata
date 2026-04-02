@@ -722,8 +722,11 @@ const KnowledgeView = ({
   query,
   selectedPage,
   selectedSlug,
+  selectedSource,
+  selectedSourcePath,
   onQueryChange,
   onSelectSlug,
+  onSelectSource,
   onCreatePage,
   onEditPage,
   onQueueSource,
@@ -766,6 +769,17 @@ const KnowledgeView = ({
     if (!raw) return 'reference';
     return raw.replace(/_/g, ' ');
   };
+  const sourceTone = (source) => {
+    const sourceClass = String(source?.source_class || '').trim().toLowerCase();
+    const integrationStatus = String(source?.integration_status || '').trim().toLowerCase();
+    if (integrationStatus === 'ingest_candidate') return 'warning';
+    if (integrationStatus === 'system_generated') return 'info';
+    if (sourceClass === 'durable_source') return 'success';
+    return 'neutral';
+  };
+  const sourcePreview = stripInlineMarkdown(selectedSource?.content || '').slice(0, 260);
+  const selectedSourceIsMarkdown = /\.(md|markdown|txt)$/i.test(String(selectedSource?.path || ''));
+  const selectedSourceIsJson = /\.json$/i.test(String(selectedSource?.path || ''));
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: '0', minHeight: 0 }}>
@@ -833,7 +847,7 @@ const KnowledgeView = ({
                   {page.title || page.slug}
                 </div>
                 <div style={{ color: '#8d8ea1', fontSize: '12px', lineHeight: 1.5 }}>
-                  {page.summary || 'No summary available yet.'}
+                  {stripInlineMarkdown(page.summary || page.body || '').slice(0, 180) || 'No summary available yet.'}
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                   <RoutePill label="TYPE" value={classifyWikiPage(page).label} tone={classifyWikiPage(page).tone} />
@@ -876,28 +890,40 @@ const KnowledgeView = ({
                 Add source note and queue integration
               </button>
               {sources.map((source) => (
-                <div
+                <button
                   key={source.path}
+                  type="button"
+                  onClick={() => onSelectSource?.(source.path)}
                   style={{
+                    width: '100%',
+                    textAlign: 'left',
                     background: 'rgba(255,255,255,0.02)',
-                    border: '1px solid rgba(255,255,255,0.06)',
+                    border: source.path === selectedSourcePath
+                      ? '1px solid rgba(130,87,229,0.28)'
+                      : '1px solid rgba(255,255,255,0.06)',
                     borderRadius: '12px',
                     padding: '12px',
                     display: 'flex',
                     flexDirection: 'column',
                     gap: '6px',
+                    cursor: 'pointer',
                   }}
                 >
                   <div style={{ color: '#edeeef', fontSize: '12px', fontWeight: 700 }}>{source.name || source.path}</div>
+                  <div style={{ color: '#8d8ea1', fontSize: '11px', lineHeight: 1.5 }}>
+                    {source.path === selectedSourcePath && sourcePreview
+                      ? `${sourcePreview}${sourcePreview.length >= 260 ? '…' : ''}`
+                      : 'Open source to inspect raw content, provenance role, and integration status.'}
+                  </div>
                   <div style={{ color: '#8d8ea1', fontSize: '11px', fontFamily: "'JetBrains Mono', monospace" }}>{source.path}</div>
                   <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                    <RoutePill label="CLASS" value={formatSourceClass(source.source_class)} tone={source.source_class === 'durable_source' ? 'success' : 'warning'} />
+                    <RoutePill label="CLASS" value={formatSourceClass(source.source_class)} tone={sourceTone(source)} />
                     <RoutePill label="KIND" value={formatSourceKind(source.source_kind)} tone="neutral" />
                     <RoutePill label="STATUS" value={formatSourceKind(source.integration_status)} tone={source.integration_status === 'reference_source' ? 'info' : 'warning'} />
                     <RoutePill label="UPDATED" value={source.updated_at ? formatAbsoluteTime(source.updated_at) : '—'} tone="neutral" />
                     <RoutePill label="SIZE" value={typeof source.bytes === 'number' ? `${source.bytes}b` : '—'} tone="neutral" />
                   </div>
-                </div>
+                </button>
               ))}
               {!sources.length && (
                 <div style={{ fontSize: '12px', color: '#8d8ea1', lineHeight: 1.6 }}>
@@ -991,6 +1017,48 @@ const KnowledgeView = ({
               Wiki pages are the integrated layer. Durable sources and ephemeral reports can both feed it, but they should not remain indistinguishable forever.
             </div>
           </div>
+        ) : selectedSource ? (
+          <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <RoutePill label="CLASS" value={formatSourceClass(selectedSource.source_class)} tone={sourceTone(selectedSource)} />
+                <RoutePill label="KIND" value={formatSourceKind(selectedSource.source_kind)} tone="neutral" />
+                <RoutePill label="STATUS" value={formatSourceKind(selectedSource.integration_status)} tone={selectedSource.integration_status === 'reference_source' ? 'info' : 'warning'} />
+                <RoutePill label="UPDATED" value={selectedSource.updated_at ? formatAbsoluteTime(selectedSource.updated_at) : '—'} tone="neutral" />
+                <RoutePill label="SIZE" value={typeof selectedSource.bytes === 'number' ? `${selectedSource.bytes}b` : '—'} tone="neutral" />
+              </div>
+              <div>
+                <h2 style={{ margin: 0, color: '#edeeef', fontSize: '28px', lineHeight: 1.1 }}>{selectedSource.name || selectedSource.path}</h2>
+                <div style={{ marginTop: '10px', color: '#a9aaba', fontSize: '13px', lineHeight: 1.6, fontFamily: "'JetBrains Mono', monospace" }}>
+                  {selectedSource.path}
+                </div>
+              </div>
+            </div>
+
+            <DashboardPanel title="SOURCE ROLE">
+              <div style={{ color: '#a9aaba', fontSize: '13px', lineHeight: 1.7 }}>
+                {selectedSource.integration_status === 'reference_source'
+                  ? 'This source is treated as reference material. It should remain visible in Sources, and only derived, verified knowledge should surface in Wiki.'
+                  : selectedSource.integration_status === 'ingest_candidate'
+                  ? 'This source is queued or eligible for integration. It should be distilled into a verified wiki page before it becomes operator-facing canonical knowledge.'
+                  : 'This source is system-generated support material and should stay out of the canonical wiki unless intentionally transformed.'}
+              </div>
+            </DashboardPanel>
+
+            <div style={{ background: '#141418', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '16px', padding: '22px', overflow: 'hidden' }}>
+              {selectedSourceIsJson ? (
+                <pre style={{ margin: 0, color: '#d9dcec', fontSize: '12px', lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {selectedSource.content || ''}
+                </pre>
+              ) : (
+                <div className="markdown-body" style={{ fontSize: '14px', lineHeight: '1.75', color: '#edeeef' }}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {selectedSourceIsMarkdown ? (selectedSource.content || '') : `\`\`\`\n${selectedSource.content || ''}\n\`\`\``}
+                  </ReactMarkdown>
+                </div>
+              )}
+            </div>
+          </>
         ) : (
           <div style={{ margin: 'auto 0', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', textAlign: 'center' }}>
             <BookOpen size={34} color="#2f3040" />
