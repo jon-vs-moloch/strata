@@ -17,7 +17,12 @@ from strata.observability.writer import enqueue_attempt_observability_artifact, 
 from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.storage.models import TaskModel, CandidateModel, AttemptModel, AttemptOutcome
 from strata.experimental.variants import build_stage_scope, build_variant_execution_plan, classify_pool_pruning
-from strata.orchestrator.research import TaskBoundaryViolationError
+from strata.orchestrator.research import (
+    TaskBoundaryViolationError,
+    _build_prompt_snapshot_payload,
+    _render_task_graph_prompt_block,
+    _task_graph_snapshot,
+)
 
 IMPLEMENTATION_META_TOOLS = [
     {
@@ -170,6 +175,7 @@ class ImplementationModule:
         *,
         progress_fn=None,
         attempt_id: Optional[str] = None,
+        task_context: Optional[Dict[str, Any]] = None,
     ) -> List[str] | TerminalToolCallOutcome:
         """
         @summary Execute a coding task with a two-pass research strategy.
@@ -181,11 +187,30 @@ class ImplementationModule:
             return []
             
         print(f"Implementing leaf task: {task.title}...")
+        task_context = dict(task_context or {})
+        task_graph_context = dict(task_context.get("task_trajectory") or {}) or _task_graph_snapshot(
+            self.storage,
+            task_context={
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+            },
+        )
+        task_graph_block = _render_task_graph_prompt_block(task_graph_context)
         
         # Pass 2: Local Research focused on the Files
         local_research = await self.researcher.conduct_research(
             task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
             repo_path=task.repo_path,
+            context_hints={**dict(task.constraints or {}), "task_trajectory": task_graph_context},
+            task_context={
+                "task_id": task.task_id,
+                "parent_task_id": task.parent_task_id,
+                "title": task.title,
+                "type": getattr(task.type, "value", str(task.type)),
+                "state": getattr(task.state, "value", str(task.state)),
+                "session_id": task.session_id,
+                "task_trajectory": task_graph_context,
+            },
             progress_fn=progress_fn,
             attempt_id=attempt_id,
         )
@@ -221,6 +246,8 @@ class ImplementationModule:
         
         PAST ATTEMPTS TO AVOID:
         {failure_log}
+
+        {task_graph_block}
         
         YOU MUST OUTPUT THE ENTIRE UPDATED FILE CONTENT OR A NEW FILE CONTENT.
         Output format:
@@ -256,19 +283,33 @@ class ImplementationModule:
 
             # Phase 3.3: Attempt Context Snapshot
             if attempt_id:
+                prompt_snapshot = _build_prompt_snapshot_payload(
+                    prompt_kind="implementation_prompt",
+                    prompt_version=str(variant.get("variant_id") or "generic"),
+                    system_prompt=variant_messages[0]["content"],
+                    user_message="",
+                    tools=IMPLEMENTATION_META_TOOLS,
+                    task_description=task.description,
+                    target_scope="implementation",
+                    handoff_context=dict(task.constraints.get("handoff_context") or {}),
+                    task_graph_context=task_graph_context,
+                    spec_paths=[],
+                    preferred_start_paths=list(task.constraints.get("target_files") or []),
+                    focused_guidance="Implement the task against the target files while respecting the active branch trajectory.",
+                    repo_snapshot="",
+                )
                 should_flush = enqueue_attempt_observability_artifact({
                     "task_id": task_id,
                     "attempt_id": attempt_id,
                     "session_id": task.session_id,
                     "artifact_kind": "context_snapshot",
                     "payload": {
-                        "messages": variant_messages,
-                        "tools": IMPLEMENTATION_META_TOOLS,
+                        **prompt_snapshot,
                         "variant_id": str(variant.get("variant_id") or "generic"),
-                        "task_description": task.description,
+                        "tool_names": [str(((item or {}).get("function") or {}).get("name") or "") for item in IMPLEMENTATION_META_TOOLS],
                         "local_research": {
-                            "gathered": local_research.context_gathered,
-                            "constraints": local_research.key_constraints_discovered,
+                            "gathered": str(local_research.context_gathered or "")[:1200],
+                            "constraints": list(local_research.key_constraints_discovered or []),
                         },
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
@@ -277,6 +318,29 @@ class ImplementationModule:
                     flush_observability_writes()
 
             response = await self.model.chat(variant_messages, tools=IMPLEMENTATION_META_TOOLS)
+            if attempt_id:
+                should_flush = enqueue_attempt_observability_artifact(
+                    {
+                        "task_id": task_id,
+                        "attempt_id": attempt_id,
+                        "session_id": task.session_id,
+                        "artifact_kind": "model_turn_snapshot",
+                        "payload": {
+                            "prompt_lineage_id": prompt_snapshot.get("prompt_lineage_id"),
+                            "prompt_template_ref": prompt_snapshot.get("prompt_template_ref"),
+                            "variant_id": str(variant.get("variant_id") or "generic"),
+                            "response_status": str(response.get("status") or "").strip(),
+                            "model": str(response.get("model") or ""),
+                            "provider": str(response.get("provider") or ""),
+                            "usage": dict(response.get("usage") or {}),
+                            "content_preview": str(response.get("content") or "")[:1600],
+                            "tool_calls": list(response.get("tool_calls") or []),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }
+                )
+                if should_flush:
+                    flush_observability_writes()
             content = response.get("content", "")
             tool_calls = response.get("tool_calls") or []
 

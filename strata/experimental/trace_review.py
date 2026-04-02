@@ -90,6 +90,16 @@ def _attempt_observability_payload(artifact: AttemptObservabilityArtifactModel) 
         preview = _clip(payload.get("tool_result_preview"), 180)
         next_step_hint = _clip(payload.get("next_step_hint"), 180)
         summary = " | ".join(part for part in [tool_name, preview, next_step_hint] if part)
+    elif artifact.artifact_kind == "context_snapshot":
+        prompt_ref = str(payload.get("prompt_template_ref") or "").strip()
+        lineage = str(payload.get("prompt_lineage_id") or "").strip()
+        description = _clip(((payload.get("unique_context") or {}).get("task_description")), 180)
+        summary = " | ".join(part for part in [prompt_ref, lineage, description] if part)
+    elif artifact.artifact_kind == "model_turn_snapshot":
+        prompt_ref = str(payload.get("prompt_template_ref") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        preview = _clip(payload.get("content_preview"), 180)
+        summary = " | ".join(part for part in [prompt_ref, model, preview] if part)
     return {
         "artifact_id": artifact.id,
         "task_id": artifact.task_id,

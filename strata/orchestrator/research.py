@@ -10,6 +10,7 @@
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import json
+import hashlib
 from datetime import datetime, timezone
 from strata.knowledge.pages import KnowledgePageStore
 from strata.core.lanes import infer_lane_from_session_id
@@ -18,6 +19,7 @@ from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.orchestrator.tool_health import record_tool_execution, should_throttle_tool
 from strata.schemas.core import ResearchReport
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
+from strata.storage.models import TaskModel
 
 
 DEFAULT_REPO_ANCHORS = [
@@ -158,6 +160,56 @@ def _serialize_research_turn(message: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _serialize_task_trajectory(task_trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(task_trajectory or {})
+    return {
+        "lineage_root": dict(payload.get("lineage_root") or {}),
+        "current_task": dict(payload.get("current_task") or {}),
+        "recent_path": list(payload.get("recent_path") or [])[-8:],
+        "graph_nodes": list(payload.get("graph_nodes") or [])[:24],
+        "handoff_summary": dict(payload.get("handoff_summary") or {}),
+    }
+
+
+def _task_trajectory_block(task_trajectory: Optional[Dict[str, Any]]) -> str:
+    trajectory = _serialize_task_trajectory(dict(task_trajectory or {}))
+    if not any(trajectory.values()):
+        return ""
+    root = dict(trajectory.get("lineage_root") or {})
+    current = dict(trajectory.get("current_task") or {})
+    recent_path = list(trajectory.get("recent_path") or [])
+    graph_nodes = list(trajectory.get("graph_nodes") or [])
+    handoff_summary = dict(trajectory.get("handoff_summary") or {})
+    lines = [
+        "[TASK TRAJECTORY]",
+        f"- Lineage root: {root.get('title') or root.get('task_id') or 'unknown'}",
+        f"- Current task: {current.get('title') or current.get('task_id') or 'unknown'}",
+        f"- Current depth: {current.get('depth') if current else 'unknown'}",
+    ]
+    if recent_path:
+        lines.append("- Path so far:")
+        for node in recent_path:
+            lines.append(
+                f"  - d{node.get('depth', '?')} {node.get('type', '').lower()}: {node.get('title') or node.get('task_id')}"
+            )
+    if graph_nodes:
+        lines.append("- Lineage DAG snapshot:")
+        for node in graph_nodes[:16]:
+            lines.append(
+                f"  - d{node.get('depth', '?')} {node.get('type', '').lower()} [{node.get('state', '').lower()}] "
+                f"{node.get('title') or node.get('task_id')} (children={node.get('child_count', 0)})"
+            )
+    if handoff_summary:
+        tool_name = str(handoff_summary.get("tool_name") or "").strip()
+        if tool_name:
+            lines.append(f"- Prior handoff tool: {tool_name}")
+        next_step_hint = str(handoff_summary.get("next_step_hint") or "").strip()
+        if next_step_hint:
+            lines.append(f"- Current next-step hint: {next_step_hint}")
+    lines.append("- Use this trajectory to avoid repeating already-completed branch moves unless you can justify why repetition is necessary.")
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def _build_iteration_limit_autopsy(
     *,
     task_description: str,
@@ -266,6 +318,181 @@ def _best_hint_directory(preferred_start_paths: Optional[list[str]]) -> str:
     return "."
 
 
+def _clip_lines(value: Any, limit: int = 320) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _task_graph_snapshot(storage, *, task_context: Optional[Dict[str, Any]] = None, limit: int = 48) -> Dict[str, Any]:
+    task_context = dict(task_context or {})
+    task_id = str(task_context.get("task_id") or "").strip()
+    session_id = str(task_context.get("session_id") or "").strip()
+    if not task_id or not session_id or not storage or not hasattr(storage, "session"):
+        return {}
+    tasks = storage.session.query(TaskModel).filter(TaskModel.session_id == session_id).all()
+    by_id = {str(getattr(row, "task_id", "") or ""): row for row in tasks}
+    current = by_id.get(task_id)
+    if current is None:
+        return {}
+
+    root = current
+    seen = set()
+    while getattr(root, "parent_task_id", None) and str(root.parent_task_id) not in seen:
+        seen.add(str(root.parent_task_id))
+        parent = by_id.get(str(root.parent_task_id))
+        if parent is None:
+            break
+        root = parent
+
+    children_by_parent: Dict[str, List[TaskModel]] = {}
+    for row in tasks:
+        parent_id = str(getattr(row, "parent_task_id", "") or "").strip()
+        if not parent_id:
+            continue
+        children_by_parent.setdefault(parent_id, []).append(row)
+    for rows in children_by_parent.values():
+        rows.sort(key=lambda item: (int(getattr(item, "depth", 0) or 0), str(getattr(item, "created_at", "") or ""), str(getattr(item, "title", "") or "")))
+
+    lineage: List[Dict[str, Any]] = []
+    cursor = current
+    seen = set()
+    while cursor is not None and str(getattr(cursor, "task_id", "") or "") not in seen:
+        seen.add(str(getattr(cursor, "task_id", "") or ""))
+        lineage.append(
+            {
+                "task_id": str(getattr(cursor, "task_id", "") or ""),
+                "title": str(getattr(cursor, "title", "") or ""),
+                "type": str(getattr(getattr(cursor, "type", None), "value", getattr(cursor, "type", "")) or ""),
+                "state": str(getattr(getattr(cursor, "state", None), "value", getattr(cursor, "state", "")) or ""),
+                "depth": int(getattr(cursor, "depth", 0) or 0),
+            }
+        )
+        parent_id = getattr(cursor, "parent_task_id", None)
+        cursor = by_id.get(str(parent_id)) if parent_id else None
+    lineage.reverse()
+
+    subtree_nodes: List[Dict[str, Any]] = []
+    queue: List[TaskModel] = [root]
+    seen = set()
+    while queue and len(subtree_nodes) < max(1, limit):
+        node = queue.pop(0)
+        node_id = str(getattr(node, "task_id", "") or "")
+        if not node_id or node_id in seen:
+            continue
+        seen.add(node_id)
+        children = list(children_by_parent.get(node_id, []) or [])
+        subtree_nodes.append(
+            {
+                "task_id": node_id,
+                "parent_task_id": str(getattr(node, "parent_task_id", "") or "") or None,
+                "title": str(getattr(node, "title", "") or ""),
+                "summary": _clip_lines(getattr(node, "description", ""), 160),
+                "type": str(getattr(getattr(node, "type", None), "value", getattr(node, "type", "")) or ""),
+                "state": str(getattr(getattr(node, "state", None), "value", getattr(node, "state", "")) or ""),
+                "depth": int(getattr(node, "depth", 0) or 0),
+                "child_count": len(children),
+            }
+        )
+        queue.extend(children)
+
+    return {
+        "root_task_id": str(getattr(root, "task_id", "") or ""),
+        "root_title": str(getattr(root, "title", "") or ""),
+        "current_task_id": str(getattr(current, "task_id", "") or ""),
+        "current_title": str(getattr(current, "title", "") or ""),
+        "lineage_path": lineage,
+        "dag_nodes": subtree_nodes,
+        "truncated": len(subtree_nodes) >= max(1, limit),
+    }
+
+
+def _render_task_graph_prompt_block(task_graph_context: Optional[Dict[str, Any]]) -> str:
+    context = dict(task_graph_context or {})
+    if not context:
+        return ""
+    lineage_lines = []
+    for node in list(context.get("lineage_path") or []):
+        lineage_lines.append(
+            f"- depth {int(node.get('depth') or 0)} | {str(node.get('type') or '').upper()} | "
+            f"{str(node.get('state') or '').lower()} | {str(node.get('title') or '').strip()}"
+        )
+    dag_lines = []
+    for node in list(context.get("dag_nodes") or [])[:18]:
+        dag_lines.append(
+            f"- [{str(node.get('task_id') or '')[:8]}] depth {int(node.get('depth') or 0)} | "
+            f"{str(node.get('type') or '').upper()} | {str(node.get('state') or '').lower()} | "
+            f"{str(node.get('title') or '').strip()} :: {str(node.get('summary') or '').strip()}"
+        )
+    suffix = "\n- DAG snapshot truncated for prompt budget." if bool(context.get("truncated")) else ""
+    return (
+        "\n[TASK GRAPH CONTEXT]\n"
+        f"Root task: {str(context.get('root_title') or '').strip()} ({str(context.get('root_task_id') or '')[:8]})\n"
+        f"Current task: {str(context.get('current_title') or '').strip()} ({str(context.get('current_task_id') or '')[:8]})\n"
+        "Current lineage path:\n"
+        + ("\n".join(lineage_lines) if lineage_lines else "- None available")
+        + "\nRelevant DAG nodes from the current root task:\n"
+        + ("\n".join(dag_lines) if dag_lines else "- None available")
+        + suffix
+        + "\nUse this graph context to avoid repeating earlier branch work and to decide whether this step should finalize, communicate, store knowledge, or perform one more bounded lookup.\n"
+    )
+
+
+def _build_prompt_snapshot_payload(
+    *,
+    prompt_kind: str,
+    prompt_version: str,
+    system_prompt: str,
+    user_message: str,
+    tools: List[Dict[str, Any]],
+    task_description: str,
+    target_scope: str,
+    handoff_context: Dict[str, Any],
+    task_graph_context: Dict[str, Any],
+    spec_paths: List[str],
+    preferred_start_paths: List[str],
+    focused_guidance: str,
+    repo_snapshot: str,
+) -> Dict[str, Any]:
+    lineage_basis = json.dumps(
+        {
+            "prompt_kind": prompt_kind,
+            "prompt_version": prompt_version,
+            "target_scope": target_scope,
+            "tool_names": [str(((item or {}).get("function") or {}).get("name") or "") for item in tools],
+            "spec_paths": list(spec_paths or []),
+        },
+        sort_keys=True,
+    )
+    prompt_lineage_id = hashlib.sha256(lineage_basis.encode("utf-8")).hexdigest()[:16]
+    return {
+        "prompt_kind": prompt_kind,
+        "prompt_version": prompt_version,
+        "prompt_lineage_id": prompt_lineage_id,
+        "prompt_template_ref": f"{prompt_kind}.{prompt_version}",
+        "system_prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        "system_prompt_preview": _clip_lines(system_prompt, 1600),
+        "user_message": _clip_lines(user_message, 800),
+        "static_section_refs": [
+            "critical_tool_use",
+            "library_structure",
+            "knowledge_maintenance",
+            "local_context",
+        ],
+        "unique_context": {
+            "task_description": _clip_lines(task_description, 800),
+            "target_scope": target_scope,
+            "spec_paths": list(spec_paths or []),
+            "preferred_start_paths": list(preferred_start_paths or []),
+            "focused_guidance": _clip_lines(focused_guidance, 600),
+            "handoff_context": dict(handoff_context or {}),
+            "task_graph_context": dict(task_graph_context or {}),
+            "repo_snapshot_preview": _clip_lines(repo_snapshot, 1200),
+        },
+    }
+
+
 def _build_research_system_prompt(
     target_scope: str,
     task_description: str,
@@ -275,6 +502,7 @@ def _build_research_system_prompt(
     focused_guidance: str = "",
     disallow_broad_repo_scan: bool = False,
     handoff_context: Optional[Dict[str, Any]] = None,
+    task_graph_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     spec_lines = "\n".join(f"- {path}" for path in (spec_paths or [])) or "- None provided"
     repo_hint_block = f"\nObserved repository snapshot:\n{repo_snapshot}\n" if repo_snapshot else ""
@@ -344,9 +572,10 @@ def _build_research_system_prompt(
 - You must choose exactly one of these outcomes:
   1. `finalize_research` immediately if the inherited result is already sufficient.
   2. Make exactly one new structured tool call if one additional bounded lookup is genuinely required.
-- Do NOT emit multiple tool calls in this step.
-- Do NOT perform a broad repo scan after inheriting a focused tool result unless you can justify why the inherited result was insufficient.
+        - Do NOT emit multiple tool calls in this step.
+        - Do NOT perform a broad repo scan after inheriting a focused tool result unless you can justify why the inherited result was insufficient.
 """
+    task_graph_block = _render_task_graph_prompt_block(task_graph_context)
 
     return f"""You are an Expert Research Agent building a persistent knowledge library.
 Your primary goal is to decompose the user's research task and iteratively gather data.
@@ -369,7 +598,7 @@ Your current tools: list_directory, read_file, search_web, write_library_file, l
 [LOCAL CONTEXT]
 - Repository paths are relative to the repo root.
 - Canonical spec paths for this task:
-{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{codebase_nudge}{continuation_nudge}
+{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{task_graph_block}{codebase_nudge}{continuation_nudge}
 
 When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
 Focus area: {target_scope.upper()} scope."""
@@ -429,6 +658,7 @@ class ResearchModule:
         ).strip()
         disallow_broad_repo_scan = bool(context_hints.get("disallow_broad_repo_scan"))
         handoff_context = dict(context_hints.get("handoff_context") or {})
+        task_graph_context = dict((task_context or {}).get("task_trajectory") or {}) or _task_graph_snapshot(self.storage, task_context=task_context)
         research_lane = infer_lane_from_session_id((task_context or {}).get("session_id"))
         research_task_type = str((task_context or {}).get("type") or "").strip() or "RESEARCH"
         research_task_id = str((task_context or {}).get("task_id") or "").strip() or None
@@ -646,23 +876,26 @@ class ResearchModule:
             }
         ]
 
+        system_prompt = _build_research_system_prompt(
+            target_scope=target_scope,
+            task_description=task_description,
+            repo_snapshot=repo_snapshot,
+            spec_paths=spec_paths,
+            preferred_start_paths=preferred_start_paths,
+            focused_guidance=focused_guidance,
+            disallow_broad_repo_scan=disallow_broad_repo_scan,
+            handoff_context=handoff_context,
+            task_graph_context=task_graph_context,
+        )
+        user_message = f"RESEARCH TASK: {task_description}\\nPlease begin your research. Call tools to gather data."
         messages = [
             {
                 "role": "system",
-                "content": _build_research_system_prompt(
-                    target_scope=target_scope,
-                    task_description=task_description,
-                    repo_snapshot=repo_snapshot,
-                    spec_paths=spec_paths,
-                    preferred_start_paths=preferred_start_paths,
-                    focused_guidance=focused_guidance,
-                    disallow_broad_repo_scan=disallow_broad_repo_scan,
-                    handoff_context=handoff_context,
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": f"RESEARCH TASK: {task_description}\\nPlease begin your research. Call tools to gather data."
+                "content": user_message,
             }
         ]
 
@@ -682,18 +915,29 @@ class ResearchModule:
         
         # Phase 3.3: Attempt Context Snapshot
         if attempt_id:
+            prompt_snapshot = _build_prompt_snapshot_payload(
+                prompt_kind="research_prompt",
+                prompt_version="v2",
+                system_prompt=system_prompt,
+                user_message=user_message,
+                tools=RESEARCH_TOOLS,
+                task_description=task_description,
+                target_scope=target_scope,
+                handoff_context=handoff_context,
+                task_graph_context=task_graph_context,
+                spec_paths=spec_paths,
+                preferred_start_paths=preferred_start_paths,
+                focused_guidance=focused_guidance,
+                repo_snapshot=repo_snapshot,
+            )
             should_flush = enqueue_attempt_observability_artifact({
                 "task_id": research_task_id,
                 "attempt_id": attempt_id,
                 "session_id": (task_context or {}).get("session_id"),
                 "artifact_kind": "context_snapshot",
                 "payload": {
-                    "messages": messages,
-                    "tools": RESEARCH_TOOLS,
-                    "target_scope": target_scope,
-                    "task_description": task_description,
-                    "handoff_context": handoff_context,
-                    "repo_snapshot": repo_snapshot if len(repo_snapshot) < 50000 else "TRUNCATED_SNAPSHOT",
+                    **prompt_snapshot,
+                    "tool_names": [str(((item or {}).get("function") or {}).get("name") or "") for item in RESEARCH_TOOLS],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             })
@@ -701,6 +945,28 @@ class ResearchModule:
                 flush_observability_writes()
 
         response = await self.model.chat(messages, tools=RESEARCH_TOOLS)
+        if attempt_id:
+            should_flush = enqueue_attempt_observability_artifact(
+                {
+                    "task_id": research_task_id,
+                    "attempt_id": attempt_id,
+                    "session_id": (task_context or {}).get("session_id"),
+                    "artifact_kind": "model_turn_snapshot",
+                    "payload": {
+                        "prompt_lineage_id": prompt_snapshot.get("prompt_lineage_id"),
+                        "prompt_template_ref": prompt_snapshot.get("prompt_template_ref"),
+                        "response_status": str(response.get("status") or "").strip(),
+                        "model": str(response.get("model") or ""),
+                        "provider": str(response.get("provider") or ""),
+                        "usage": dict(response.get("usage") or {}),
+                        "content_preview": _clip_lines(response.get("content") or "", 1600),
+                        "tool_calls": list(response.get("tool_calls") or []),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
+            )
+            if should_flush:
+                flush_observability_writes()
 
         if response.get("status") == "error":
             err_msg = response.get("message", "Unknown model adapter error.")

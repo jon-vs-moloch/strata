@@ -58,6 +58,88 @@ def _count_ancestor_tasks(storage, task: TaskModel, *, task_types: Optional[set[
     return total
 
 
+def _lineage_root_task(storage, task: TaskModel) -> TaskModel:
+    current = task
+    seen = set()
+    while current is not None and getattr(current, "parent_task_id", None):
+        parent_task_id = getattr(current, "parent_task_id", None)
+        if not parent_task_id or parent_task_id in seen:
+            break
+        seen.add(parent_task_id)
+        parent = storage.tasks.get_by_id(parent_task_id) if storage is not None and hasattr(storage, "tasks") else None
+        if parent is None:
+            break
+        current = parent
+    return current
+
+
+def _summarize_task_node(node: TaskModel) -> Dict[str, Any]:
+    return {
+        "task_id": str(getattr(node, "task_id", "") or ""),
+        "title": str(getattr(node, "title", "") or ""),
+        "type": str(getattr(getattr(node, "type", None), "value", getattr(node, "type", "")) or ""),
+        "state": str(getattr(getattr(node, "state", None), "value", getattr(node, "state", "")) or ""),
+        "depth": int(getattr(node, "depth", 0) or 0),
+    }
+
+
+def _build_task_trajectory(storage, task: TaskModel, *, max_nodes: int = 24, max_recent_path: int = 8) -> Dict[str, Any]:
+    root = _lineage_root_task(storage, task)
+    recent_path: List[Dict[str, Any]] = []
+    lineage_cursor = task
+    seen = set()
+    while lineage_cursor is not None and getattr(lineage_cursor, "task_id", None) and lineage_cursor.task_id not in seen:
+        seen.add(lineage_cursor.task_id)
+        recent_path.append(_summarize_task_node(lineage_cursor))
+        parent_task_id = getattr(lineage_cursor, "parent_task_id", None)
+        lineage_cursor = storage.tasks.get_by_id(parent_task_id) if parent_task_id and storage is not None and hasattr(storage, "tasks") else None
+    recent_path.reverse()
+    recent_path = recent_path[-max_recent_path:]
+
+    graph_nodes: List[Dict[str, Any]] = []
+    if storage is not None and hasattr(storage, "session") and getattr(root, "session_id", None):
+        session_rows = (
+            storage.session.query(TaskModel)
+            .filter(TaskModel.session_id == root.session_id)
+            .all()
+        )
+        by_parent: Dict[str, List[TaskModel]] = {}
+        for row in session_rows:
+            parent_key = str(getattr(row, "parent_task_id", "") or "")
+            by_parent.setdefault(parent_key, []).append(row)
+        queue: List[TaskModel] = [root]
+        visited: set[str] = set()
+        while queue and len(graph_nodes) < max_nodes:
+            node = queue.pop(0)
+            node_id = str(getattr(node, "task_id", "") or "")
+            if not node_id or node_id in visited:
+                continue
+            visited.add(node_id)
+            children = by_parent.get(node_id, [])
+            graph_nodes.append(
+                {
+                    **_summarize_task_node(node),
+                    "parent_task_id": str(getattr(node, "parent_task_id", "") or ""),
+                    "child_count": len(children),
+                }
+            )
+            queue.extend(sorted(children, key=lambda item: int(getattr(item, "depth", 0) or 0)))
+
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    handoff_context = dict(constraints.get("handoff_context") or {})
+    return {
+        "lineage_root": _summarize_task_node(root),
+        "current_task": _summarize_task_node(task),
+        "recent_path": recent_path,
+        "graph_nodes": graph_nodes,
+        "handoff_summary": {
+            "tool_name": str(((handoff_context.get("tool_call") or {}).get("name")) or "").strip(),
+            "next_step_hint": str(handoff_context.get("next_step_hint") or "").strip(),
+            "tool_result_preview": str(handoff_context.get("tool_result_preview") or "").strip()[:400],
+        },
+    }
+
+
 async def _queue_trace_review_guardrail(
     storage,
     task: TaskModel,
@@ -1132,12 +1214,15 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
 
 async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn=None, attempt_id=None):
     research = ResearchModule(model_adapter, storage, enqueue_task=enqueue_fn)
+    task_trajectory = _build_task_trajectory(storage, task)
+    context_hints = dict(task.constraints or {})
+    context_hints["task_trajectory"] = task_trajectory
     report = await research.conduct_research(
         task_description=task.description,
         repo_path=task.repo_path,
         progress_fn=progress_fn,
         attempt_id=attempt_id,
-        context_hints=dict(task.constraints or {}),
+        context_hints=context_hints,
         task_context={
             "task_id": task.task_id,
             "parent_task_id": task.parent_task_id,
@@ -1145,6 +1230,7 @@ async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn
             "type": getattr(task.type, "value", str(task.type)),
             "state": getattr(task.state, "value", str(task.state)),
             "session_id": task.session_id,
+            "task_trajectory": task_trajectory,
         },
     )
     if isinstance(report, TerminalToolCallOutcome):
@@ -1296,7 +1382,21 @@ async def _run_decomposition(task, storage, model_adapter, enqueue_fn):
 async def _run_implementation(task, storage, model_adapter, *, progress_fn=None, attempt_id=None):
     research_mod = ResearchModule(model_adapter, storage)
     impl_mod = ImplementationModule(model_adapter, storage, research_mod)
-    candidate_ids = await impl_mod.implement_task(task.task_id, progress_fn=progress_fn, attempt_id=attempt_id)
+    candidate_ids = await impl_mod.implement_task(
+        task.task_id,
+        progress_fn=progress_fn,
+        attempt_id=attempt_id,
+        task_context={
+            "task_id": task.task_id,
+            "parent_task_id": task.parent_task_id,
+            "title": task.title,
+            "type": getattr(task.type, "value", str(task.type)),
+            "state": getattr(task.state, "value", str(task.state)),
+            "session_id": task.session_id,
+            "task_trajectory": _build_task_trajectory(storage, task),
+            "constraints": dict(task.constraints or {}),
+        },
+    )
     if isinstance(candidate_ids, TerminalToolCallOutcome):
         return candidate_ids
     _emit_task_communication(
