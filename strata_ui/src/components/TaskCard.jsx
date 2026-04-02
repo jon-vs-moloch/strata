@@ -107,6 +107,91 @@ function stripInlineMarkdown(content) {
     .trim();
 }
 
+function taskStatusProgressFraction(status) {
+  switch (String(status || '').trim().toLowerCase()) {
+    case 'complete':
+    case 'abandoned':
+    case 'cancelled':
+      return 1;
+    case 'working':
+      return 0.68;
+    case 'blocked':
+      return 0.34;
+    case 'pending':
+      return 0.14;
+    case 'pushed':
+      return 0.24;
+    default:
+      return 0.08;
+  }
+}
+
+function describeTaskProgress(task) {
+  if (!task || typeof task !== 'object') {
+    return { percent: 0, markers: [] };
+  }
+  const childSet = Array.isArray(task.children) ? task.children : [];
+  if (!childSet.length) {
+    return {
+      percent: Math.round(taskStatusProgressFraction(task.status) * 100),
+      markers: [],
+    };
+  }
+  const markers = childSet.map((child) => {
+    const childProgress = describeTaskProgress(child);
+    const fallbackPercent = Math.round(taskStatusProgressFraction(child?.status) * 100);
+    return {
+      status: child?.status,
+      percent: Math.max(fallbackPercent, childProgress.percent || 0),
+    };
+  });
+  const total = markers.reduce((sum, marker) => sum + Math.max(0, Math.min(100, Number(marker.percent || 0))), 0);
+  const average = markers.length ? Math.round(total / markers.length) : Math.round(taskStatusProgressFraction(task.status) * 100);
+  return {
+    percent: Math.max(Math.round(taskStatusProgressFraction(task.status) * 100), average),
+    markers,
+  };
+}
+
+const ProgressRail = ({ percent, accentColor, markers = [] }) => (
+  <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden', position: 'relative' }}>
+    <div style={{ height: '100%', width: `${Math.max(0, Math.min(100, Number(percent || 0)))}%`, background: accentColor, borderRadius: '10px' }} />
+    {markers.length > 1 && (
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+        {markers.map((marker, index) => {
+          if (index === markers.length - 1) return null;
+          const markerStatus = String(marker?.status || '').trim().toLowerCase();
+          const markerColor = markerStatus === 'complete'
+            ? 'rgba(0,242,148,0.92)'
+            : markerStatus === 'blocked'
+            ? 'rgba(255,92,92,0.92)'
+            : markerStatus === 'pending'
+            ? 'rgba(143,214,255,0.92)'
+            : markerStatus === 'pushed'
+            ? 'rgba(255,184,77,0.92)'
+            : accentColor;
+          return (
+            <div
+              key={`marker-${index}`}
+              style={{
+                position: 'absolute',
+                left: `${((index + 1) / markers.length) * 100}%`,
+                top: '50%',
+                width: '5px',
+                height: '5px',
+                borderRadius: '999px',
+                background: markerColor,
+                transform: 'translate(-50%, -50%)',
+                boxShadow: `0 0 0 1px rgba(20,20,24,0.94), 0 0 8px ${markerColor}`,
+              }}
+            />
+          );
+        })}
+      </div>
+    )}
+  </div>
+);
+
 function buildTaskContext(task) {
   const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
   const pendingQuestion = task?.pending_question;
@@ -521,6 +606,7 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
   const displayTitle = stripInlineMarkdown(task.title || 'Untitled task') || 'Untitled task';
   const descriptionText = String(task.description || '');
   const longDescription = descriptionText.length > 420 || descriptionText.split('\n').length > 8;
+  const progressMeta = useMemo(() => describeTaskProgress(task), [task]);
 
   const children = task.children || [];
   const attempts = Array.isArray(task.attempts) ? task.attempts : [];
@@ -677,9 +763,7 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
           </div>
         )}
 
-        <div style={{ height: '3px', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', overflow: 'hidden' }}>
-          <div style={{ height: '100%', width: style.progress, background: accentColor, borderRadius: '10px' }} />
-        </div>
+        <ProgressRail percent={progressMeta.percent} accentColor={accentColor} markers={progressMeta.markers} />
       </MotionDiv>
 
       <AnimatePresence>

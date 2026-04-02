@@ -2699,6 +2699,50 @@ function App() {
       });
     return ordered[0] || null;
   };
+  const taskStatusProgressFraction = (status) => {
+    switch (String(status || '').trim().toLowerCase()) {
+      case 'complete':
+      case 'abandoned':
+      case 'cancelled':
+        return 1;
+      case 'working':
+        return 0.68;
+      case 'blocked':
+        return 0.34;
+      case 'pending':
+        return 0.14;
+      case 'pushed':
+        return 0.24;
+      default:
+        return 0.08;
+    }
+  };
+  const describeTaskProgress = (task) => {
+    if (!task || typeof task !== 'object') {
+      return { percent: 0, markers: [] };
+    }
+    const childSet = Array.isArray(task.children) ? task.children : [];
+    if (!childSet.length) {
+      return {
+        percent: Math.round(taskStatusProgressFraction(task.status) * 100),
+        markers: [],
+      };
+    }
+    const markers = childSet.map((child) => {
+      const childProgress = describeTaskProgress(child);
+      const fallbackPercent = Math.round(taskStatusProgressFraction(child?.status) * 100);
+      return {
+        status: child?.status,
+        percent: Math.max(fallbackPercent, childProgress.percent || 0),
+      };
+    });
+    const total = markers.reduce((sum, marker) => sum + Math.max(0, Math.min(100, Number(marker.percent || 0))), 0);
+    const average = markers.length ? Math.round(total / markers.length) : Math.round(taskStatusProgressFraction(task.status) * 100);
+    return {
+      percent: Math.max(Math.round(taskStatusProgressFraction(task.status) * 100), average),
+      markers,
+    };
+  };
   const findTaskPathById = (nodes, targetId) => {
     if (!targetId) return [];
     for (const node of Array.isArray(nodes) ? nodes : []) {
@@ -2801,28 +2845,27 @@ function App() {
     const siblings = parent?.children || [];
     const siblingComplete = siblings.filter((child) => ['complete', 'abandoned', 'cancelled'].includes(child.status)).length;
     const siblingTotal = siblings.length || 1;
-    const localPercent = siblings.length ? Math.round((siblingComplete / siblingTotal) * 100) : (leaf.status === 'complete' ? 100 : leaf.status === 'working' ? 65 : leaf.status === 'blocked' ? 25 : 10);
+    const siblingMarkers = siblings.map((sibling) => {
+      const siblingProgress = describeTaskProgress(sibling);
+      return {
+        status: sibling.status,
+        percent: siblingProgress.percent,
+      };
+    });
+    const localPercent = siblingMarkers.length
+      ? Math.round(siblingMarkers.reduce((sum, marker) => sum + Math.max(0, Math.min(100, Number(marker.percent || 0))), 0) / siblingMarkers.length)
+      : describeTaskProgress(leaf).percent;
     const blockedDescendants = path.filter((task) => task.status === 'blocked').length;
     const depth = Number.isFinite(leaf.depth) ? leaf.depth : Math.max(0, path.length - 1);
     const rootTitle = String(root.title || 'Untitled goal').trim();
     const leafTitle = String(leaf.title || rootTitle).trim();
     const leafPaused = Boolean(leaf.paused);
     const pathSegments = path.map((task) => {
-      const childSet = Array.isArray(task.children) ? task.children : [];
-      const completedChildren = childSet.filter((child) => ['complete', 'abandoned', 'cancelled'].includes(child.status)).length;
-      const totalChildren = childSet.length || 1;
-      const percent = childSet.length
-        ? Math.round((completedChildren / totalChildren) * 100)
-        : task.status === 'complete'
-        ? 100
-        : task.status === 'working'
-        ? 65
-        : task.status === 'blocked'
-        ? 25
-        : 10;
+      const taskProgress = describeTaskProgress(task);
       return {
-        percent,
+        percent: taskProgress.percent,
         status: task.status,
+        markers: taskProgress.markers,
       };
     });
 
@@ -2861,6 +2904,7 @@ function App() {
         ? `${siblingComplete}/${siblingTotal} here`
         : '',
       pathSegments,
+      markers: siblingMarkers,
       taskId: leaf.id,
       taskPaused: leafPaused,
       taskActionable: true,
@@ -2882,21 +2926,21 @@ function App() {
     const liveLeaf = livePath.length ? livePath[livePath.length - 1] : null;
     const currentTitle = String(liveLeaf?.title || laneCurrentTaskTitles?.[scopeId] || laneDetail?.current_task_title || '').trim();
     const stalledReason = String(laneDetail?.step_detail || laneDetail?.step_label || '').trim();
-    const pathSegments = livePath.map((task) => {
-      const childSet = Array.isArray(task.children) ? task.children : [];
-      const completedChildren = childSet.filter((child) => ['complete', 'abandoned', 'cancelled'].includes(child.status)).length;
-      const totalChildren = childSet.length || 1;
+    const parent = livePath.length > 1 ? livePath[livePath.length - 2] : null;
+    const siblings = Array.isArray(parent?.children) ? parent.children : [];
+    const siblingMarkers = siblings.map((sibling) => {
+      const siblingProgress = describeTaskProgress(sibling);
       return {
-        percent: childSet.length
-          ? Math.round((completedChildren / totalChildren) * 100)
-          : task.status === 'complete'
-          ? 100
-          : task.status === 'working'
-          ? 65
-          : task.status === 'blocked'
-          ? 25
-          : 10,
+        status: sibling.status,
+        percent: siblingProgress.percent,
+      };
+    });
+    const pathSegments = livePath.map((task) => {
+      const taskProgress = describeTaskProgress(task);
+      return {
+        percent: taskProgress.percent,
         status: task.status,
+        markers: taskProgress.markers,
       };
     });
     const percent = laneMode === 'STALLED'
@@ -2938,6 +2982,7 @@ function App() {
       label: currentTitle || 'No active task',
       countLabel: blocked > 0 ? 'Needs attention' : (laneDetail?.activity_label || 'No active task'),
       pathSegments,
+      markers: siblingMarkers,
       taskId: activeTaskId || liveLeaf?.id || null,
       taskPaused: Boolean(laneDetail?.paused),
       taskActionable: Boolean(activeTaskId) || blocked > 0 || pending > 0 || working > 0,
@@ -4106,6 +4151,7 @@ const TopModeTab = ({
   const progressValue = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
   const taskPaused = Boolean(progress?.taskPaused);
   const pathSegments = Array.isArray(progress?.pathSegments) ? progress.pathSegments : [];
+  const progressMarkers = Array.isArray(progress?.markers) ? progress.markers : [];
   const topObjective = stripInlineMarkdown(progress?.summary || '');
   const currentObjective = stripInlineMarkdown(progress?.currentTitle || '');
   const currentStateLabel = String(progress?.currentStateLabel || '').trim();
@@ -4261,13 +4307,38 @@ const TopModeTab = ({
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
               {pathSegments.slice(0, -1).map((segment, index) => {
                 const segmentPercent = Math.max(0, Math.min(100, Number(segment?.percent || 0)));
-                const segmentTone = segment?.status === 'blocked'
-                  ? 'linear-gradient(90deg, rgba(255,184,77,0.96), rgba(255,92,92,0.8))'
+                const segmentStatus = String(segment?.status || '').trim().toLowerCase();
+                const segmentTone = segmentStatus === 'complete'
+                  ? 'linear-gradient(90deg, rgba(0,242,148,0.96), rgba(104,255,198,0.84))'
+                  : segmentStatus === 'blocked'
+                  ? 'linear-gradient(90deg, rgba(255,184,77,0.96), rgba(255,92,92,0.84))'
+                  : segmentStatus === 'pending'
+                  ? 'linear-gradient(90deg, rgba(143,214,255,0.96), rgba(92,156,255,0.84))'
+                  : segmentStatus === 'pushed'
+                  ? 'linear-gradient(90deg, rgba(255,215,120,0.96), rgba(255,168,76,0.84))'
                   : accent === 'agent'
                   ? 'linear-gradient(90deg, rgba(146,196,188,0.95), rgba(93,131,137,0.82))'
                   : accent === 'trainer'
                   ? 'linear-gradient(90deg, rgba(255,177,140,0.96), rgba(205,96,52,0.9))'
                   : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))';
+                const segmentTrack = segmentStatus === 'complete'
+                  ? 'rgba(0,242,148,0.14)'
+                  : segmentStatus === 'blocked'
+                  ? 'rgba(255,92,92,0.16)'
+                  : segmentStatus === 'pending'
+                  ? 'rgba(143,214,255,0.14)'
+                  : segmentStatus === 'pushed'
+                  ? 'rgba(255,184,77,0.14)'
+                  : 'rgba(255,255,255,0.08)';
+                const segmentOpacity = segmentStatus === 'complete'
+                  ? 0.92
+                  : segmentStatus === 'blocked'
+                  ? 0.96
+                  : segmentStatus === 'pending'
+                  ? 0.9
+                  : segmentStatus === 'pushed'
+                  ? 0.92
+                  : 0.78;
                 return (
                   <div
                     key={`${label}-crumb-${index}`}
@@ -4275,9 +4346,12 @@ const TopModeTab = ({
                       width: '18px',
                       height: '5px',
                       borderRadius: '999px',
-                      background: 'rgba(255,255,255,0.08)',
+                      background: segmentTrack,
                       overflow: 'hidden',
-                      opacity: 0.74,
+                      opacity: segmentOpacity,
+                      boxShadow: segmentStatus === 'blocked'
+                        ? '0 0 10px rgba(255,92,92,0.14)'
+                        : 'none',
                     }}
                   >
                     <div
@@ -4294,7 +4368,7 @@ const TopModeTab = ({
               })}
             </div>
           )}
-          <div style={{ flex: 1, height: '5px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+          <div style={{ flex: 1, height: '5px', borderRadius: '999px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden', position: 'relative' }}>
             <div
               style={{
                 width: `${progressValue}%`,
@@ -4306,8 +4380,41 @@ const TopModeTab = ({
                   ? 'linear-gradient(90deg, rgba(255,177,140,0.96), rgba(205,96,52,0.9))'
                   : 'linear-gradient(90deg, rgba(255,255,255,0.88), rgba(190,196,215,0.82))',
               transition: 'width 0.22s ease',
-            }}
-          />
+              }}
+            />
+            {progressMarkers.length > 1 && (
+              <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+                {progressMarkers.map((marker, index) => {
+                  if (index === progressMarkers.length - 1) return null;
+                  const markerStatus = String(marker?.status || '').trim().toLowerCase();
+                  const markerColor = markerStatus === 'complete'
+                    ? 'rgba(0,242,148,0.92)'
+                    : markerStatus === 'blocked'
+                    ? 'rgba(255,92,92,0.92)'
+                    : markerStatus === 'pending'
+                    ? 'rgba(143,214,255,0.9)'
+                    : markerStatus === 'pushed'
+                    ? 'rgba(255,184,77,0.92)'
+                    : 'rgba(255,255,255,0.45)';
+                  return (
+                    <div
+                      key={`${label}-marker-${index}`}
+                      style={{
+                        position: 'absolute',
+                        left: `${((index + 1) / progressMarkers.length) * 100}%`,
+                        top: '50%',
+                        width: '5px',
+                        height: '5px',
+                        borderRadius: '999px',
+                        background: markerColor,
+                        transform: 'translate(-50%, -50%)',
+                        boxShadow: `0 0 0 1px rgba(10,10,12,0.9), 0 0 8px ${markerColor}`,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
           </div>
           {showControls && apiStatus === 'ok' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
