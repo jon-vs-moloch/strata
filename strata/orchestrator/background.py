@@ -762,6 +762,7 @@ class BackgroundWorker:
         procedure_id = str(constraints.get("procedure_id") or "").strip().lower()
         phase = str(constraints.get("recovery_phase") or "").strip().lower()
         phase_rank = {"inspect": 0, "decide": 1, "cash_out": 2}.get(phase, 9)
+        has_handoff = bool(constraints.get("handoff_context")) or bool(constraints.get("terminal_tool_origin"))
         has_hints = bool(constraints.get("source_hints")) or bool(constraints.get("preferred_start_paths"))
         has_parent = 0 if getattr(task, "parent_task_id", None) else 1
         updated_at = getattr(task, "updated_at", None)
@@ -775,6 +776,7 @@ class BackgroundWorker:
                 recency_key = 0.0
         return (
             0 if procedure_id == "startup_sanity_check" else 1,
+            0 if has_handoff else 1,
             has_parent,
             0 if has_hints else 1,
             phase_rank,

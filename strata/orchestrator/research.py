@@ -287,6 +287,7 @@ def _build_research_system_prompt(
     )
     handoff_context = dict(handoff_context or {})
     handoff_lines = []
+    is_tool_result_continuation = bool(handoff_context) and str(handoff_context.get("source_module") or "").strip() in {"research", "implementation"}
     if handoff_context:
         tool_name = str(((handoff_context.get("tool_call") or {}).get("name")) or "").strip()
         tool_args = str(((handoff_context.get("tool_call") or {}).get("arguments")) or "").strip()
@@ -334,6 +335,18 @@ def _build_research_system_prompt(
 {preferred_lines}
 - Only broaden beyond those hints if you can explain why the hinted surfaces were insufficient.
 """
+    continuation_nudge = ""
+    if is_tool_result_continuation:
+        continuation_nudge = """
+[TOOL-RESULT CONTINUATION]
+- This step exists because a prior explicit step already executed one tool call and handed you the result.
+- Your first job is to interpret the inherited tool result, not to repeat the same tool reflexively.
+- You must choose exactly one of these outcomes:
+  1. `finalize_research` immediately if the inherited result is already sufficient.
+  2. Make exactly one new structured tool call if one additional bounded lookup is genuinely required.
+- Do NOT emit multiple tool calls in this step.
+- Do NOT perform a broad repo scan after inheriting a focused tool result unless you can justify why the inherited result was insufficient.
+"""
 
     return f"""You are an Expert Research Agent building a persistent knowledge library.
 Your primary goal is to decompose the user's research task and iteratively gather data.
@@ -356,7 +369,7 @@ Your current tools: list_directory, read_file, search_web, write_library_file, l
 [LOCAL CONTEXT]
 - Repository paths are relative to the repo root.
 - Canonical spec paths for this task:
-{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{codebase_nudge}
+{spec_lines}{repo_hint_block}{focused_hint_block}{handoff_block}{codebase_nudge}{continuation_nudge}
 
 When you have collected enough comprehensive information across all sources and saved your atomic notes, call 'finalize_research' with a high-level synthesized report to end the research phase.
 Focus area: {target_scope.upper()} scope."""

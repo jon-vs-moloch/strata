@@ -65,6 +65,10 @@ class ProviderTelemetryState:
     last_request_at: Optional[str] = None
     last_success_at: Optional[str] = None
     last_rate_limit_headers: Optional[Dict[str, str]] = None
+    learned_cloud_min_interval_ms: float = 0.0
+    cloud_probe_min_interval_ms: float = 0.0
+    cloud_next_probe_at: float = 0.0
+    cloud_last_rate_limit_at: Optional[str] = None
 
 class BaseModelProvider(ABC):
     """
@@ -215,6 +219,9 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         policy = self.get_runtime_policy()
         if str(policy.get("throttle_mode") or "hard").strip().lower() != "greedy":
             return 1.0
+        now = time.monotonic()
+        if telemetry.cloud_next_probe_at and now < telemetry.cloud_next_probe_at:
+            return 1.0
         request_count = max(1, telemetry.request_count)
         if telemetry.rate_limit_hits > 0 or telemetry.error_count / request_count >= 0.1:
             return 1.0
@@ -247,8 +254,45 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                 min_interval = max(min_interval, self._adaptive_min_interval_ms(telemetry))
                 min_interval = min_interval * self._comfort_multiplier() * self._local_greedy_probe_multiplier(telemetry)
             else:
+                min_interval = max(min_interval, float(telemetry.learned_cloud_min_interval_ms or 0.0))
                 min_interval = min_interval * self._cloud_greedy_probe_multiplier(telemetry)
         return min_interval
+
+    def _estimate_cloud_retry_after_s(self, telemetry: ProviderTelemetryState, retry_after_s: float) -> float:
+        if retry_after_s > 0:
+            return retry_after_s
+        learned_ms = float(telemetry.learned_cloud_min_interval_ms or 0.0)
+        probe_ms = float(telemetry.cloud_probe_min_interval_ms or 0.0)
+        baseline_ms = max(float(self.min_interval_ms or 0.0), learned_ms, probe_ms, 1000.0)
+        return max(2.0, min(120.0, (baseline_ms / 1000.0) * 2.0))
+
+    def _record_cloud_rate_limit(self, telemetry: ProviderTelemetryState, retry_after_s: float) -> float:
+        effective_retry_after_s = self._estimate_cloud_retry_after_s(telemetry, retry_after_s)
+        learned_ms = max(
+            float(telemetry.learned_cloud_min_interval_ms or 0.0),
+            effective_retry_after_s * 1000.0,
+            float(self.min_interval_ms or 0.0),
+        )
+        telemetry.learned_cloud_min_interval_ms = min(300000.0, learned_ms)
+        telemetry.cloud_probe_min_interval_ms = telemetry.learned_cloud_min_interval_ms
+        now = time.monotonic()
+        telemetry.cloud_next_probe_at = now + max(60.0, effective_retry_after_s * 4.0)
+        telemetry.cloud_last_rate_limit_at = datetime.utcnow().isoformat()
+        return effective_retry_after_s
+
+    def _record_cloud_success(self, telemetry: ProviderTelemetryState) -> None:
+        if self._is_local_transport():
+            return
+        now = time.monotonic()
+        if telemetry.cloud_next_probe_at and now < telemetry.cloud_next_probe_at:
+            return
+        current_probe = float(telemetry.cloud_probe_min_interval_ms or telemetry.learned_cloud_min_interval_ms or 0.0)
+        if current_probe <= 0:
+            return
+        reduced_probe = max(float(self.min_interval_ms or 0.0), current_probe * 0.9)
+        telemetry.cloud_probe_min_interval_ms = reduced_probe
+        telemetry.learned_cloud_min_interval_ms = reduced_probe
+        telemetry.cloud_next_probe_at = now + 120.0
 
     async def _wait_for_turn(self, state: ThrottleState, telemetry: ProviderTelemetryState):
         delay_s = 0.0
@@ -337,6 +381,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         telemetry.last_success_at = datetime.utcnow().isoformat()
                         telemetry.last_error = None
                         telemetry.total_latency_s += asyncio.get_running_loop().time() - started_at
+                        self._record_cloud_success(telemetry)
                         result = response.json()
 
                         message_obj = result.get("choices", [{}])[0].get("message", {})
@@ -370,12 +415,15 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                             key: value for key, value in e.response.headers.items()
                             if key.lower().startswith("x-ratelimit") or key.lower() == "retry-after"
                         }
-                        await self._apply_retry_after(state, retry_after_s or backoff_time)
+                        effective_retry_after_s = self._record_cloud_rate_limit(telemetry, retry_after_s)
+                        await self._apply_retry_after(state, effective_retry_after_s)
+                    else:
+                        effective_retry_after_s = retry_after_s
 
                     if retry < max_retries - 1 and status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
                         self._mark_telemetry_dirty()
                         telemetry.retried_count += 1
-                        await asyncio.sleep(float(max(retry_after_s, backoff_time)))
+                        await asyncio.sleep(float(max(effective_retry_after_s, backoff_time)))
                         backoff_time *= 2.0
                         continue
                     self._mark_telemetry_dirty()
@@ -483,6 +531,9 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
             "avg_latency_ms": round(avg_latency_ms, 2),
             "adaptive_min_interval_ms": round(adaptive_min_interval_ms, 2),
             "effective_min_interval_ms": round(effective_min_interval_ms, 2),
+            "learned_cloud_min_interval_ms": round(float(state.learned_cloud_min_interval_ms or 0.0), 2),
+            "cloud_probe_min_interval_ms": round(float(state.cloud_probe_min_interval_ms or 0.0), 2),
+            "cloud_next_probe_in_s": round(max(0.0, float(state.cloud_next_probe_at or 0.0) - time.monotonic()), 2),
             "throttle_mode": runtime_policy.get("throttle_mode"),
             "operator_comfort": runtime_policy.get("operator_comfort") or {},
             "host_telemetry": host_snapshot if is_local else {},
@@ -490,6 +541,7 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
             "last_error": state.last_error,
             "last_request_at": state.last_request_at,
             "last_success_at": state.last_success_at,
+            "last_rate_limit_at": state.cloud_last_rate_limit_at,
             "last_rate_limit_headers": state.last_rate_limit_headers or {},
         }
     return snapshot

@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from strata.core.lanes import normalize_lane
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.experimental.trace_review import list_attempt_observability_artifacts
+from strata.models.providers import GenericOpenAICompatibleProvider
 from strata.observability.context import get_context_load_telemetry, scan_codebase_context_pressure
 from strata.observability.host import get_host_telemetry_snapshot
 from strata.procedures.registry import get_procedure, list_procedures, queue_procedure, save_procedure
@@ -91,6 +92,9 @@ def register_runtime_admin_routes(
     async def update_settings(payload: Dict[str, Any], storage=Depends(get_storage)):
         merged_settings = normalized_settings(payload)
         global_settings.update(merged_settings)
+        GenericOpenAICompatibleProvider.set_runtime_policy(
+            merged_settings.get("inference_throttle_policy") or {}
+        )
         storage.parameters.set_parameter(
             key=settings_parameter_key,
             value=merged_settings,
