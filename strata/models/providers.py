@@ -205,10 +205,26 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         thermal = dict(host.get("thermal") or {})
         memory = dict(host.get("memory") or {})
         cpu = dict(host.get("cpu") or {})
+        fan = dict(host.get("fan") or {})
+        temperature = dict(host.get("temperature") or {})
         if str(thermal.get("warning_level") or "nominal").strip().lower() not in {"nominal", "unknown"}:
             multiplier *= 1.35
         if bool(thermal.get("performance_limited")) or bool(thermal.get("cpu_power_limited")):
             multiplier *= 1.25
+        fan_rpm = float(fan.get("rpm") or 0.0) if bool(fan.get("available")) else 0.0
+        if fan_rpm >= 4200.0:
+            multiplier *= 1.45
+        elif fan_rpm >= 3500.0:
+            multiplier *= 1.3
+        elif fan_rpm >= 2500.0:
+            multiplier *= 1.15
+        temperature_celsius = float(temperature.get("celsius") or 0.0) if bool(temperature.get("available")) else 0.0
+        if temperature_celsius >= 85.0:
+            multiplier *= 1.3
+        elif temperature_celsius >= 75.0:
+            multiplier *= 1.18
+        elif temperature_celsius >= 68.0:
+            multiplier *= 1.08
         if str(memory.get("pressure") or "nominal").strip().lower() == "high":
             multiplier *= 1.4
         elif str(memory.get("pressure") or "nominal").strip().lower() == "moderate":
@@ -250,6 +266,10 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
     def _local_greedy_probe_multiplier(self, telemetry: ProviderTelemetryState) -> float:
         policy = self.get_runtime_policy()
         if str(policy.get("throttle_mode") or "hard").strip().lower() != "greedy":
+            return 1.0
+        comfort = dict(policy.get("operator_comfort") or {})
+        profile = str(comfort.get("profile") or "quiet").strip().lower()
+        if profile == "quiet":
             return 1.0
         request_count = max(1, telemetry.request_count)
         if telemetry.error_count / request_count >= 0.1:
@@ -512,6 +532,22 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
         comfort_multiplier *= 0.75
     if bool(comfort_context.get("ambient_noise_masking", False)):
         comfort_multiplier *= 0.85
+    fan = dict(host_snapshot.get("fan") or {})
+    temperature = dict(host_snapshot.get("temperature") or {})
+    fan_rpm = float(fan.get("rpm") or 0.0) if bool(fan.get("available")) else 0.0
+    if fan_rpm >= 4200.0:
+        comfort_multiplier *= 1.45
+    elif fan_rpm >= 3500.0:
+        comfort_multiplier *= 1.3
+    elif fan_rpm >= 2500.0:
+        comfort_multiplier *= 1.15
+    temperature_celsius = float(temperature.get("celsius") or 0.0) if bool(temperature.get("available")) else 0.0
+    if temperature_celsius >= 85.0:
+        comfort_multiplier *= 1.3
+    elif temperature_celsius >= 75.0:
+        comfort_multiplier *= 1.18
+    elif temperature_celsius >= 68.0:
+        comfort_multiplier *= 1.08
     comfort_multiplier = max(0.5, min(comfort_multiplier, 2.5))
     for key, state in GenericOpenAICompatibleProvider._telemetry_states.items():
         avg_wait_ms = (state.total_wait_s / state.throttled_count * 1000.0) if state.throttled_count else 0.0
@@ -530,7 +566,7 @@ def get_provider_telemetry_snapshot() -> Dict[str, Dict[str, object]]:
         if is_local:
             effective_min_interval_ms = effective_min_interval_ms * comfort_multiplier
             if throttle_mode == "greedy":
-                if state.error_count / request_count < 0.1:
+                if comfort_profile != "quiet" and state.error_count / request_count < 0.1:
                     effective_min_interval_ms *= 0.95 if request_count < 10 else 0.9
         else:
             if throttle_mode == "greedy" and state.rate_limit_hits == 0 and state.error_count / request_count < 0.1:

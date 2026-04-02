@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import shutil
 import subprocess
 import time
 from typing import Any, Dict
@@ -147,6 +148,68 @@ def _parse_sensor_helper_snapshot() -> Dict[str, Any]:
     return _normalize_sensor_helper_snapshot(payload)
 
 
+def _parse_ismc_snapshot() -> Dict[str, Any]:
+    if not shutil.which("ismc"):
+        return {}
+    fans_raw = _run_shell("ismc fans --output json 2>/dev/null", timeout=2.5)
+    temp_raw = _run_shell("ismc temp --output json 2>/dev/null", timeout=2.5)
+    try:
+        fans_payload = json.loads(fans_raw) if fans_raw else {}
+    except Exception:
+        fans_payload = {}
+    try:
+        temp_payload = json.loads(temp_raw) if temp_raw else {}
+    except Exception:
+        temp_payload = {}
+    fan_rpm = None
+    if isinstance(fans_payload, dict):
+        candidates = []
+        for name, item in fans_payload.items():
+            if not isinstance(item, dict):
+                continue
+            label = str(name or item.get("key") or "").strip().lower()
+            if "current speed" not in label:
+                continue
+            candidate = _coerce_float(item.get("quantity"))
+            if candidate is not None:
+                candidates.append(candidate)
+        if candidates:
+            fan_rpm = max(candidates)
+    temperature_celsius = None
+    if isinstance(temp_payload, dict):
+        named_candidates = []
+        fallback_candidates = []
+        for name, item in temp_payload.items():
+            if not isinstance(item, dict):
+                continue
+            candidate = _coerce_float(item.get("quantity"))
+            if candidate is None:
+                continue
+            label = str(name or item.get("key") or "").strip().lower()
+            if any(token in label for token in ("cpu", "soc", "die", "package", "performance")):
+                named_candidates.append(candidate)
+            else:
+                fallback_candidates.append(candidate)
+        if named_candidates:
+            temperature_celsius = max(named_candidates)
+        elif fallback_candidates:
+            temperature_celsius = max(fallback_candidates)
+    if fan_rpm is None and temperature_celsius is None:
+        return {}
+    return {
+        "fan": {
+            "rpm": round(fan_rpm, 2) if fan_rpm is not None else None,
+            "available": fan_rpm is not None,
+            "source": "ismc",
+        },
+        "temperature": {
+            "celsius": round(temperature_celsius, 2) if temperature_celsius is not None else None,
+            "available": temperature_celsius is not None,
+            "source": "ismc",
+        },
+    }
+
+
 def get_host_telemetry_snapshot(*, max_age_s: float = 5.0) -> Dict[str, Any]:
     now = time.monotonic()
     cached_at = float(_HOST_CACHE.get("captured_at") or 0.0)
@@ -157,6 +220,8 @@ def get_host_telemetry_snapshot(*, max_age_s: float = 5.0) -> Dict[str, Any]:
     thermal = _parse_thermal_status()
     cpu = _parse_cpu_usage()
     helper_snapshot = _parse_sensor_helper_snapshot()
+    if not helper_snapshot:
+        helper_snapshot = _parse_ismc_snapshot()
     snapshot = {
         "captured_at": time.time(),
         "cpu": cpu,
