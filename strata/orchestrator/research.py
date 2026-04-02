@@ -992,7 +992,6 @@ class ResearchModule:
                 ),
             )
                 
-        from datetime import datetime
         kb_dir = os.path.join(root, ".knowledge")
         os.makedirs(kb_dir, exist_ok=True)
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

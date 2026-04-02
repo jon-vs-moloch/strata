@@ -2200,28 +2200,6 @@ function App() {
     setSendError('');
   };
 
-  const loadPreviousHomeSession = useCallback(() => {
-    const previousSession = visibleSessionList.find((session) => persistedSessionHasContent(session));
-    if (!previousSession) {
-      setCurrentScope('home');
-      setActiveNav('chat');
-      startNewChat();
-      return;
-    }
-    const nextSessionId = previousSession.session_id;
-    setCurrentScope('home');
-    setChatLane(laneForSessionId(nextSessionId));
-    setScopeSessionIds((prev) => ({ ...prev, home: nextSessionId }));
-    setActiveNav('chat');
-    setSendError('');
-  }, [startNewChat, visibleSessionList]);
-
-  const startNewHomeSession = useCallback(() => {
-    setCurrentScope('home');
-    setActiveNav('chat');
-    startNewChat();
-  }, [startNewChat]);
-
   const deleteSession = async (idToDelete) => {
     if (isDraftSessionId(idToDelete)) {
       const draftLane = laneForSessionId(idToDelete);
@@ -2593,6 +2571,29 @@ function App() {
     });
     return [...drafts, ...persisted];
   }, [currentScope, effectiveLane, laneDrafts, sessionList]);
+
+  const loadPreviousHomeSession = useCallback(() => {
+    const previousSession = visibleSessionList.find((session) => persistedSessionHasContent(session));
+    if (!previousSession) {
+      setCurrentScope('home');
+      setActiveNav('chat');
+      startNewChat();
+      return;
+    }
+    const nextSessionId = previousSession.session_id;
+    setCurrentScope('home');
+    setChatLane(laneForSessionId(nextSessionId));
+    setScopeSessionIds((prev) => ({ ...prev, home: nextSessionId }));
+    setActiveNav('chat');
+    setSendError('');
+  }, [startNewChat, visibleSessionList]);
+
+  const startNewHomeSession = useCallback(() => {
+    setCurrentScope('home');
+    setActiveNav('chat');
+    startNewChat();
+  }, [startNewChat]);
+
   const buildLaneMeta = (lane) => {
     const laneDetail = laneDetails?.[lane] || defaultLaneDetail;
     const route = routingSummary?.[lane] || null;

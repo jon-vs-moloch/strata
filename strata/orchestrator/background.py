@@ -1304,129 +1304,131 @@ class BackgroundWorker:
                 _record_attempt_efficiency_metrics("succeeded")
                 storage.commit()
 
-            # Coordination nodes that expanded into active children should hand control off
-            # immediately instead of spending a full verifier/review cycle on the parent.
-            if success and task.state == TaskState.PUSHED and self._task_has_live_children(task, storage):
-                self._mark_lane_progress(
-                    lane or context.mode,
-                    step="complete",
-                    label="Handed off to children",
-                    detail=f"{len(list(getattr(task, 'active_child_ids', []) or []))} child task(s) in progress",
-                    attempt_id=getattr(attempt, "attempt_id", None),
-                    progress_label="children in progress",
-                )
-                return
-
-            # --- LIGHTWEIGHT VERIFICATION ---
-            try:
-                attempt_id = getattr(attempt, "attempt_id", None)
-                task_id_str = getattr(task, "task_id", None)
-                self._mark_lane_progress(
-                    lane or context.mode,
-                    step="verification",
-                    label="Verifying output",
-                    detail="Checking correctness and quality",
-                    attempt_id=attempt_id,
-                )
-                verification = await verify_task_output(
-                    storage,
-                    task=task,
-                    attempt=attempt,
-                    model_adapter=lane_model,
-                    context=context,
-                    progress_fn=lambda **payload: self._mark_lane_progress(
+            if success:
+                # Coordination nodes that expanded into active children should hand control off
+                # immediately instead of spending a full verifier/review cycle on the parent.
+                if task.state == TaskState.PUSHED and self._task_has_live_children(task, storage):
+                    self._mark_lane_progress(
                         lane or context.mode,
-                        step=str(payload.get("step") or "verification"),
-                        label=str(payload.get("label") or "Verifying output"),
-                        detail=str(payload.get("detail") or ""),
+                        step="complete",
+                        label="Handed off to children",
+                        detail=f"{len(list(getattr(task, 'active_child_ids', []) or []))} child task(s) in progress",
+                        attempt_id=getattr(attempt, "attempt_id", None),
+                        progress_label="children in progress",
+                    )
+                    return
+
+                # Only successful attempts should enter output verification and branch-health review.
+                # Failed attempts already ran through failure-time review/resolution above.
+                try:
+                    attempt_id = getattr(attempt, "attempt_id", None)
+                    task_id_str = getattr(task, "task_id", None)
+                    self._mark_lane_progress(
+                        lane or context.mode,
+                        step="verification",
+                        label="Verifying output",
+                        detail="Checking correctness and quality",
                         attempt_id=attempt_id,
-                        progress_label=str(payload.get("progress_label") or ""),
-                    ),
-                )
-                if verification:
-                    verifier_signal = emit_verifier_attention_signal(
+                    )
+                    verification = await verify_task_output(
                         storage,
                         task=task,
-                        verification=verification,
+                        attempt=attempt,
+                        model_adapter=lane_model,
+                        context=context,
+                        progress_fn=lambda **payload: self._mark_lane_progress(
+                            lane or context.mode,
+                            step=str(payload.get("step") or "verification"),
+                            label=str(payload.get("label") or "Verifying output"),
+                            detail=str(payload.get("detail") or ""),
+                            attempt_id=attempt_id,
+                            progress_label=str(payload.get("progress_label") or ""),
+                        ),
                     )
-                    if verifier_signal:
+                    if verification:
+                        verifier_signal = emit_verifier_attention_signal(
+                            storage,
+                            task=task,
+                            verification=verification,
+                        )
+                        if verifier_signal:
+                            queued_review = await queue_task_attention_review(
+                                storage,
+                                task=task,
+                                signal=verifier_signal,
+                            )
+                            logger.info(
+                                "Verifier flagged task %s as %s%s",
+                                task.task_id,
+                                verification.get("verdict"),
+                                f" and queued review {queued_review.get('task_id')}" if queued_review else "",
+                            )
+                        storage.commit()
+                except Exception as verifier_err:
+                    try:
+                        storage.rollback()
+                    except Exception:
+                        pass
+                    logger.error(
+                        "Failed to verify attempt %s for task %s: %s",
+                        attempt_id,
+                        task_id_str,
+                        verifier_err,
+                    )
+
+                # --- REVIEW ---
+                try:
+                    attempt_id_str = getattr(attempt, "attempt_id", None)
+                    self._mark_lane_progress(
+                        lane or context.mode,
+                        step="review",
+                        label="Reviewing branch health",
+                        detail="Updating plan review and attention signals",
+                        attempt_id=attempt_id_str,
+                    )
+                    existing_review = dict(getattr(attempt, "plan_review", {}) or {})
+                    review = existing_review
+                    if not review or not str(review.get("recommendation") or "").strip():
+                        review = await generate_plan_review(task, attempt, lane_model, storage)
+                        storage.attempts.set_plan_review(attempt.attempt_id, review)
+                        should_flush = enqueue_attempt_observability_artifact(
+                            {
+                                "task_id": task.task_id,
+                                "attempt_id": attempt.attempt_id,
+                                "session_id": task.session_id,
+                                "artifact_kind": "plan_review",
+                                "payload": dict(review or {}),
+                            }
+                        )
+                        if should_flush:
+                            flush_observability_writes()
+                    attention_signal = emit_task_execution_attention_signal(
+                        storage,
+                        task=task,
+                        attempt=attempt,
+                        context=context,
+                        plan_review=review,
+                        error=error,
+                    )
+                    if attention_signal:
                         queued_review = await queue_task_attention_review(
                             storage,
                             task=task,
-                            signal=verifier_signal,
+                            signal=attention_signal,
                         )
                         logger.info(
-                            "Verifier flagged task %s as %s%s",
+                            "Emitted task execution attention signal %s for task %s%s",
+                            attention_signal.get("signal_kind"),
                             task.task_id,
-                            verification.get("verdict"),
                             f" and queued review {queued_review.get('task_id')}" if queued_review else "",
                         )
                     storage.commit()
-            except Exception as verifier_err:
-                try:
-                    storage.rollback()
-                except Exception:
-                    pass
-                logger.error(
-                    "Failed to verify attempt %s for task %s: %s",
-                    attempt_id,
-                    task_id_str,
-                    verifier_err,
-                )
-            
-            # --- REVIEW ---
-            try:
-                attempt_id_str = getattr(attempt, "attempt_id", None)
-                self._mark_lane_progress(
-                    lane or context.mode,
-                    step="review",
-                    label="Reviewing branch health",
-                    detail="Updating plan review and attention signals",
-                    attempt_id=attempt_id_str,
-                )
-                existing_review = dict(getattr(attempt, "plan_review", {}) or {})
-                review = existing_review
-                if not review or not str(review.get("recommendation") or "").strip():
-                    review = await generate_plan_review(task, attempt, lane_model, storage)
-                    storage.attempts.set_plan_review(attempt.attempt_id, review)
-                    should_flush = enqueue_attempt_observability_artifact(
-                        {
-                            "task_id": task.task_id,
-                            "attempt_id": attempt.attempt_id,
-                            "session_id": task.session_id,
-                            "artifact_kind": "plan_review",
-                            "payload": dict(review or {}),
-                        }
-                    )
-                    if should_flush:
-                        flush_observability_writes()
-                attention_signal = emit_task_execution_attention_signal(
-                    storage,
-                    task=task,
-                    attempt=attempt,
-                    context=context,
-                    plan_review=review,
-                    error=error,
-                )
-                if attention_signal:
-                    queued_review = await queue_task_attention_review(
-                        storage,
-                        task=task,
-                        signal=attention_signal,
-                    )
-                    logger.info(
-                        "Emitted task execution attention signal %s for task %s%s",
-                        attention_signal.get("signal_kind"),
-                        task.task_id,
-                        f" and queued review {queued_review.get('task_id')}" if queued_review else "",
-                    )
-                storage.commit()
-            except Exception as review_err:
-                try:
-                    storage.rollback()
-                except Exception:
-                    pass
-                logger.error("Failed to generate plan review for attempt %s: %s", attempt_id_str, review_err)
+                except Exception as review_err:
+                    try:
+                        storage.rollback()
+                    except Exception:
+                        pass
+                    logger.error("Failed to generate plan review for attempt %s: %s", attempt_id_str, review_err)
 
             self._mark_lane_progress(
                 lane or context.mode,
