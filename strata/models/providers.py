@@ -45,7 +45,6 @@ class ModelResponse(BaseModel):
     usage: Optional[Dict[str, Any]] = Field(default=None)
     message: Optional[str] = Field(default=None)
     error: Optional[Dict[str, Any]] = Field(default=None)
-    error: Optional[Dict[str, Any]] = Field(default=None)
 
 @dataclass
 class ThrottleState:
@@ -431,6 +430,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
 
     def _request_summary(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         messages = list(payload.get("messages") or [])
+        response_format = payload.get("response_format")
+        reasoning = payload.get("reasoning")
         return {
             "model": str(payload.get("model") or self.model_id),
             "message_count": len(messages),
@@ -440,9 +441,13 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                 for item in list(payload.get("tools") or [])
             ],
             "has_response_format": "response_format" in payload,
+            "response_format_name": str((response_format or {}).get("name") or "") if isinstance(response_format, dict) else str(type(response_format).__name__) if response_format is not None else "",
             "temperature": payload.get("temperature"),
             "top_p": payload.get("top_p"),
             "max_tokens": payload.get("max_tokens"),
+            "reasoning_effort": payload.get("reasoning_effort"),
+            "has_reasoning_config": "reasoning" in payload,
+            "reasoning_keys": sorted(list(reasoning.keys())) if isinstance(reasoning, dict) else [],
         }
 
     async def complete(self, messages: List[Dict[str, str]], **kwargs) -> ModelResponse:
@@ -513,6 +518,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                             model=self.model_id,
                             provider=self.provider_id,
                             usage=self._normalize_usage(result.get("usage") or {}),
+                            message="",
                         )
                 except httpx.HTTPStatusError as e:
                     status_code = e.response.status_code
@@ -560,6 +566,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         model=self.model_id,
                         provider=self.provider_id,
                         usage={},
+                        message=f"HTTP {status_code}: {clipped_body or str(e)}",
                         error={
                             "kind": "http_status_error",
                             "http_status": status_code,
@@ -586,6 +593,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         model=self.model_id,
                         provider=self.provider_id,
                         usage={},
+                        message=str(e),
                         error={
                             "kind": e.__class__.__name__,
                             "request_summary": self._request_summary(payload),
@@ -601,6 +609,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             model=self.model_id, 
             provider=self.provider_id,
             usage={},
+            message="Max retries reached",
             error={
                 "kind": "max_retries_reached",
                 "request_summary": self._request_summary(payload),

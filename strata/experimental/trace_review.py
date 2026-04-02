@@ -98,8 +98,9 @@ def _attempt_observability_payload(artifact: AttemptObservabilityArtifactModel) 
     elif artifact.artifact_kind == "model_turn_snapshot":
         prompt_ref = str(payload.get("prompt_template_ref") or "").strip()
         model = str(payload.get("model") or "").strip()
+        message = _clip(payload.get("message"), 180)
         preview = _clip(payload.get("content_preview"), 180)
-        summary = " | ".join(part for part in [prompt_ref, model, preview] if part)
+        summary = " | ".join(part for part in [prompt_ref, model, message or preview] if part)
     return {
         "artifact_id": artifact.id,
         "task_id": artifact.task_id,

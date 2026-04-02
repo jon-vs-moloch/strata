@@ -162,6 +162,12 @@ def _apply_experiment_promotion(storage: StorageManager, candidate_change_id: st
     return apply_experiment_promotion(storage, candidate_change_id, force=force, model_adapter=_model)
 
 
+def _experiment_model_adapter_factory() -> ModelAdapter:
+    adapter = ModelAdapter()
+    adapter._selected_models = dict(getattr(_model, "_selected_models", {}) or {})
+    return adapter
+
+
 async def _generate_eval_candidate_from_tier(
     proposer_tier: str,
     current_config: Dict[str, Any],
@@ -170,7 +176,7 @@ async def _generate_eval_candidate_from_tier(
     return await generate_eval_candidate_from_tier(
         proposer_tier,
         current_config,
-        model_adapter_factory=ModelAdapter,
+        model_adapter_factory=_experiment_model_adapter_factory,
         **kwargs,
     )
 
@@ -189,7 +195,7 @@ async def _resolve_eval_proposal_against_history(
         recent_candidates=recent_candidates,
         seen_candidates=seen_candidates,
         proposal_config=proposal_config,
-        model_adapter_factory=ModelAdapter,
+        model_adapter_factory=_experiment_model_adapter_factory,
     )
 
 
@@ -203,7 +209,7 @@ async def _generate_tool_candidate_from_tier(
         proposer_tier,
         tool_name=tool_name,
         task_description=task_description,
-        model_adapter_factory=ModelAdapter,
+        model_adapter_factory=_experiment_model_adapter_factory,
     )
 
 # ── App lifecycle ──────────────────────────────────────────────────────────────
@@ -477,19 +483,19 @@ globals().update(register_eval_admin_routes(
     generate_eval_candidate_from_tier=lambda proposer_tier, current_config, **kwargs: generate_eval_candidate_from_tier(
         proposer_tier,
         current_config,
-        model_adapter_factory=ModelAdapter,
+        model_adapter_factory=_experiment_model_adapter_factory,
         **kwargs,
     ),
     resolve_eval_proposal_against_history=lambda proposal, **kwargs: resolve_eval_proposal_against_history(
         proposal,
-        model_adapter_factory=ModelAdapter,
+        model_adapter_factory=_experiment_model_adapter_factory,
         **kwargs,
     ),
     generate_tool_candidate_from_tier=lambda proposer_tier, tool_name, task_description: generate_tool_candidate_from_tier(
         proposer_tier,
         tool_name=tool_name,
         task_description=task_description,
-        model_adapter_factory=ModelAdapter,
+        model_adapter_factory=_experiment_model_adapter_factory,
     ),
     eval_override_signature=eval_override_signature,
     get_provider_telemetry_snapshot=get_provider_telemetry_snapshot,

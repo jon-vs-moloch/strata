@@ -991,11 +991,13 @@ class ResearchModule:
                         "prompt_lineage_id": prompt_snapshot.get("prompt_lineage_id"),
                         "prompt_template_ref": prompt_snapshot.get("prompt_template_ref"),
                         "response_status": str(response.get("status") or "").strip(),
+                        "message": str(response.get("message") or ""),
                         "model": str(response.get("model") or ""),
                         "provider": str(response.get("provider") or ""),
                         "usage": dict(response.get("usage") or {}),
                         "content_preview": _clip_lines(response.get("content") or "", 1600),
                         "tool_calls": list(response.get("tool_calls") or []),
+                        "error": dict(response.get("error") or {}),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     },
                 }

@@ -330,17 +330,45 @@ class ImplementationModule:
                             "prompt_template_ref": prompt_snapshot.get("prompt_template_ref"),
                             "variant_id": str(variant.get("variant_id") or "generic"),
                             "response_status": str(response.get("status") or "").strip(),
+                            "message": str(response.get("message") or ""),
                             "model": str(response.get("model") or ""),
                             "provider": str(response.get("provider") or ""),
                             "usage": dict(response.get("usage") or {}),
                             "content_preview": str(response.get("content") or "")[:1600],
                             "tool_calls": list(response.get("tool_calls") or []),
+                            "error": dict(response.get("error") or {}),
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         },
                     }
                 )
                 if should_flush:
                     flush_observability_writes()
+            if str(response.get("status") or "").strip().lower() != "success":
+                err_msg = str(response.get("message") or response.get("content") or "Unknown model adapter error.").strip()
+                error_payload = dict(response.get("error") or {})
+                raise TaskBoundaryViolationError(
+                    public_message=(
+                        "Implementation attempt could not complete because the model adapter rejected or failed the request. "
+                        f"Adapter reported: {err_msg}"
+                    ),
+                    autopsy={
+                        "failure_kind": "model_adapter_error",
+                        "task_id": task.task_id,
+                        "task_title": str(task.title or ""),
+                        "task_description": str(task.description or ""),
+                        "variant_id": str(variant.get("variant_id") or ""),
+                        "adapter_message": err_msg,
+                        "adapter_error": error_payload,
+                        "model_response": {
+                            "status": str(response.get("status") or ""),
+                            "model": str(response.get("model") or ""),
+                            "provider": str(response.get("provider") or ""),
+                            "usage": dict(response.get("usage") or {}),
+                            "content": str(response.get("content") or "")[:1600],
+                            "tool_call_count": len(response.get("tool_calls") or []),
+                        },
+                    },
+                )
             content = response.get("content", "")
             tool_calls = response.get("tool_calls") or []
 

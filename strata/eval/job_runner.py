@@ -223,12 +223,17 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
             )
             result = experiment_result.model_dump()
         elif kind == "bootstrap_cycle":
-            from strata.api.main import (
-                _apply_experiment_promotion,
-                _generate_eval_candidate_from_tier,
-                _resolve_eval_proposal_against_history,
+            from strata.api.experiment_runtime import (
+                generate_eval_candidate_from_tier as _generate_eval_candidate_from_tier,
+                resolve_eval_proposal_against_history as _resolve_eval_proposal_against_history,
             )
+            from strata.api.main import _apply_experiment_promotion
             from strata.storage.models import ParameterModel
+
+            def _proposal_model_adapter_factory():
+                adapter = type(model_adapter)()
+                adapter._selected_models = dict(getattr(model_adapter, "_selected_models", {}) or {})
+                return adapter
 
             proposal_config = get_active_eval_proposal_config()
             bootstrap_policy = dict(proposal_config.get("bootstrap") or {})
@@ -274,6 +279,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                     _generate_eval_candidate_from_tier(
                         tier,
                         current_config,
+                        model_adapter_factory=_proposal_model_adapter_factory,
                         recent_candidates=recent_candidate_hints,
                         recent_signatures=recent_signatures,
                         current_signature=current_signature,
@@ -303,6 +309,7 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
                     continue
                 resolution = await _resolve_eval_proposal_against_history(
                     proposal,
+                    model_adapter_factory=_proposal_model_adapter_factory,
                     current_config=current_config,
                     recent_candidates=recent_candidate_hints,
                     seen_candidates=seen_candidates,
@@ -416,11 +423,18 @@ async def run_eval_job_task(task, storage, model_adapter, progress_fn=None) -> D
             if not tool_name:
                 raise ValueError("tool_cycle requires tool_name")
             proposer_tier = str(payload.get("proposer_tier") or "agent")
-            from strata.api.main import _generate_tool_candidate_from_tier
+            from strata.api.experiment_runtime import generate_tool_candidate_from_tier as _generate_tool_candidate_from_tier
+
+            def _tool_model_adapter_factory():
+                adapter = type(model_adapter)()
+                adapter._selected_models = dict(getattr(model_adapter, "_selected_models", {}) or {})
+                return adapter
+
             proposal = await _generate_tool_candidate_from_tier(
                 proposer_tier,
                 tool_name=tool_name,
                 task_description=str(payload.get("task_description") or "Create a safe dynamic tool."),
+                model_adapter_factory=_tool_model_adapter_factory,
             )
             os.makedirs("strata/tools", exist_ok=True)
             os.makedirs("strata/tools/manifests", exist_ok=True)

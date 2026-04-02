@@ -211,9 +211,24 @@ def register_runtime_admin_routes(
     async def get_routing_summary(storage=Depends(get_storage)):
         from strata.storage.models import TaskModel, TaskState, TaskType
 
+        def _selected_model_for_mode(mode: str) -> str | None:
+            worker_lane_model = None
+            try:
+                worker_lane_model = worker._lane_model(mode) if hasattr(worker, "_lane_model") else None
+            except Exception:
+                worker_lane_model = None
+            if worker_lane_model is not None:
+                selected = getattr(worker_lane_model, "_selected_models", {}) or {}
+                resolved = str(selected.get(mode) or "").strip()
+                if resolved:
+                    return resolved
+            selected = getattr(model_adapter, "_selected_models", {}) or {}
+            resolved = str(selected.get(mode) or "").strip()
+            return resolved or None
+
         def resolve_route(label: str, context):
             try:
-                preferred_model = model_adapter._selected_models.get(context.mode)
+                preferred_model = _selected_model_for_mode(context.mode)
                 endpoint = model_adapter.registry.resolve_endpoint_for_context(
                     context,
                     preferred_model=preferred_model,
@@ -671,7 +686,7 @@ def register_runtime_admin_routes(
         ]
 
         response = await model_adapter.chat(messages)
-        if response.get("status") != "ok":
+        if str(response.get("status") or "").strip().lower() != "success":
             return {
                 "status": "error",
                 "procedure_id": procedure_id,
