@@ -3465,7 +3465,7 @@ function App() {
               {sendError}
             </div>
           )}
-          <div style={{ position: 'relative', background: '#141418', borderRadius: '12px', padding: '8px 8px 8px 16px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s', minHeight: '52px' }}>
+          <div style={{ position: 'relative', background: '#141418', borderRadius: '12px', padding: '8px 10px', display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid rgba(255,255,255,0.08)', transition: 'border-color 0.2s', minHeight: '52px' }}>
             <AnimatePresence>
             {(replyTarget || pendingAttachments.length > 0) && (
               <MotionDiv

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import time
@@ -82,6 +83,70 @@ def _parse_cpu_usage() -> Dict[str, Any]:
     }
 
 
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _normalize_sensor_helper_snapshot(raw: Dict[str, Any]) -> Dict[str, Any]:
+    fan_payload = dict(raw.get("fan") or {})
+    temperature_payload = dict(raw.get("temperature") or {})
+    fan_rpm = _coerce_float(
+        fan_payload.get("rpm")
+        if fan_payload
+        else raw.get("fan_rpm")
+    )
+    temperature_celsius = _coerce_float(
+        temperature_payload.get("celsius")
+        if temperature_payload
+        else raw.get("temperature_celsius", raw.get("cpu_temperature_celsius"))
+    )
+    return {
+        "fan": {
+            "rpm": round(fan_rpm, 2) if fan_rpm is not None else None,
+            "available": fan_rpm is not None,
+            "source": str(fan_payload.get("source") or raw.get("sensor_source") or "helper").strip() or "helper",
+        },
+        "temperature": {
+            "celsius": round(temperature_celsius, 2) if temperature_celsius is not None else None,
+            "available": temperature_celsius is not None,
+            "source": str(temperature_payload.get("source") or raw.get("sensor_source") or "helper").strip() or "helper",
+        },
+    }
+
+
+def _parse_sensor_helper_snapshot() -> Dict[str, Any]:
+    command = str(os.environ.get("STRATA_HOST_SENSOR_COMMAND") or "").strip()
+    if not command:
+        return {}
+    raw = _run_shell(command, timeout=2.5)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {
+            "fan": {
+                "rpm": None,
+                "available": False,
+                "source": "helper",
+                "error": "Invalid JSON from STRATA_HOST_SENSOR_COMMAND",
+            },
+            "temperature": {
+                "celsius": None,
+                "available": False,
+                "source": "helper",
+            },
+        }
+    if not isinstance(payload, dict):
+        return {}
+    return _normalize_sensor_helper_snapshot(payload)
+
+
 def get_host_telemetry_snapshot(*, max_age_s: float = 5.0) -> Dict[str, Any]:
     now = time.monotonic()
     cached_at = float(_HOST_CACHE.get("captured_at") or 0.0)
@@ -91,6 +156,7 @@ def get_host_telemetry_snapshot(*, max_age_s: float = 5.0) -> Dict[str, Any]:
     memory_free_pct = _parse_memory_free_pct()
     thermal = _parse_thermal_status()
     cpu = _parse_cpu_usage()
+    helper_snapshot = _parse_sensor_helper_snapshot()
     snapshot = {
         "captured_at": time.time(),
         "cpu": cpu,
@@ -113,6 +179,9 @@ def get_host_telemetry_snapshot(*, max_age_s: float = 5.0) -> Dict[str, Any]:
             "available": False,
         },
     }
+    if helper_snapshot:
+        snapshot["fan"].update(dict(helper_snapshot.get("fan") or {}))
+        snapshot["temperature"].update(dict(helper_snapshot.get("temperature") or {}))
     _HOST_CACHE["captured_at"] = now
     _HOST_CACHE["snapshot"] = snapshot
     return dict(snapshot)

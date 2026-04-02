@@ -127,6 +127,19 @@ Suggested severity labels:
   - Prevents the operator from configuring robust fallback or specialty routing within a pool via the UI.
   - Hardcodes the relationship between pools and roles, making it difficult to experiment with different capability tiers for the Agent vs. Trainer without code changes.
 
+### `P3` Chat composer button spacing is asymmetric
+
+- Status: active
+- Area: chat composer polish
+- Symptoms:
+  - the horizontal spacing between the composer shell edge and the left `Attach` button does not match the spacing on the right side around `Send`
+  - the input bar looks subtly off-center even when the underlying layout is otherwise healthy
+- Known reproduction or observation path:
+  - open chat and inspect the bottom composer in the desktop shell
+  - compare left shell padding near the paperclip button with the right shell padding near the send button
+- Why it matters:
+  - this is a small bug, but it makes a high-frequency surface feel less intentional than the rest of the app
+
 ## Recently Resolved
 
 ### Recovery-path `NoneType` crash on child validator constraints

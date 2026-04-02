@@ -169,6 +169,8 @@ Near-term product backlog:
 - emit periodic progress updates for longer chat work so silence is never confused with idleness
 - push long-running or backgroundable chat work onto the background worker instead of holding the foreground request open unnecessarily
 - let latency policy apply outside chat too, so internal routing, verification, review, and other system flows can choose `instant` vs thinking behavior deliberately rather than implicitly
+- add first-class voice I/O so the same communication layer can accept microphone input, route speech-to-text into sessions, and optionally deliver spoken output without inventing a second interaction model
+- treat voice as an operator/debugging surface too: support push-to-talk, transcript provenance, and eventually ambient-audio-aware comfort loops where fan noise or room noise can inform local throttle posture when the user has explicitly enabled that sensing
 
 ## Cross-Cutting Observability and Self-Evaluation Follow-Up
 
@@ -192,6 +194,7 @@ Follow-up work remains and should stay on the roadmap:
 - treat mutable config fields as a first-class evolutionary search surface so bootstrap can explore deterministic config mutations before falling back to prompt or code mutation
 - add explicit inference-throttle postures (`hard` and `greedy`) and provider-limit probing so the system can distinguish strict ceilings from adaptive best-effort operation
 - add operator-comfort sensing and policy loops for local inference, including comfort-oriented targets such as fan-noise avoidance, memory-pressure avoidance, and other "not annoying" runtime constraints
+- add pluggable direct sensor adapters for operator-comfort telemetry, including lightweight helper-command or native-helper paths that can report fan RPM and temperatures when the platform permits it
 - split overloaded task `session_id` semantics into distinct concepts such as `workstream_id`, `source_session_id`, and lane ownership so task provenance, chat affinity, and execution routing stop sharing one field
 - add a signed desktop `alpha` updater/distribution channel so packaged desktop installs stay in lockstep with rapid internal iteration without manual rebuild/reinstall churn
 - harden the desktop launcher path so detached startup is as reliable and observable as foreground startup, with clear logs and safe recovery when the backend fails to stay bound to its port
