@@ -2321,7 +2321,15 @@ const AttemptTargetCard = ({ attempt, attemptArtifacts = [], onSendWorkbenchProm
   );
 };
 
-const ProcedureTargetCard = ({ procedure, onSendWorkbenchPrompt }) => {
+const workPoolOptionsForLane = (lane) => {
+  if (lane === 'trainer') return [{ id: 'trainer', label: 'trainer' }];
+  return [
+    { id: 'local_agent', label: 'local_agent' },
+    { id: 'remote_agent', label: 'remote_agent' },
+  ];
+};
+
+const ProcedureTargetCard = ({ procedure, workbenchLane = 'agent', selectedWorkPool, onSelectWorkPool, onSendWorkbenchPrompt }) => {
   const [expandedStepId, setExpandedStepId] = useState(null);
   const [playingStepId, setPlayingStepId] = useState(null);
 
@@ -2354,6 +2362,36 @@ const ProcedureTargetCard = ({ procedure, onSendWorkbenchPrompt }) => {
         <RoutePill label="PROCEDURE ID" value={procedure.procedure_id} tone="success" />
         <RoutePill label="LINEAGE" value={procedure.lineage_id} />
         {procedure.variant_id && <RoutePill label="VARIANT" value={procedure.variant_id} />}
+        <RoutePill label="TARGET" value={selectedWorkPool || (workbenchLane === 'trainer' ? 'trainer' : 'local_agent')} tone="info" />
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+        <div style={{ fontSize: '11px', color: '#7f8091', fontWeight: 800, letterSpacing: '0.08em' }}>EXECUTION PROFILE</div>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          {workPoolOptionsForLane(workbenchLane).map((option) => {
+            const active = option.id === selectedWorkPool;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => onSelectWorkPool?.(option.id)}
+                style={{
+                  background: active ? 'rgba(85,149,255,0.14)' : 'rgba(255,255,255,0.04)',
+                  border: active ? '1px solid rgba(85,149,255,0.28)' : '1px solid rgba(255,255,255,0.08)',
+                  color: active ? '#ddebff' : '#c7c8d6',
+                  borderRadius: '999px',
+                  padding: '7px 12px',
+                  fontSize: '11px',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {procedure.description && (
@@ -2412,7 +2450,7 @@ const ProcedureTargetCard = ({ procedure, onSendWorkbenchPrompt }) => {
                       <div style={{ padding: '0 16px 16px 60px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
                         <div style={{ display: 'flex', gap: '10px' }}>
                           <button
-                            onClick={(e) => { e.stopPropagation(); onSendWorkbenchPrompt && onSendWorkbenchPrompt('preview_step', { procedure, step: item }); }}
+                            onClick={(e) => { e.stopPropagation(); onSendWorkbenchPrompt && onSendWorkbenchPrompt('preview_step', { procedure, step: item, workPool: selectedWorkPool }); }}
                             style={{
                               background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
                               borderRadius: '8px', padding: '8px 16px', fontSize: '11px', fontWeight: 800,
@@ -2427,7 +2465,7 @@ const ProcedureTargetCard = ({ procedure, onSendWorkbenchPrompt }) => {
                               e.stopPropagation();
                               setPlayingStepId(item.id);
                               try {
-                                await onSendWorkbenchPrompt?.('play_step', { procedure, step: item });
+                                await onSendWorkbenchPrompt?.('play_step', { procedure, step: item, workPool: selectedWorkPool });
                               } finally {
                                 setPlayingStepId((current) => (current === item.id ? null : current));
                               }
@@ -2519,6 +2557,7 @@ const SessionTargetCard = ({ messages, metadata }) => {
 
 const WorkbenchView = ({
   currentScope,
+  workPoolDetails,
   target,
   activeTasks,
   finishedTasks,
@@ -2569,6 +2608,10 @@ const WorkbenchView = ({
       || procedureMatch?.target_lane
       || target?.metadata?.lane
   ) || 'agent';
+  const defaultWorkbenchPool = workbenchLane === 'trainer'
+    ? 'trainer'
+    : String(target?.workPool || target?.executionProfile || procedureMatch?.target_work_pool || procedureMatch?.target_execution_profile || metadata?.work_pool || metadata?.execution_profile || 'local_agent');
+  const [selectedWorkPool, setSelectedWorkPool] = useState(defaultWorkbenchPool);
   const simulationSessionId = workbenchSimulationSessionId(target);
   const sessionMatch = Array.isArray(messages)
     ? (target?.sessionId
@@ -2581,6 +2624,10 @@ const WorkbenchView = ({
   useEffect(() => {
     setStepInspection(null);
   }, [target?.taskId, target?.procedureId, target?.sessionId]);
+
+  useEffect(() => {
+    setSelectedWorkPool(workbenchLane === 'trainer' ? 'trainer' : defaultWorkbenchPool);
+  }, [defaultWorkbenchPool, workbenchLane]);
 
   const applyWorkbenchAction = (action) => {
     setDraftPrompt(buildWorkbenchPrompt(action, target, taskMatch, procedureMatch));
@@ -2607,12 +2654,13 @@ const WorkbenchView = ({
   const handleContextualAction = async (action, item) => {
     if (action === 'preview_step') {
       try {
-        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/preview?lane=${encodeURIComponent(workbenchLane)}`);
+        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/preview?lane=${encodeURIComponent(workbenchLane)}&work_pool=${encodeURIComponent(item.workPool || selectedWorkPool)}`);
         const data = await resp.json();
         if (data.status === 'ok') {
           setStepInspection({
             kind: 'preview',
             lane: data.lane || workbenchLane,
+            workPool: data.work_pool || item.workPool || selectedWorkPool,
             procedureId: item.procedure.procedure_id,
             procedureTitle: item.procedure.title,
             stepId: item.step.id,
@@ -2626,6 +2674,7 @@ const WorkbenchView = ({
         setStepInspection({
           kind: 'error',
           lane: workbenchLane,
+          workPool: item.workPool || selectedWorkPool,
           procedureId: item.procedure.procedure_id,
           procedureTitle: item.procedure.title,
           stepId: item.step.id,
@@ -2642,13 +2691,14 @@ const WorkbenchView = ({
         const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/execute`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lane: workbenchLane }),
+          body: JSON.stringify({ lane: workbenchLane, work_pool: item.workPool || selectedWorkPool, execution_profile: item.workPool || selectedWorkPool }),
         });
         const data = await resp.json();
         if (data.status === 'ok') {
           setStepInspection({
             kind: 'dry_run',
             lane: data.lane || workbenchLane,
+            workPool: data.work_pool || item.workPool || selectedWorkPool,
             procedureId: item.procedure.procedure_id,
             procedureTitle: item.procedure.title,
             stepId: item.step.id,
@@ -2661,6 +2711,7 @@ const WorkbenchView = ({
           setStepInspection({
             kind: 'error',
             lane: data.lane || workbenchLane,
+            workPool: data.work_pool || item.workPool || selectedWorkPool,
             procedureId: item.procedure.procedure_id,
             procedureTitle: item.procedure.title,
             stepId: item.step.id,
@@ -2676,6 +2727,7 @@ const WorkbenchView = ({
         setStepInspection({
           kind: 'error',
           lane: workbenchLane,
+          workPool: item.workPool || selectedWorkPool,
           procedureId: item.procedure.procedure_id,
           procedureTitle: item.procedure.title,
           stepId: item.step.id,
@@ -2695,6 +2747,8 @@ const WorkbenchView = ({
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({
              lane: workbenchLane,
+             work_pool: item.workPool || selectedWorkPool,
+             execution_profile: item.workPool || selectedWorkPool,
              session_id: target?.sessionId || undefined,
            })
          });
@@ -2739,18 +2793,19 @@ const WorkbenchView = ({
               {taskMatch?.lane && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                    <div style={{ width: '6px', height: '6px', borderRadius: '999px', background: '#00f294' }} />
-                   <span style={{ fontSize: '10px', fontWeight: 800, color: '#00f294', letterSpacing: '0.04em' }}>LIVE ON {String(taskMatch.lane).toUpperCase()}</span>
+                   <span style={{ fontSize: '10px', fontWeight: 800, color: '#00f294', letterSpacing: '0.04em' }}>LIVE ON {String(taskMatch.execution_profile || taskMatch.work_pool || taskMatch.lane).toUpperCase()}</span>
                 </div>
               )}
               {!taskMatch?.lane && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <div style={{ width: '6px', height: '6px', borderRadius: '999px', background: '#60a5fa' }} />
-                  <span style={{ fontSize: '10px', fontWeight: 800, color: '#60a5fa', letterSpacing: '0.04em' }}>SCOPE {String(workbenchLane).toUpperCase()}</span>
+                  <span style={{ fontSize: '10px', fontWeight: 800, color: '#60a5fa', letterSpacing: '0.04em' }}>SCOPE {String(workbenchLane).toUpperCase()} · {String(selectedWorkPool).toUpperCase()}</span>
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
               <RoutePill label="TARGET" value={String(target?.kind || 'none')} tone="neutral" />
+              <RoutePill label="PROFILE" value={selectedWorkPool} tone="info" />
               {target?.taskId && <RoutePill label="TASK" value={`#${target.taskId}`} />}
               {target?.procedureId && <RoutePill label="PROCEDURE" value={target.procedureId} tone="success" />}
               {target?.sessionId && <RoutePill label="SESSION" value={String(target.sessionId).slice(0, 8)} />}
@@ -2807,6 +2862,9 @@ const WorkbenchView = ({
           {!taskMatch && procedureMatch && (
             <ProcedureTargetCard
               procedure={procedureMatch}
+              workbenchLane={workbenchLane}
+              selectedWorkPool={selectedWorkPool}
+              onSelectWorkPool={setSelectedWorkPool}
               onSendWorkbenchPrompt={handleContextualAction}
             />
           )}
@@ -2836,6 +2894,7 @@ const WorkbenchView = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                 <RoutePill label="LANE" value={String(stepInspection.lane || workbenchLane)} tone="info" />
+                <RoutePill label="PROFILE" value={String(stepInspection.workPool || selectedWorkPool)} tone="info" />
                 {stepInspection.procedureId && <RoutePill label="PROCEDURE" value={stepInspection.procedureId} tone="success" />}
                 {stepInspection.stepId && <RoutePill label="STEP" value={stepInspection.stepId} />}
                 <RoutePill label="MODE" value={stepInspection.kind === 'dry_run' ? 'dry_run' : stepInspection.kind} tone={stepInspection.kind === 'error' ? 'danger' : 'neutral'} />
@@ -3015,6 +3074,7 @@ const DashboardView = ({
   providerTelemetry,
   loadedContext,
   tiers,
+  workPoolDetails,
   routingSummary,
   currentScope,
   chatLane,
@@ -3052,6 +3112,11 @@ const DashboardView = ({
   const recentBootstrapJobs = (evalJobsSnapshot || [])
     .filter((job) => job?.system_job?.kind === 'bootstrap_cycle')
     .slice(0, 5);
+  const visibleWorkPools = currentScope === 'trainer'
+    ? ['trainer']
+    : currentScope === 'agent'
+    ? ['local_agent', 'remote_agent']
+    : ['trainer', 'local_agent', 'remote_agent'];
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '28px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -3131,6 +3196,31 @@ const DashboardView = ({
             </span>
           </div>
         ))}
+      </DashboardPanel>
+
+      <DashboardPanel title="WORK POOLS">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+          {visibleWorkPools.map((poolKey) => {
+            const detail = workPoolDetails?.[poolKey] || {};
+            const profileLabel = poolKey === 'local_agent' ? 'Local Agent' : poolKey === 'remote_agent' ? 'Remote Agent' : 'Trainer';
+            return (
+              <div key={poolKey} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '12px', padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
+                  <span style={{ color: '#e7e8ef', fontSize: '12px', fontWeight: 800 }}>{profileLabel}</span>
+                  <RoutePill label="MODE" value={detail.activity_label || detail.status || 'Idle'} tone={String(detail.activity_mode || '').toUpperCase().includes('GENERATING') ? 'success' : String(detail.activity_mode || '').toUpperCase().includes('STALLED') || String(detail.activity_mode || '').toUpperCase().includes('OFFLINE') ? 'warning' : 'neutral'} />
+                </div>
+                <div style={{ color: '#8d8ea1', fontSize: '11px', lineHeight: 1.6 }}>
+                  {detail.current_task_title || detail.activity_reason || 'No active task right now.'}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  <RoutePill label="QUEUE" value={String(detail.queue_depth ?? 0)} tone="neutral" />
+                  <RoutePill label="HEALTH" value={String(detail.tier_health || 'unknown')} tone={String(detail.tier_health || '').toLowerCase() === 'ok' ? 'success' : String(detail.tier_health || '').toLowerCase() === 'error' ? 'danger' : 'neutral'} />
+                  <RoutePill label="HEARTBEAT" value={detail.heartbeat_age_s == null ? '—' : `${Math.round(Number(detail.heartbeat_age_s || 0))}s`} tone="neutral" />
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </DashboardPanel>
 
       <DashboardPanel title="ROUTING">

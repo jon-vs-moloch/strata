@@ -149,6 +149,15 @@ const normalizeLaneDetailMap = (raw) => {
   };
 };
 
+const normalizeWorkPoolDetailMap = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    trainer: normalizeLaneDetail(source.trainer),
+    local_agent: normalizeLaneDetail(source.local_agent),
+    remote_agent: normalizeLaneDetail(source.remote_agent),
+  };
+};
+
 const normalizeRoutingSummary = (raw) => {
   const source = raw && typeof raw === 'object' ? raw : null;
   if (!source) return null;
@@ -1241,6 +1250,7 @@ function App() {
   const [workerStatus, setWorkerStatus] = useState('RUNNING'); // RUNNING, PAUSED, STOPPED
   const [laneStatuses, setLaneStatuses] = useState({ trainer: 'IDLE', agent: 'IDLE' });
   const [laneDetails, setLaneDetails] = useState(normalizeLaneDetailMap(null));
+  const [workPoolDetails, setWorkPoolDetails] = useState(normalizeWorkPoolDetailMap(null));
   const [globalPaused, setGlobalPaused] = useState(false);
   const [pausedLanes, setPausedLanes] = useState([]);
   const [rebooting, setRebooting] = useState(false);
@@ -1437,9 +1447,11 @@ function App() {
         setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes.map(normalizeLaneKey).filter(Boolean) : []);
         const nextLaneStatuses = normalizeLaneStatusMap(res.data.status.lanes);
         const nextLaneDetails = normalizeLaneDetailMap(res.data.status.lane_details);
+        const nextWorkPoolDetails = normalizeWorkPoolDetailMap(res.data.status.work_pools);
         const nextTiers = normalizeTierStatusMap(res.data.status.tiers);
         setLaneStatuses(nextLaneStatuses);
         setLaneDetails(nextLaneDetails);
+        setWorkPoolDetails(nextWorkPoolDetails);
         setTiers(nextTiers);
         if (nextTiers.trainer === 'error' && !localStorage.getItem('skipCloudWarning')) {
           setShowCloudModal(true);
@@ -2068,11 +2080,13 @@ function App() {
     }
   }, [API]);
 
-  const handleQueueProcedure = useCallback(async (procedureId) => {
+  const handleQueueProcedure = useCallback(async (procedureId, options = {}) => {
     if (!procedureId) return;
     try {
       await axios.post(`${API}/admin/procedures/${encodeURIComponent(procedureId)}/queue`, {
         lane: currentScope === 'home' ? effectiveLane : currentScope,
+        work_pool: options.workPool || options.executionProfile || undefined,
+        execution_profile: options.executionProfile || options.workPool || undefined,
         session_id: currentScope === 'home' ? sessionId : (sessionId || undefined),
       });
       scheduleRefresh({ force: true, refreshData: true, refreshWorker: true });
@@ -3462,6 +3476,7 @@ function App() {
                 providerTelemetry,
                 loadedContext,
                 tiers,
+                workPoolDetails,
                 routingSummary,
                 currentScope,
                 chatLane: effectiveLane,
@@ -3554,6 +3569,7 @@ function App() {
               workbenchProps={{
                 apiBase: API,
                 currentScope,
+                workPoolDetails,
                 target: workbenchTarget,
                 history: workbenchHistory,
                 activeTasks: scopedActiveTaskTree,

@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from strata.core.lanes import normalize_lane
+from strata.core.lanes import normalize_lane, normalize_work_pool
 from strata.context.loaded_files import list_loaded_context_files, load_context_file, unload_context_file
 from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.models.providers import GenericOpenAICompatibleProvider
@@ -26,7 +26,7 @@ from strata.observability.context import get_context_load_telemetry, scan_codeba
 from strata.observability.host import get_host_telemetry_snapshot
 from strata.orchestrator.capability_incidents import list_capability_incidents
 from strata.procedures.registry import get_procedure, list_procedures, queue_procedure, save_procedure
-from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
+from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext, LocalAgentExecutionContext, RemoteAgentExecutionContext
 from strata.storage.models import task_state_api_value
 
 
@@ -46,26 +46,53 @@ def register_runtime_admin_routes(
 ) -> Dict[str, Any]:
     exported: Dict[str, Any] = {}
 
-    def _workbench_adapter_for_lane(lane: str | None):
+    def _workbench_adapter_for_target(lane: str | None, work_pool: str | None = None):
         normalized_lane = normalize_lane(lane) or "agent"
+        normalized_work_pool = normalize_work_pool(work_pool) or normalize_work_pool("trainer" if normalized_lane == "trainer" else "local_agent")
         active_adapter = model_adapter
         try:
-            lane_adapter = worker._lane_model(normalized_lane) if hasattr(worker, "_lane_model") else None
+            lane_adapter = None
+            if hasattr(worker, "_work_pool_model"):
+                lane_adapter = worker._work_pool_model(normalized_work_pool)
+            if lane_adapter is None and hasattr(worker, "_lane_model"):
+                lane_adapter = worker._lane_model(normalized_lane)
             if lane_adapter is not None:
                 active_adapter = lane_adapter
         except Exception:
             active_adapter = model_adapter
         try:
-            context = (
-                TrainerExecutionContext(run_id=f"workbench:{normalized_lane}")
-                if normalized_lane == "trainer"
-                else AgentExecutionContext(run_id=f"workbench:{normalized_lane}")
-            )
+            if normalized_work_pool == "trainer":
+                context = TrainerExecutionContext(run_id=f"workbench:{normalized_work_pool}")
+            elif normalized_work_pool == "remote_agent":
+                context = RemoteAgentExecutionContext(run_id=f"workbench:{normalized_work_pool}")
+            elif normalized_work_pool == "local_agent":
+                context = LocalAgentExecutionContext(run_id=f"workbench:{normalized_work_pool}")
+            else:
+                context = (
+                    TrainerExecutionContext(run_id=f"workbench:{normalized_lane}")
+                    if normalized_lane == "trainer"
+                    else AgentExecutionContext(run_id=f"workbench:{normalized_lane}")
+                )
             if hasattr(active_adapter, "bind_execution_context"):
                 active_adapter.bind_execution_context(context)
         except Exception:
             pass
-        return normalized_lane, active_adapter
+        return normalized_lane, normalized_work_pool, active_adapter
+
+    def _resolve_workbench_target(
+        *,
+        lane: str | None,
+        work_pool: str | None,
+        procedure: Dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        effective_lane = normalize_lane(lane) or normalize_lane((procedure or {}).get("target_lane")) or "agent"
+        effective_work_pool = (
+            normalize_work_pool(work_pool)
+            or normalize_work_pool((procedure or {}).get("target_work_pool"))
+            or normalize_work_pool((procedure or {}).get("target_execution_profile"))
+            or normalize_work_pool("trainer" if effective_lane == "trainer" else "local_agent")
+        )
+        return effective_lane, effective_work_pool
 
     @app.get("/models")
     async def list_models():
@@ -436,6 +463,8 @@ def register_runtime_admin_routes(
                 procedure_id=procedure_id,
                 session_id=payload.get("session_id"),
                 lane=payload.get("lane"),
+                work_pool=payload.get("work_pool"),
+                execution_profile=payload.get("execution_profile"),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -645,7 +674,13 @@ def register_runtime_admin_routes(
         return {"status": "mutated", "task_id": task_id}
 
     @app.get("/admin/workbench/procedures/{procedure_id}/steps/{step_id}/preview")
-    async def preview_procedure_step(procedure_id: str, step_id: str, lane: str | None = None, storage=Depends(get_storage)):
+    async def preview_procedure_step(
+        procedure_id: str,
+        step_id: str,
+        lane: str | None = None,
+        work_pool: str | None = None,
+        storage=Depends(get_storage),
+    ):
         from strata.procedures.registry import get_procedure
         try:
             procedure = get_procedure(storage, procedure_id)
@@ -667,12 +702,18 @@ def register_runtime_admin_routes(
             f"VERIFICATION: {step['verification']}\n\n"
             "Please analyze the current state and determine if this step is complete or if further action is required."
         )
-        effective_lane = normalize_lane(lane) or normalize_lane(procedure.get("target_lane")) or "agent"
+        effective_lane, effective_work_pool = _resolve_workbench_target(
+            lane=lane,
+            work_pool=work_pool,
+            procedure=procedure,
+        )
         return {
             "status": "ok",
             "procedure_id": procedure_id,
             "step_id": step_id,
             "lane": effective_lane,
+            "work_pool": effective_work_pool,
+            "execution_profile": effective_work_pool,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -712,8 +753,9 @@ def register_runtime_admin_routes(
             {"role": "user", "content": user_prompt},
         ]
 
-        effective_lane, active_adapter = _workbench_adapter_for_lane(
-            (payload or {}).get("lane") or procedure.get("target_lane")
+        effective_lane, effective_work_pool, active_adapter = _workbench_adapter_for_target(
+            (payload or {}).get("lane") or procedure.get("target_lane"),
+            (payload or {}).get("work_pool") or procedure.get("target_work_pool") or procedure.get("target_execution_profile"),
         )
         response = await active_adapter.chat(messages)
         if str(response.get("status") or "").strip().lower() != "success":
@@ -722,6 +764,8 @@ def register_runtime_admin_routes(
                 "procedure_id": procedure_id,
                 "step_id": step_id,
                 "lane": effective_lane,
+                "work_pool": effective_work_pool,
+                "execution_profile": effective_work_pool,
                 "execution_mode": "dry_run",
                 "messages": messages,
                 "message": response.get("message") or "Dry-run execution failed",
@@ -732,6 +776,8 @@ def register_runtime_admin_routes(
             "procedure_id": procedure_id,
             "step_id": step_id,
             "lane": effective_lane,
+            "work_pool": effective_work_pool,
+            "execution_profile": effective_work_pool,
             "execution_mode": "dry_run",
             "messages": messages,
             "response": response,
