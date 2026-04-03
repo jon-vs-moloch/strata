@@ -217,6 +217,167 @@ def test_runtime_admin_exposes_attempt_observability_endpoint(tmp_path):
     storage.close()
 
 
+def test_runtime_admin_pause_aborts_inflight_and_logs_operator_action(tmp_path):
+    db_path = tmp_path / "runtime-admin-pause.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    storage = StorageManager(session=session_factory())
+    app = FastAPI()
+
+    class DummyWorker:
+        _running_task = None
+        status = {}
+
+        def __init__(self):
+            self.pause_calls = []
+            self.stop_calls = []
+
+        def pause(self, lane=None):
+            self.pause_calls.append(lane)
+
+        def resume(self, *_args, **_kwargs):
+            return None
+
+        def stop_current(self, lane=None):
+            self.stop_calls.append(lane)
+            return True
+
+        async def enqueue_runnable_tasks(self, *_args, **_kwargs):
+            return 0
+
+        async def wait_until_idle(self, timeout=10.0):
+            return True
+
+        def clear_queue(self):
+            return 0
+
+    class DummyBroadcaster:
+        async def subscribe(self):
+            return None
+
+        async def unsubscribe(self, queue):
+            return None
+
+    class DummyHotReloader:
+        def list_experimental(self):
+            return []
+
+        async def promote(self, module):
+            return type("Result", (), {"success": True, "module": module, "rolled_back": False, "message": "ok", "validation": None})()
+
+        def rollback(self, module):
+            return type("Result", (), {"success": True, "module": module, "message": "ok"})()
+
+    worker = DummyWorker()
+    register_runtime_admin_routes(
+        app,
+        get_storage=lambda: StorageManager(session=session_factory()),
+        model_adapter=FakeModelAdapter(),
+        global_settings={},
+        normalized_settings=lambda payload=None: payload or {},
+        settings_parameter_key="settings",
+        settings_parameter_description="settings",
+        worker=worker,
+        event_broadcaster=DummyBroadcaster(),
+        hotreloader=DummyHotReloader(),
+        base_dir=".",
+    )
+
+    client = TestClient(app)
+    response = client.post("/admin/worker/pause", params={"lane": "agent"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "paused"
+    assert payload["lane"] == "agent"
+    assert payload["aborted"] is True
+    assert worker.stop_calls == ["agent"]
+    assert worker.pause_calls == ["agent"]
+
+    refreshed = StorageManager(session=session_factory())
+    events = refreshed.parameters.peek_parameter("operator_action_log", default_value=[]) or []
+    assert events[-1]["action"] == "pause_worker"
+    assert events[-1]["target"] == "agent"
+    assert events[-1]["result"]["aborted"] is True
+    refreshed.close()
+    storage.close()
+
+
+def test_runtime_admin_settings_update_logs_operator_action(tmp_path):
+    db_path = tmp_path / "runtime-admin-settings.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    storage = StorageManager(session=session_factory())
+    app = FastAPI()
+
+    class DummyWorker:
+        _running_task = None
+        status = {}
+
+        def pause(self, *_args, **_kwargs):
+            return None
+
+        def resume(self, *_args, **_kwargs):
+            return None
+
+        def stop_current(self, *_args, **_kwargs):
+            return False
+
+        async def enqueue_runnable_tasks(self, *_args, **_kwargs):
+            return 0
+
+        async def wait_until_idle(self, timeout=10.0):
+            return True
+
+        def clear_queue(self):
+            return 0
+
+    class DummyBroadcaster:
+        async def subscribe(self):
+            return None
+
+        async def unsubscribe(self, queue):
+            return None
+
+    class DummyHotReloader:
+        def list_experimental(self):
+            return []
+
+        async def promote(self, module):
+            return type("Result", (), {"success": True, "module": module, "rolled_back": False, "message": "ok", "validation": None})()
+
+        def rollback(self, module):
+            return type("Result", (), {"success": True, "module": module, "message": "ok"})()
+
+    register_runtime_admin_routes(
+        app,
+        get_storage=lambda: StorageManager(session=session_factory()),
+        model_adapter=FakeModelAdapter(),
+        global_settings={},
+        normalized_settings=lambda payload=None: payload or {},
+        settings_parameter_key="settings",
+        settings_parameter_description="settings",
+        worker=DummyWorker(),
+        event_broadcaster=DummyBroadcaster(),
+        hotreloader=DummyHotReloader(),
+        base_dir=".",
+    )
+
+    client = TestClient(app)
+    response = client.post("/admin/settings", json={"inference_paused": True})
+
+    assert response.status_code == 200
+    refreshed = StorageManager(session=session_factory())
+    events = refreshed.parameters.peek_parameter("operator_action_log", default_value=[]) or []
+    assert events[-1]["action"] == "update_settings"
+    assert events[-1]["target"] == "runtime_settings"
+    assert events[-1]["payload"]["inference_paused"] is True
+    refreshed.close()
+    storage.close()
+
+
 def test_attempt_intelligence_summarizes_branch_and_artifacts():
     storage = make_storage()
     parent = storage.tasks.create(
@@ -340,7 +501,7 @@ def test_review_trace_supports_weak_reviewer_tier():
 
     assert result["status"] == "ok"
     assert result["reviewer_tier"] == "agent"
-    assert adapter.bound_context.mode == "agent"
+    assert adapter.bound_context.mode == "local_agent"
     assert adapter.bound_context.evaluation_run is True
 
 

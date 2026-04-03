@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -45,6 +46,10 @@ def register_runtime_admin_routes(
     base_dir: str,
 ) -> Dict[str, Any]:
     exported: Dict[str, Any] = {}
+    operator_action_log_key = "operator_action_log"
+    operator_action_log_description = (
+        "Append-only operator action events captured from runtime admin controls."
+    )
 
     def _workbench_adapter_for_target(lane: str | None, work_pool: str | None = None):
         normalized_lane = normalize_lane(lane) or "agent"
@@ -93,6 +98,43 @@ def register_runtime_admin_routes(
             or normalize_work_pool("trainer" if effective_lane == "trainer" else "local_agent")
         )
         return effective_lane, effective_work_pool
+
+    def _json_safe(value: Any) -> Any:
+        try:
+            return json.loads(json.dumps(value, default=str))
+        except Exception:
+            return str(value)
+
+    def _append_operator_action(
+        storage,
+        *,
+        action: str,
+        target: str | None = None,
+        payload: Any = None,
+        result: Any = None,
+    ) -> Dict[str, Any]:
+        entries = storage.parameters.peek_parameter(
+            operator_action_log_key,
+            default_value=[],
+        ) or []
+        if not isinstance(entries, list):
+            entries = []
+        event = {
+            "event_id": f"operator_action_{uuid4().hex[:12]}",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "actor": "operator_ui",
+            "action": str(action or "").strip() or "unknown_action",
+            "target": str(target or "").strip() or None,
+            "payload": _json_safe(payload),
+            "result": _json_safe(result),
+        }
+        entries.append(event)
+        storage.parameters.set_parameter(
+            operator_action_log_key,
+            entries[-400:],
+            description=operator_action_log_description,
+        )
+        return event
 
     @app.get("/models")
     async def list_models():
@@ -149,6 +191,13 @@ def register_runtime_admin_routes(
             value=merged_settings,
             description=settings_parameter_description,
         )
+        _append_operator_action(
+            storage,
+            action="update_settings",
+            target="runtime_settings",
+            payload=payload,
+            result={"settings": merged_settings},
+        )
         storage.commit()
         return {"status": "ok", "settings": merged_settings}
 
@@ -165,10 +214,18 @@ def register_runtime_admin_routes(
         return {"status": "ok", "presets": registry.presets()}
 
     @app.post("/admin/registry")
-    async def update_registry(payload: Dict[str, Any]):
+    async def update_registry(payload: Dict[str, Any], storage=Depends(get_storage)):
         from strata.models.registry import registry
 
         registry._load_config(payload)
+        _append_operator_action(
+            storage,
+            action="update_registry",
+            target="model_registry",
+            payload=payload,
+            result={"status": "ok"},
+        )
+        storage.commit()
         return {"status": "ok"}
 
     @app.get("/admin/registry/catalog")
@@ -401,18 +458,44 @@ def register_runtime_admin_routes(
         path = str(payload.get("path") or "").strip()
         if not path:
             raise HTTPException(status_code=400, detail="path required")
-        return {"status": "ok", "result": load_context_file(storage, path, source="admin.context.load", base_dir=base_dir)}
+        result = load_context_file(storage, path, source="admin.context.load", base_dir=base_dir)
+        _append_operator_action(
+            storage,
+            action="context_load",
+            target=path,
+            payload=payload,
+            result=result,
+        )
+        storage.commit()
+        return {"status": "ok", "result": result}
 
     @app.post("/admin/context/unload")
     async def admin_unload_context(payload: Dict[str, Any], storage=Depends(get_storage)):
         path = str(payload.get("path") or "").strip()
         if not path:
             raise HTTPException(status_code=400, detail="path required")
-        return {"status": "ok", "result": unload_context_file(storage, path, base_dir=base_dir)}
+        result = unload_context_file(storage, path, base_dir=base_dir)
+        _append_operator_action(
+            storage,
+            action="context_unload",
+            target=path,
+            payload=payload,
+            result=result,
+        )
+        storage.commit()
+        return {"status": "ok", "result": result}
 
     @app.post("/admin/context/scan")
     async def rescan_context_pressure(storage=Depends(get_storage)):
-        return {"status": "ok", "scan": scan_codebase_context_pressure(storage, base_dir=base_dir)}
+        scan = scan_codebase_context_pressure(storage, base_dir=base_dir)
+        _append_operator_action(
+            storage,
+            action="context_scan",
+            target="loaded_context",
+            result=scan,
+        )
+        storage.commit()
+        return {"status": "ok", "scan": scan}
 
     @app.post("/admin/context/clear")
     async def clear_loaded_context(storage=Depends(get_storage)):
@@ -422,6 +505,12 @@ def register_runtime_admin_routes(
             LOADED_CONTEXT_FILES_KEY,
             {"files": [], "budget_tokens": 3200},
             description=LOADED_CONTEXT_FILES_DESCRIPTION,
+        )
+        _append_operator_action(
+            storage,
+            action="context_clear",
+            target="loaded_context",
+            result={"cleared": "loaded_context"},
         )
         storage.commit()
         return {"status": "ok", "cleared": "loaded_context"}
@@ -450,6 +539,13 @@ def register_runtime_admin_routes(
     @app.post("/admin/procedures")
     async def upsert_procedure(payload: Dict[str, Any], storage=Depends(get_storage)):
         procedure = save_procedure(storage, payload)
+        _append_operator_action(
+            storage,
+            action="upsert_procedure",
+            target=str(procedure.get("id") or payload.get("id") or "procedure"),
+            payload=payload,
+            result={"procedure_id": procedure.get("id")},
+        )
         storage.commit()
         return {"status": "ok", "procedure": procedure}
 
@@ -469,16 +565,31 @@ def register_runtime_admin_routes(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         await worker.enqueue(task.task_id)
+        _append_operator_action(
+            storage,
+            action="queue_procedure",
+            target=procedure_id,
+            payload=payload,
+            result={"task_id": task.task_id},
+        )
+        storage.commit()
         return {"status": "queued", "task_id": task.task_id, "procedure_id": procedure_id}
 
     @app.post("/admin/reboot")
-    async def reboot_api():
+    async def reboot_api(storage=Depends(get_storage)):
         import sys
 
         async def restart_soon():
             await asyncio.sleep(0.5)
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
+        _append_operator_action(
+            storage,
+            action="reboot_api",
+            target="runtime",
+            result={"status": "rebooting"},
+        )
+        storage.commit()
         asyncio.create_task(restart_soon())
         return {"status": "rebooting"}
 
@@ -487,26 +598,44 @@ def register_runtime_admin_routes(
         return {"files": hotreloader.list_experimental()}
 
     @app.post("/admin/promote")
-    async def promote_file(payload: Dict[str, Any]):
+    async def promote_file(payload: Dict[str, Any], storage=Depends(get_storage)):
         module = payload.get("module")
         if not module:
             raise HTTPException(status_code=400, detail="module field required")
         result = await hotreloader.promote(module)
-        return {
+        response = {
             "success": result.success,
             "module": result.module,
             "rolled_back": result.rolled_back,
             "message": result.message,
             "validation": result.validation.stages if result.validation else None,
         }
+        _append_operator_action(
+            storage,
+            action="promote_module",
+            target=str(module),
+            payload=payload,
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/rollback")
-    async def rollback_file(payload: Dict[str, Any]):
+    async def rollback_file(payload: Dict[str, Any], storage=Depends(get_storage)):
         module = payload.get("module")
         if not module:
             raise HTTPException(status_code=400, detail="module field required")
         result = hotreloader.rollback(module)
-        return {"success": result.success, "module": result.module, "message": result.message}
+        response = {"success": result.success, "module": result.module, "message": result.message}
+        _append_operator_action(
+            storage,
+            action="rollback_module",
+            target=str(module),
+            payload=payload,
+            result=response,
+        )
+        storage.commit()
+        return response
 
     async def perform_fresh_start(storage):
         from strata.storage.models import Base
@@ -540,6 +669,18 @@ def register_runtime_admin_routes(
                 preflight_task_id = str(getattr(preflight_task, "task_id", "") or "") or None
             except Exception:
                 preflight_task = None
+            _append_operator_action(
+                restored,
+                action="fresh_start",
+                target="runtime",
+                result={
+                    "worker_paused": True,
+                    "aborted_active_task": bool(aborted),
+                    "cleared_queue": cleared_queue,
+                    "seeded_preflight": bool(preflight_task),
+                    "preflight_task_id": preflight_task_id,
+                },
+            )
             restored.commit()
         finally:
             restored.close()
@@ -569,17 +710,27 @@ def register_runtime_admin_routes(
         return {"status": worker.status}
 
     @app.post("/admin/worker/pause")
-    async def pause_worker(lane: str | None = None):
+    async def pause_worker(lane: str | None = None, storage=Depends(get_storage)):
         normalized_lane = normalize_lane(lane)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
+        aborted = worker.stop_current(normalized_lane)
         worker.pause(normalized_lane)
-        return {"status": "paused", "lane": normalized_lane}
+        response = {"status": "paused", "lane": normalized_lane, "aborted": bool(aborted)}
+        _append_operator_action(
+            storage,
+            action="pause_worker",
+            target=normalized_lane or "global",
+            payload={"lane": normalized_lane},
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/worker/resume")
-    async def resume_worker(lane: str | None = None):
+    async def resume_worker(lane: str | None = None, storage=Depends(get_storage)):
         normalized_lane = normalize_lane(lane)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
@@ -587,50 +738,94 @@ def register_runtime_admin_routes(
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         worker.resume(normalized_lane)
         replayed = await worker.enqueue_runnable_tasks(normalized_lane)
-        return {"status": "running", "lane": normalized_lane, "replayed": replayed}
+        response = {"status": "running", "lane": normalized_lane, "replayed": replayed}
+        _append_operator_action(
+            storage,
+            action="resume_worker",
+            target=normalized_lane or "global",
+            payload={"lane": normalized_lane},
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/worker/stop")
-    async def stop_worker(lane: str | None = None):
+    async def stop_worker(lane: str | None = None, storage=Depends(get_storage)):
         normalized_lane = normalize_lane(lane)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
         aborted = worker.stop_current(normalized_lane)
-        return {"status": "stopped", "aborted": aborted, "lane": normalized_lane}
+        response = {"status": "stopped", "aborted": aborted, "lane": normalized_lane}
+        _append_operator_action(
+            storage,
+            action="stop_worker",
+            target=normalized_lane or "global",
+            payload={"lane": normalized_lane},
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/worker/clear_queue")
-    async def clear_worker_queue():
+    async def clear_worker_queue(storage=Depends(get_storage)):
         cleared = worker.clear_queue()
-        return {"status": "ok", "cleared_queue": cleared}
+        response = {"status": "ok", "cleared_queue": cleared}
+        _append_operator_action(
+            storage,
+            action="clear_worker_queue",
+            target="worker_queue",
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/tasks/{task_id}/pause")
-    async def pause_task(task_id: str):
+    async def pause_task(task_id: str, storage=Depends(get_storage)):
         paused = worker.pause_task(task_id)
         if not paused:
             raise HTTPException(status_code=404, detail="task not found or not pausable")
-        return {"status": "paused", "task_id": task_id}
+        response = {"status": "paused", "task_id": task_id}
+        _append_operator_action(storage, action="pause_task", target=task_id, result=response)
+        storage.commit()
+        return response
 
     @app.post("/admin/tasks/{task_id}/resume")
-    async def resume_task(task_id: str):
+    async def resume_task(task_id: str, storage=Depends(get_storage)):
         resumed = await worker.resume_task(task_id)
         if not resumed:
             raise HTTPException(status_code=404, detail="task not found or not resumable")
-        return {"status": "running", "task_id": task_id}
+        response = {"status": "running", "task_id": task_id}
+        _append_operator_action(storage, action="resume_task", target=task_id, result=response)
+        storage.commit()
+        return response
 
     @app.post("/admin/tasks/{task_id}/stop")
-    async def stop_task(task_id: str):
+    async def stop_task(task_id: str, storage=Depends(get_storage)):
         stopped = worker.stop_task(task_id)
         if not stopped:
             raise HTTPException(status_code=404, detail="task not found or not stoppable")
-        return {"status": "stopped", "task_id": task_id}
+        response = {"status": "stopped", "task_id": task_id}
+        _append_operator_action(storage, action="stop_task", target=task_id, result=response)
+        storage.commit()
+        return response
 
     @app.post("/admin/tasks/{task_id}/replay")
-    async def replay_task(task_id: str, payload: Dict[str, Any] | None = None):
+    async def replay_task(task_id: str, payload: Dict[str, Any] | None = None, storage=Depends(get_storage)):
         replayed = await worker.replay_task(task_id, overrides=payload)
         if not replayed:
             raise HTTPException(status_code=404, detail="task not found or not replayable")
-        return {"status": "replayed", "task_id": task_id}
+        response = {"status": "replayed", "task_id": task_id}
+        _append_operator_action(
+            storage,
+            action="replay_task",
+            target=task_id,
+            payload=payload,
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/tasks/{task_id}/branch")
     async def branch_task(task_id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
@@ -655,7 +850,16 @@ def register_runtime_admin_routes(
         )
         storage.commit()
         await worker.enqueue(branch.task_id)
-        return {"status": "branched", "original": task_id, "branch": branch.task_id}
+        response = {"status": "branched", "original": task_id, "branch": branch.task_id}
+        _append_operator_action(
+            storage,
+            action="branch_task",
+            target=task_id,
+            payload=payload,
+            result=response,
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/tasks/{task_id}/mutate")
     async def mutate_task(task_id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
@@ -670,6 +874,13 @@ def register_runtime_admin_routes(
             c.update(payload["constraints"])
             task.constraints = c
 
+        _append_operator_action(
+            storage,
+            action="mutate_task",
+            target=task_id,
+            payload=payload,
+            result={"status": "mutated", "task_id": task_id},
+        )
         storage.commit()
         return {"status": "mutated", "task_id": task_id}
 
@@ -707,7 +918,7 @@ def register_runtime_admin_routes(
             work_pool=work_pool,
             procedure=procedure,
         )
-        return {
+        response = {
             "status": "ok",
             "procedure_id": procedure_id,
             "step_id": step_id,
@@ -719,6 +930,19 @@ def register_runtime_admin_routes(
                 {"role": "user", "content": user_prompt},
             ],
         }
+        _append_operator_action(
+            storage,
+            action="preview_procedure_step",
+            target=f"{procedure_id}:{step_id}",
+            payload={"lane": lane, "work_pool": work_pool},
+            result={
+                "lane": effective_lane,
+                "work_pool": effective_work_pool,
+                "execution_profile": effective_work_pool,
+            },
+        )
+        storage.commit()
+        return response
 
     @app.post("/admin/workbench/procedures/{procedure_id}/steps/{step_id}/execute")
     async def execute_procedure_step(
@@ -759,7 +983,7 @@ def register_runtime_admin_routes(
         )
         response = await active_adapter.chat(messages)
         if str(response.get("status") or "").strip().lower() != "success":
-            return {
+            result = {
                 "status": "error",
                 "procedure_id": procedure_id,
                 "step_id": step_id,
@@ -771,7 +995,21 @@ def register_runtime_admin_routes(
                 "message": response.get("message") or "Dry-run execution failed",
                 "response": response,
             }
-        return {
+            _append_operator_action(
+                storage,
+                action="execute_procedure_step",
+                target=f"{procedure_id}:{step_id}",
+                payload=payload,
+                result={
+                    "status": "error",
+                    "lane": effective_lane,
+                    "work_pool": effective_work_pool,
+                    "message": result["message"],
+                },
+            )
+            storage.commit()
+            return result
+        result = {
             "status": "ok",
             "procedure_id": procedure_id,
             "step_id": step_id,
@@ -782,6 +1020,20 @@ def register_runtime_admin_routes(
             "messages": messages,
             "response": response,
         }
+        _append_operator_action(
+            storage,
+            action="execute_procedure_step",
+            target=f"{procedure_id}:{step_id}",
+            payload=payload,
+            result={
+                "status": "ok",
+                "lane": effective_lane,
+                "work_pool": effective_work_pool,
+                "tool_calls": response.get("tool_calls") or [],
+            },
+        )
+        storage.commit()
+        return result
 
     @app.post("/admin/registry/procedures/{id}/mutate")
     async def mutate_procedure(id: str, payload: Dict[str, Any], storage=Depends(get_storage)):
@@ -793,6 +1045,13 @@ def register_runtime_admin_routes(
 
         updated = {**procedure, **payload}
         save_procedure(storage, updated)
+        _append_operator_action(
+            storage,
+            action="mutate_procedure",
+            target=id,
+            payload=payload,
+            result={"status": "mutated", "procedure_id": id},
+        )
         storage.commit()
         return {"status": "mutated", "procedure_id": id}
 
