@@ -30,13 +30,17 @@ def test_default_onboarding_procedure_is_available():
     procedures = list_procedures(storage)
     onboarding = get_procedure(storage, "operator_onboarding")
     smoke = get_procedure(storage, "preflight")
+    agent_preflight = get_procedure(storage, "agent_preflight")
 
     assert any(item["procedure_id"] == "operator_onboarding" for item in procedures)
     assert any(item["procedure_id"] == "preflight" for item in procedures)
+    assert any(item["procedure_id"] == "agent_preflight" for item in procedures)
     assert onboarding["title"] == "Operator Onboarding"
     assert onboarding["lifecycle_state"] == "vetted"
     assert onboarding["checklist"]
     assert smoke["checklist"]
+    assert agent_preflight["checklist"]
+    assert agent_preflight["target_work_pool"] == "local_agent"
 
 
 def test_queue_procedure_creates_verifiable_task():

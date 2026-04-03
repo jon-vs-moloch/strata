@@ -15,6 +15,7 @@ from strata.core.lanes import canonical_session_id_for_lane, default_work_pool_f
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.system_capabilities import (
+    AGENT_PREFLIGHT_PROCEDURE_ID,
     AUDIT_TRACE_REVIEW_PROCEDURE_ID,
     BOOTSTRAP_CYCLE_PROCEDURE_ID,
     KNOWLEDGE_REFRESH_PROCEDURE_ID,
@@ -29,6 +30,53 @@ DEFAULT_PROCEDURE_LANE = "agent"
 STARTUP_SMOKE_PROCEDURE_ID = "preflight"
 ONBOARDING_PROCEDURE_ID = "operator_onboarding"
 DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
+    AGENT_PREFLIGHT_PROCEDURE_ID: {
+        "procedure_id": AGENT_PREFLIGHT_PROCEDURE_ID,
+        "title": "Agent Preflight",
+        "summary": "Run a small end-to-end health check for a specific agent profile before assigning it broader shared work.",
+        "repeatable": True,
+        "lifecycle_state": "draft",
+        "lineage_id": AGENT_PREFLIGHT_PROCEDURE_ID,
+        "variant_of": STARTUP_SMOKE_PROCEDURE_ID,
+        "mutable": True,
+        "target_lane": DEFAULT_PROCEDURE_LANE,
+        "target_work_pool": "local_agent",
+        "target_execution_profile": "local_agent",
+        "task_type": "RESEARCH",
+        "instructions": (
+            "Treat this as a bounded end-to-end health check for the assigned agent profile. Use the hinted canonical sources, "
+            "cash out quickly, and avoid open-ended repo exploration. The goal is to measure whether this profile can inspect, synthesize, "
+            "and conclude cleanly before it is trusted with broader shared work."
+        ),
+        "checklist": [
+            {
+                "id": "inspect_spec_surface",
+                "title": "Inspect one canonical spec surface",
+                "verification": "The agent can read a hinted canonical source directly instead of foraging broadly.",
+            },
+            {
+                "id": "inspect_runtime_surface",
+                "title": "Inspect one live runtime surface",
+                "verification": "The agent can inspect a concrete runtime/UI surface relevant to operator-visible behavior.",
+            },
+            {
+                "id": "cash_out_summary",
+                "title": "Cash out into a concise summary",
+                "verification": "The agent synthesizes the evidence it already has instead of reflexively calling another lookup.",
+            },
+        ],
+        "success_criteria": {
+            "required_checklist_ids": [
+                "inspect_spec_surface",
+                "inspect_runtime_surface",
+                "cash_out_summary",
+            ],
+            "deliverables": [
+                "A concise per-agent preflight summary",
+                "Durable evidence that the assigned profile can inspect and cash out cleanly",
+            ],
+        },
+    },
     BOOTSTRAP_CYCLE_PROCEDURE_ID: {
         "procedure_id": BOOTSTRAP_CYCLE_PROCEDURE_ID,
         "title": "Bootstrap Cycle",

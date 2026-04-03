@@ -14,6 +14,7 @@ PROCESS_REPAIR_PROCEDURE_ID = "process_repair"
 VERIFICATION_REVIEW_PROCEDURE_ID = "verification_review"
 KNOWLEDGE_REFRESH_PROCEDURE_ID = "knowledge_refresh"
 BOOTSTRAP_CYCLE_PROCEDURE_ID = "bootstrap_cycle"
+AGENT_PREFLIGHT_PROCEDURE_ID = "agent_preflight"
 
 SYSTEM_PROCEDURE_TITLES: Dict[str, str] = {
     AUDIT_TRACE_REVIEW_PROCEDURE_ID: "Audit Trace Review",
@@ -22,6 +23,7 @@ SYSTEM_PROCEDURE_TITLES: Dict[str, str] = {
     VERIFICATION_REVIEW_PROCEDURE_ID: "Verification Review",
     KNOWLEDGE_REFRESH_PROCEDURE_ID: "Knowledge Refresh",
     BOOTSTRAP_CYCLE_PROCEDURE_ID: "Bootstrap Cycle",
+    AGENT_PREFLIGHT_PROCEDURE_ID: "Agent Preflight",
 }
 
 

@@ -256,6 +256,55 @@ def test_background_worker_enqueue_runnable_tasks_respects_lane_and_paused_state
     assert agent_task_id not in queued
 
 
+def test_background_worker_seeds_per_work_pool_agent_preflight():
+    storage_factory = make_storage_factory()
+    worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
+
+    task_id = worker._ensure_agent_preflight_task("remote_agent")
+
+    assert task_id
+    assert worker._agent_preflight_health["remote_agent"] == "queued"
+    storage = storage_factory()
+    try:
+        task = storage.tasks.get_by_id(task_id)
+        assert task is not None
+        assert task.constraints["procedure_id"] == "agent_preflight"
+        assert task.constraints["work_pool"] == "remote_agent"
+        assert task.constraints["execution_profile"] == "remote_agent"
+    finally:
+        storage.close()
+
+
+def test_background_worker_interleaves_shared_backend_turns():
+    worker = BackgroundWorker(storage_factory=make_storage, model_adapter=DummyModel())
+
+    worker._work_pool_backend_group_key = lambda pool: "shared-cloud" if pool in {"trainer", "remote_agent"} else None  # type: ignore[method-assign]
+
+    async def scenario():
+        order = []
+        first_group = await worker._acquire_backend_group_turn("trainer")
+
+        async def wait_remote():
+            group = await worker._acquire_backend_group_turn("remote_agent")
+            order.append("remote_agent")
+            await worker._release_backend_group_turn(group, "remote_agent")
+
+        async def wait_trainer_again():
+            group = await worker._acquire_backend_group_turn("trainer")
+            order.append("trainer")
+            await worker._release_backend_group_turn(group, "trainer")
+
+        remote_task = asyncio.create_task(wait_remote())
+        await asyncio.sleep(0.01)
+        trainer_task = asyncio.create_task(wait_trainer_again())
+        await asyncio.sleep(0.01)
+        await worker._release_backend_group_turn(first_group, "trainer")
+        await asyncio.gather(remote_task, trainer_task)
+        return order
+
+    assert asyncio.run(scenario()) == ["remote_agent", "trainer"]
+
+
 def test_worker_status_includes_lane_runtime_details():
     storage_factory = make_storage_factory()
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())

@@ -10,9 +10,10 @@ small local model can benefit from.
 """
 
 import asyncio
+from collections import deque
 import logging
 from datetime import datetime, timezone
-from typing import Callable, Dict, Optional
+from typing import Callable, Deque, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 import httpx
 
@@ -46,8 +47,8 @@ from strata.experimental.verifier import (
     emit_verifier_attention_signal,
     verify_task_output,
 )
-from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
-from strata.procedures.registry import build_procedure_task_constraints
+from strata.system_capabilities import AGENT_PREFLIGHT_PROCEDURE_ID, bind_system_procedure, canonical_system_procedure_id
+from strata.procedures.registry import build_procedure_task_constraints, queue_procedure
 
 logger = logging.getLogger(__name__)
 LANE_NAMES = ("trainer", "agent")
@@ -978,6 +979,13 @@ class BackgroundWorker:
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
         self._tier_health = {pool: "unknown" for pool in WORK_POOL_NAMES}
         self._tier_retry_after_s: Dict[str, float] = {pool: 0.0 for pool in WORK_POOL_NAMES}
+        self._agent_preflight_health: Dict[str, str] = {pool: "pending" for pool in WORK_POOL_NAMES}
+        self._agent_preflight_task_ids: Dict[str, Optional[str]] = {pool: None for pool in WORK_POOL_NAMES}
+        self._agent_preflight_checked_at: Dict[str, Optional[str]] = {pool: None for pool in WORK_POOL_NAMES}
+        self._agent_preflight_reason: Dict[str, str] = {pool: "" for pool in WORK_POOL_NAMES}
+        self._backend_group_conditions: Dict[str, asyncio.Condition] = {}
+        self._backend_group_waiters: Dict[str, Deque[str]] = {}
+        self._backend_group_active: Dict[str, Optional[str]] = {}
 
     def _default_model_adapter_factory(self, template_adapter):
         def _factory():
@@ -1026,6 +1034,111 @@ class BackgroundWorker:
         if any(item == "error" for item in healths):
             return "error"
         return "unknown"
+
+    def _mark_agent_preflight_status(
+        self,
+        work_pool: Optional[str],
+        status: str,
+        *,
+        task_id: Optional[str] = None,
+        reason: str = "",
+    ) -> None:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        self._agent_preflight_health[normalized_pool] = str(status or "pending").strip().lower() or "pending"
+        if task_id is not None:
+            self._agent_preflight_task_ids[normalized_pool] = str(task_id or "") or None
+        self._agent_preflight_reason[normalized_pool] = str(reason or "").strip()
+        self._agent_preflight_checked_at[normalized_pool] = datetime.now(timezone.utc).isoformat()
+
+    def _work_pool_preflight_complete(self, work_pool: Optional[str]) -> bool:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        return str(self._agent_preflight_health.get(normalized_pool) or "").lower() == "healthy"
+
+    def _work_pool_backend_group_key(self, work_pool: Optional[str]) -> Optional[str]:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        try:
+            adapter = self._work_pool_model(normalized_pool)
+            endpoint = adapter._resolve_endpoint() if hasattr(adapter, "_resolve_endpoint") else None
+        except Exception:
+            endpoint = None
+        if endpoint is None:
+            return None
+        provider = str(getattr(endpoint, "provider", "") or getattr(endpoint, "provider_id", "") or "").strip().lower()
+        transport = str(getattr(endpoint, "transport", "") or "").strip().lower()
+        endpoint_url = str(getattr(endpoint, "endpoint_url", "") or "").strip().lower()
+        api_key_env = str(getattr(endpoint, "api_key_env", "") or "").strip().lower()
+        if not provider and not endpoint_url:
+            return None
+        return "|".join(part for part in (transport, provider, endpoint_url, api_key_env) if part)
+
+    async def _acquire_backend_group_turn(self, work_pool: Optional[str]) -> Optional[str]:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        group_key = self._work_pool_backend_group_key(normalized_pool)
+        if not group_key:
+            return None
+        condition = self._backend_group_conditions.setdefault(group_key, asyncio.Condition())
+        waiters = self._backend_group_waiters.setdefault(group_key, deque())
+        async with condition:
+            if normalized_pool not in waiters:
+                waiters.append(normalized_pool)
+            while True:
+                active = self._backend_group_active.get(group_key)
+                if active is None and waiters and waiters[0] == normalized_pool:
+                    waiters.popleft()
+                    self._backend_group_active[group_key] = normalized_pool
+                    return group_key
+                await condition.wait()
+
+    async def _release_backend_group_turn(self, group_key: Optional[str], work_pool: Optional[str]) -> None:
+        if not group_key:
+            return
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        condition = self._backend_group_conditions.setdefault(group_key, asyncio.Condition())
+        waiters = self._backend_group_waiters.setdefault(group_key, deque())
+        async with condition:
+            if self._backend_group_active.get(group_key) == normalized_pool:
+                self._backend_group_active[group_key] = None
+            condition.notify_all()
+
+    def _is_agent_preflight_task(self, task: Optional[TaskModel]) -> bool:
+        constraints = dict(getattr(task, "constraints", {}) or {})
+        return str(constraints.get("procedure_id") or "").strip().lower() == AGENT_PREFLIGHT_PROCEDURE_ID
+
+    def _ensure_agent_preflight_task(self, work_pool: Optional[str]) -> Optional[str]:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        target_lane = _lane_for_work_pool(normalized_pool)
+        storage = self._storage_factory()
+        try:
+            existing = (
+                storage.session.query(TaskModel)
+                .filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING, TaskState.PUSHED, TaskState.COMPLETE]))
+                .all()
+            )
+            for task in existing:
+                constraints = dict(task.constraints or {})
+                if str(constraints.get("procedure_id") or "").strip().lower() != AGENT_PREFLIGHT_PROCEDURE_ID:
+                    continue
+                task_pool = normalize_work_pool(constraints.get("work_pool") or constraints.get("execution_profile"))
+                if task_pool == normalized_pool and task.state == TaskState.COMPLETE:
+                    self._mark_agent_preflight_status(normalized_pool, "healthy", task_id=task.task_id, reason="Existing per-agent preflight already completed.")
+                    return str(task.task_id)
+                if task_pool == normalized_pool:
+                    self._mark_agent_preflight_status(normalized_pool, "queued", task_id=task.task_id, reason="Awaiting per-agent preflight.")
+                    return str(task.task_id)
+
+            task = queue_procedure(
+                storage,
+                self,
+                procedure_id=AGENT_PREFLIGHT_PROCEDURE_ID,
+                lane=target_lane,
+                work_pool=normalized_pool,
+                execution_profile=normalized_pool,
+            )
+            storage.commit()
+            self._mark_agent_preflight_status(normalized_pool, "queued", task_id=task.task_id, reason="Seeded per-agent preflight.")
+            return str(task.task_id)
+        finally:
+            storage.close()
 
     def _legacy_lane_runtime_snapshot(self, lane: str) -> Optional[Dict[str, object]]:
         normalized_lane = normalize_lane(lane)
@@ -1164,11 +1277,13 @@ class BackgroundWorker:
         if ok:
             self._tier_health[normalized_pool] = "ok"
             self._tier_retry_after_s[normalized_pool] = 0.0
+            self._mark_agent_preflight_status(normalized_pool, self._agent_preflight_health.get(normalized_pool) or "pending", reason="Transport preflight recovered.")
             logger.warning("Work pool '%s' recovered after background preflight retry.", normalized_pool)
             return True
 
         self._tier_health[normalized_pool] = "error"
         self._tier_retry_after_s[normalized_pool] = now + 60.0
+        self._mark_agent_preflight_status(normalized_pool, "degraded", reason=reason or "Unknown transport preflight error.")
         logger.warning(
             "Work pool '%s' remains unavailable after background preflight retry: %s",
             normalized_pool,
@@ -1209,6 +1324,7 @@ class BackgroundWorker:
                 logger.info(f"  -> {name} work pool is reachable.")
                 self._tier_health[name] = "ok"
                 self._tier_retry_after_s[name] = 0.0
+                self._mark_agent_preflight_status(name, self._agent_preflight_health.get(name) or "pending", reason="Transport preflight succeeded; awaiting procedure preflight.")
             except Exception as e:
                 # Special case: if the trainer-agent tier is missing a cloud key,
                 # we do not necessarily want to hard-fail if the local agent tier is alive.
@@ -1216,6 +1332,7 @@ class BackgroundWorker:
                 logger.error(f"  -> {name} work pool FAILED check: {e}")
                 self._tier_health[name] = "error"
                 self._tier_retry_after_s[name] = asyncio.get_running_loop().time() + 60.0
+                self._mark_agent_preflight_status(name, "degraded", reason=f"Transport preflight failed: {e}")
                 logger.warning("Worker proceeding with work pool '%s' unavailable until its configured transport is healthy again.", name)
 
         if all(status == "error" for status in self._tier_health.values()):
@@ -1243,6 +1360,10 @@ class BackgroundWorker:
             requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
             task_filter=lambda task: (infer_work_pool_from_task(task) or default_work_pool_for_lane(infer_lane_from_task(task))) == "remote_agent",
         )
+        for work_pool in WORK_POOL_NAMES:
+            preflight_task_id = self._ensure_agent_preflight_task(work_pool)
+            if preflight_task_id:
+                await self.enqueue_with_priority(preflight_task_id, front=True)
         if not settings.get("testing_mode", False):
             replayed = await self.enqueue_runnable_tasks()
             if replayed:
@@ -1650,6 +1771,19 @@ class BackgroundWorker:
                 if self._task_is_paused(task_id):
                     lane_queue.task_done()
                     continue
+                storage = self._storage_factory()
+                try:
+                    queued_task = storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+                finally:
+                    storage.session.close()
+                if queued_task is not None and not self._is_agent_preflight_task(queued_task) and not self._work_pool_preflight_complete(normalized_work_pool):
+                    preflight_task_id = self._ensure_agent_preflight_task(normalized_work_pool)
+                    if preflight_task_id:
+                        await self.enqueue_with_priority(preflight_task_id, front=True)
+                    await self._work_pool_queue(normalized_work_pool).put(task_id)
+                    lane_queue.task_done()
+                    await asyncio.sleep(0.05)
+                    continue
 
                 self._current_task_ids[normalized_work_pool] = task_id
                 now = datetime.now(timezone.utc)
@@ -1663,12 +1797,14 @@ class BackgroundWorker:
                     "step_updated_at": now.isoformat(),
                 }
                 self._lane_step_history[normalized_work_pool] = []
+                backend_group_key = await self._acquire_backend_group_turn(normalized_work_pool)
                 self._current_processes[normalized_work_pool] = asyncio.create_task(self._run_task_cycle(task_id, lane=_lane_for_work_pool(normalized_work_pool)))
                 try:
                     await self._current_processes[normalized_work_pool]
                 except asyncio.CancelledError:
                     logger.info(f"Task process {task_id} was forced STOPPED.")
                 finally:
+                    await self._release_backend_group_turn(backend_group_key, normalized_work_pool)
                     self._current_processes[normalized_work_pool] = None
                     self._current_task_ids[normalized_work_pool] = None
                     self._lane_started_at[normalized_work_pool] = None
@@ -1765,6 +1901,7 @@ class BackgroundWorker:
 
             constraints = dict(task.constraints or {})
             desired_profile = str(context.mode or task_work_pool or "").strip()
+            is_agent_preflight = self._is_agent_preflight_task(task)
             if constraints.get("lane") != task_lane:
                 constraints["lane"] = task_lane
             if constraints.get("work_pool") != desired_profile:
@@ -1847,6 +1984,13 @@ class BackgroundWorker:
                         )
 
             if not success:
+                if is_agent_preflight:
+                    self._mark_agent_preflight_status(
+                        task_work_pool,
+                        "degraded",
+                        task_id=task.task_id,
+                        reason=str(error or "Agent preflight failed."),
+                    )
                 self._mark_lane_progress(
                     lane or context.mode,
                     step="resolution",
@@ -1958,6 +2102,13 @@ class BackgroundWorker:
                 
                 storage.commit()
             else:
+                if is_agent_preflight:
+                    self._mark_agent_preflight_status(
+                        task_work_pool,
+                        "healthy",
+                        task_id=task.task_id,
+                        reason="Agent preflight completed successfully.",
+                    )
                 # --- SUCCESS METRICS ---
                 from strata.orchestrator.worker.telemetry import record_metric
                 record_metric(
@@ -2385,6 +2536,10 @@ class BackgroundWorker:
             "work_pool": normalized_pool,
             "status": "STOPPED" if not self._running else ("PAUSED" if self._paused or _lane_for_work_pool(normalized_pool) in self._paused_lanes else ("RUNNING" if self._current_processes.get(normalized_pool) is not None else "IDLE")),
             "tier_health": self._tier_health.get(normalized_pool or "", "unknown"),
+            "preflight_health": self._agent_preflight_health.get(normalized_pool or "", "pending"),
+            "preflight_task_id": self._agent_preflight_task_ids.get(normalized_pool or ""),
+            "preflight_checked_at": self._agent_preflight_checked_at.get(normalized_pool or ""),
+            "preflight_reason": self._agent_preflight_reason.get(normalized_pool or "", ""),
             "activity_mode": "UNKNOWN",
             "activity_label": "Unknown",
             "activity_reason": "",
