@@ -136,17 +136,17 @@ def test_failed_attempt_persists_sidecar_autopsy_after_flush(monkeypatch):
 def test_root_procedure_task_expands_into_children_without_research_turn(monkeypatch):
     storage = make_storage()
     task = storage.tasks.create(
-        title="Procedure: Startup Sanity Check",
-        description="Run the startup sanity checklist.",
+        title="Procedure: Preflight",
+        description="Run the preflight checklist.",
         session_id="agent:default",
         state=TaskState.PENDING,
         type=TaskType.RESEARCH,
         constraints={
             "lane": "agent",
-            "procedure_id": "startup_sanity_check",
-            "procedure_title": "Startup Sanity Check",
+            "procedure_id": "preflight",
+            "procedure_title": "Preflight",
             "procedure_checklist": [
-                {"id": "spec_presence", "title": "Confirm the core spec files are present", "verification": "Spec files exist."},
+                {"id": "spec_presence", "title": "Confirm the core spec surfaces are present", "verification": "Spec files exist."},
                 {"id": "runtime_wiring", "title": "Confirm the split runtime wiring is present", "verification": "Runtime split exists."},
             ],
         },
@@ -185,7 +185,50 @@ def test_root_procedure_task_expands_into_children_without_research_turn(monkeyp
     assert (task.task_id, TaskState.PUSHED.value) in notifications
 
 
-def test_startup_smoke_leaf_uses_deterministic_check_without_research_turn(monkeypatch):
+def test_root_bugfix_procedure_task_expands_before_implementation(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Process Repair: verification_process",
+        description="Repair the degraded verification process.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        type=TaskType.BUG_FIX,
+        constraints={
+            "lane": "agent",
+            "procedure_id": "verification_review",
+            "procedure_title": "Verification Review",
+            "procedure_checklist": [
+                {"id": "classify_failure", "title": "Classify the verifier failure mode", "verification": "Failure mode is classified."},
+                {"id": "repair_verifier", "title": "Repair the verifier path", "verification": "Verifier logic is patched directly."},
+            ],
+        },
+    )
+    storage.commit()
+
+    enqueued = []
+
+    async def capture_enqueue(task_id, front=False):
+        enqueued.append((task_id, front))
+
+    async def should_not_run(*_args, **_kwargs):
+        raise AssertionError("root Procedure expansion should happen before any implementation turn")
+
+    monkeypatch.setattr(attempt_runner, "_run_implementation", should_not_run)
+
+    success, error, attempt = __import__("asyncio").run(
+        attempt_runner.run_attempt(task, storage, DummyModel(), _noop_notify, capture_enqueue)
+    )
+
+    assert success is True
+    assert error is None
+    assert attempt.outcome == AttemptOutcome.SUCCEEDED
+    updated_task = storage.tasks.get_by_id(task.task_id)
+    assert updated_task.state == TaskState.PUSHED
+    assert len(list(updated_task.active_child_ids or [])) == 2
+    assert all(front is True for _, front in enqueued)
+
+
+def test_preflight_leaf_uses_deterministic_check_without_research_turn(monkeypatch):
     storage = make_storage()
     task = storage.tasks.create(
         title="Procedure Step: Confirm the split runtime wiring is present",
@@ -195,8 +238,8 @@ def test_startup_smoke_leaf_uses_deterministic_check_without_research_turn(monke
         type=TaskType.RESEARCH,
         constraints={
             "lane": "agent",
-            "procedure_id": "startup_sanity_check",
-            "procedure_title": "Startup Sanity Check",
+            "procedure_id": "preflight",
+            "procedure_title": "Preflight",
             "procedure_checklist_item": {
                 "id": "runtime_wiring",
                 "title": "Confirm the split runtime wiring is present",
@@ -322,3 +365,38 @@ def test_completed_child_writes_handback_into_parent_branch_state(monkeypatch):
     children = dict(branch_state.get("children") or {})
     assert child.task_id in children
     assert children[child.task_id]["attempt_id"] == attempt.attempt_id
+
+
+def test_run_attempt_retrofits_canonical_process_repair_scaffold(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Tool Fix: resolution_analysis:procedure_step_research",
+        description="Repair the resolution-analysis path.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        type=TaskType.BUG_FIX,
+        constraints={
+            "lane": "agent",
+            "target_scope": "tooling",
+            "tool_modification_target": "resolution_analysis:procedure_step_research",
+            "tool_improvement_reason": "tool_broken",
+        },
+    )
+    storage.commit()
+
+    async def succeed(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(attempt_runner, "_run_implementation", succeed)
+
+    success, error, attempt = __import__("asyncio").run(
+        attempt_runner.run_attempt(task, storage, DummyModel(), _noop_notify, _noop_enqueue)
+    )
+
+    assert success is True
+    assert error is None
+    assert attempt.outcome == AttemptOutcome.SUCCEEDED
+    updated_task = storage.tasks.get_by_id(task.task_id)
+    assert updated_task.constraints["procedure_id"] == "process_repair"
+    assert updated_task.constraints["procedure_title"] == "Process Repair"
+    assert len(updated_task.constraints["procedure_checklist"]) == 3

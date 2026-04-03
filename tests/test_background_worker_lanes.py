@@ -529,6 +529,9 @@ def test_queue_process_repair_task_latches_open_incident(monkeypatch):
     assert enqueued == [first.task_id]
     assert incident_after is not None
     assert incident_after["metadata"]["repair_task_id"] == first.task_id
+    assert first.constraints["procedure_id"] == "verification_review"
+    assert first.constraints["procedure_title"] == "Verification Review"
+    assert len(first.constraints["procedure_checklist"]) == 3
 
 
 def test_preflight_lane_model_treats_error_status_as_failure():
@@ -652,7 +655,7 @@ def test_run_task_cycle_returns_immediately_after_decompose_handoff(monkeypatch)
         reloaded.close()
 
 
-def test_run_idle_tasks_seeds_startup_smoke_before_onboarding(monkeypatch):
+def test_run_idle_tasks_seeds_preflight_before_onboarding(monkeypatch):
     storage_factory = make_storage_factory()
     queue = asyncio.Queue()
 
@@ -666,8 +669,8 @@ def test_run_idle_tasks_seeds_startup_smoke_before_onboarding(monkeypatch):
         queued_task = storage.tasks.get_by_id(queued_task_id)
         all_tasks = storage.session.query(TaskModel).all()
         assert queued_task is not None
-        assert queued_task.title == "Procedure: Startup Sanity Check"
-        assert queued_task.constraints["procedure_id"] == "startup_sanity_check"
+        assert queued_task.title == "Procedure: Preflight"
+        assert queued_task.constraints["procedure_id"] == "preflight"
         assert not any(str(task.title).startswith("Alignment:") for task in all_tasks)
     finally:
         storage.close()
@@ -676,7 +679,7 @@ def test_run_idle_tasks_seeds_startup_smoke_before_onboarding(monkeypatch):
 def test_run_idle_tasks_allows_alignment_after_onboarding_completes(monkeypatch):
     storage_factory = make_storage_factory()
     storage = storage_factory()
-    smoke = queue_procedure(storage, None, procedure_id="startup_sanity_check", lane="agent")
+    smoke = queue_procedure(storage, None, procedure_id="preflight", lane="agent")
     smoke.state = TaskState.COMPLETE
     onboarding = queue_procedure(storage, None, procedure_id="operator_onboarding", lane="agent")
     onboarding.state = TaskState.COMPLETE

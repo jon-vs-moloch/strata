@@ -613,7 +613,7 @@ def _build_prompt_snapshot_payload(
             "preferred_start_paths": list(preferred_start_paths or []),
             "focused_guidance": _clip_lines(focused_guidance, 600),
             "handoff_context": dict(handoff_context or {}),
-            "task_graph_context": normalized_task_graph_context,
+            "task_graph_context": dict(task_graph_context or {}),
             "repo_snapshot_preview": _clip_lines(repo_snapshot, 1200),
         },
     }

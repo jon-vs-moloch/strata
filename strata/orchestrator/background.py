@@ -40,6 +40,7 @@ from strata.experimental.verifier import (
     verify_task_output,
 )
 from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
+from strata.procedures.registry import build_procedure_task_constraints
 
 logger = logging.getLogger(__name__)
 LANE_NAMES = ("trainer", "agent")
@@ -743,6 +744,45 @@ async def queue_process_repair_task(
         return existing
 
     lane = infer_lane_from_task(task)
+    procedure_id = canonical_system_procedure_id(process_name=target)
+    repair_constraints = bind_system_procedure({
+        "lane": lane,
+        "target_scope": "tooling",
+        "source_task_id": task.task_id,
+        "provenance": _provenance_record(
+            source_kind="degraded_process",
+            source_actor="background_worker",
+            authority_kind="spec_policy",
+            authority_ref="process_repair_queue",
+            derived_from=[
+                f"task:{task.task_id}",
+                f"process:{target}",
+                *([f"incident:{incident_id}"] if incident_id else []),
+            ],
+            note=reason,
+        ),
+        "tool_modification_target": target,
+        "tool_improvement_reason": "tool_broken",
+        "tool_improvement_reasoning": reason,
+        "tooling_repair_mode": "direct_or_meta_tool",
+        "target_files": [
+            "strata/experimental/verifier.py",
+            "strata/orchestrator/background.py",
+            "strata/experimental/trace_review.py",
+        ],
+        "degraded_process": target,
+        "capability_incident_id": incident_id,
+        "degraded_process_metadata": dict(metadata or {}),
+    },
+    procedure_id=procedure_id,
+    capability_kind="process",
+    capability_name=target)
+    if procedure_id:
+        repair_constraints = build_procedure_task_constraints(
+            storage,
+            procedure_id,
+            base=repair_constraints,
+        )
     repair_task = storage.tasks.create(
         title=f"Process Repair: {target}",
         description=(
@@ -755,38 +795,7 @@ async def queue_process_repair_task(
         type=TaskType.BUG_FIX,
         depth=task.depth + 1,
         priority=float(task.priority or 0.0),
-        constraints=bind_system_procedure({
-            "lane": lane,
-            "target_scope": "tooling",
-            "source_task_id": task.task_id,
-            "provenance": _provenance_record(
-                source_kind="degraded_process",
-                source_actor="background_worker",
-                authority_kind="spec_policy",
-                authority_ref="process_repair_queue",
-                derived_from=[
-                    f"task:{task.task_id}",
-                    f"process:{target}",
-                    *([f"incident:{incident_id}"] if incident_id else []),
-                ],
-                note=reason,
-            ),
-            "tool_modification_target": target,
-            "tool_improvement_reason": "tool_broken",
-            "tool_improvement_reasoning": reason,
-            "tooling_repair_mode": "direct_or_meta_tool",
-            "target_files": [
-                "strata/experimental/verifier.py",
-                "strata/orchestrator/background.py",
-                "strata/experimental/trace_review.py",
-            ],
-            "degraded_process": target,
-            "capability_incident_id": incident_id,
-            "degraded_process_metadata": dict(metadata or {}),
-        },
-        procedure_id=canonical_system_procedure_id(process_name=target),
-        capability_kind="process",
-        capability_name=target),
+        constraints=repair_constraints,
     )
     storage.commit()
     storage.tasks.add_dependency(task.task_id, repair_task.task_id)

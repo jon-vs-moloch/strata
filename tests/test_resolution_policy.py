@@ -129,6 +129,9 @@ def test_improve_tooling_marks_broken_tools_as_bug_fix():
     assert repair.title.startswith("Tool Fix:")
     assert repair.type == TaskType.BUG_FIX
     assert repair.constraints["tool_modification_target"] == "search_web"
+    assert repair.constraints["procedure_id"] == "process_repair"
+    assert repair.constraints["procedure_title"] == "Process Repair"
+    assert len(repair.constraints["procedure_checklist"]) == 3
 
 
 def test_multistage_task_deterministically_decomposes():

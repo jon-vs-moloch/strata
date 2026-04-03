@@ -382,6 +382,29 @@ def get_procedure(storage, procedure_id: str) -> Dict[str, Any]:
     return procedure
 
 
+def build_procedure_task_constraints(
+    storage,
+    procedure_id: str,
+    *,
+    base: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    procedure = get_procedure(storage, procedure_id)
+    constraints = dict(base or {})
+    constraints.update(
+        {
+            "procedure_id": procedure["procedure_id"],
+            "procedure_title": procedure.get("title"),
+            "procedure_lifecycle_state": procedure.get("lifecycle_state"),
+            "procedure_lineage_id": procedure.get("lineage_id"),
+            "procedure_summary": procedure.get("summary"),
+            "procedure_checklist": list(procedure.get("checklist") or []),
+            "procedure_repeatable": bool(procedure.get("repeatable", True)),
+            "verification_required": True,
+        }
+    )
+    return constraints
+
+
 def save_procedure(storage, definition: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _normalize_procedure(definition)
     registry = get_procedure_registry(storage)
@@ -513,17 +536,13 @@ def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[
         description=description,
         session_id=resolved_session_id,
         state=TaskState.PENDING,
-        constraints={
-            "lane": target_lane,
-            "procedure_id": procedure["procedure_id"],
-            "procedure_title": procedure.get("title"),
-            "procedure_lifecycle_state": procedure.get("lifecycle_state"),
-            "procedure_lineage_id": procedure.get("lineage_id"),
-            "procedure_summary": procedure.get("summary"),
-            "procedure_checklist": checklist,
-            "procedure_repeatable": bool(procedure.get("repeatable", True)),
-            "verification_required": True,
-        },
+        constraints=build_procedure_task_constraints(
+            storage,
+            procedure["procedure_id"],
+            base={
+                "lane": target_lane,
+            },
+        ),
         success_criteria=procedure.get("success_criteria") or {},
     )
     try:

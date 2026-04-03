@@ -11,6 +11,7 @@ from typing import Optional, List
 from strata.core.lanes import infer_lane_from_task
 from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
 from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
+from strata.procedures.registry import build_procedure_task_constraints
 from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, AttemptOutcome, TaskState, TaskType
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
@@ -701,7 +702,30 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
         improvement_reason = resolution_data.tool_improvement_reason or "unknown"
         repair_prefix, repair_type = _tool_repair_shape(improvement_reason)
         target_files = _suggest_tooling_target_files(target)
+        procedure_id = canonical_system_procedure_id(process_name=target)
         task.state = TaskState.BLOCKED
+        repair_constraints = {
+            "lane": task_lane,
+            "target_scope": "tooling",
+            "source_task_id": task.task_id,
+            "source_task_priority": float(task.priority or 0.0),
+            "tool_modification_target": target,
+            "tool_improvement_reason": improvement_reason,
+            "tool_improvement_reasoning": resolution_data.reasoning,
+            "target_files": target_files,
+            "tooling_repair_mode": "direct_or_meta_tool",
+        }
+        if procedure_id:
+            repair_constraints = build_procedure_task_constraints(
+                storage,
+                procedure_id,
+                base=bind_system_procedure(
+                    repair_constraints,
+                    procedure_id=procedure_id,
+                    capability_kind="process",
+                    capability_name=target,
+                ),
+            )
         repair_task = storage.tasks.create(
             title=f"{repair_prefix}: {target}",
             description=(
@@ -716,17 +740,7 @@ async def apply_resolution(task: TaskModel, resolution_data: AttemptResolutionSc
             type=repair_type,
             depth=task.depth + 1,
             priority=float(task.priority or 0.0),
-            constraints={
-                "lane": task_lane,
-                "target_scope": "tooling",
-                "source_task_id": task.task_id,
-                "source_task_priority": float(task.priority or 0.0),
-                "tool_modification_target": target,
-                "tool_improvement_reason": improvement_reason,
-                "tool_improvement_reasoning": resolution_data.reasoning,
-                "target_files": target_files,
-                "tooling_repair_mode": "direct_or_meta_tool",
-            },
+            constraints=repair_constraints,
         )
         storage.commit()
         storage.tasks.add_dependency(task.task_id, repair_task.task_id)

@@ -12,7 +12,12 @@ from strata.communication.primitives import build_communication_decision, delive
 from strata.core.lanes import infer_lane_from_task
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
-from strata.procedures.registry import STARTUP_SMOKE_PROCEDURE_ID, ensure_draft_procedure_for_task, record_procedure_run
+from strata.procedures.registry import (
+    STARTUP_SMOKE_PROCEDURE_ID,
+    build_procedure_task_constraints,
+    ensure_draft_procedure_for_task,
+    record_procedure_run,
+)
 from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
 from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 from strata.orchestrator.research import ResearchModule, _normalize_research_context_hints
@@ -58,6 +63,52 @@ async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> Non
 def _lineage_task_id(task: TaskModel) -> str:
     constraints = dict(getattr(task, "constraints", {}) or {})
     return str(constraints.get("lineage_root_task_id") or getattr(task, "task_id", "") or "").strip()
+
+
+def _ensure_canonical_procedure_scaffold(storage, task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    if list(constraints.get("procedure_checklist") or []):
+        return False
+
+    procedure_id = str(constraints.get("procedure_id") or "").strip()
+    bind_capability_name = ""
+    bind_capability_kind = ""
+
+    if not procedure_id:
+        tooling_target = str(
+            constraints.get("tool_modification_target")
+            or constraints.get("degraded_process")
+            or ""
+        ).strip()
+        if tooling_target:
+            procedure_id = str(canonical_system_procedure_id(process_name=tooling_target) or "").strip()
+            bind_capability_name = tooling_target
+            bind_capability_kind = "process"
+        elif getattr(task, "type", None) == TaskType.DECOMP:
+            procedure_id = str(canonical_system_procedure_id(task_type="DECOMP") or "").strip()
+            bind_capability_name = "decomposition"
+            bind_capability_kind = "procedure"
+
+    if not procedure_id:
+        return False
+
+    updated_constraints: Dict[str, Any] = dict(constraints)
+    if bind_capability_name:
+        updated_constraints = bind_system_procedure(
+            updated_constraints,
+            procedure_id=procedure_id,
+            capability_kind=bind_capability_kind,
+            capability_name=bind_capability_name,
+        )
+    updated_constraints = build_procedure_task_constraints(
+        storage,
+        procedure_id,
+        base=updated_constraints,
+    )
+    if updated_constraints == constraints:
+        return False
+    task.constraints = updated_constraints
+    return True
 
 
 def _upsert_decomposition_history_task(
@@ -1141,10 +1192,11 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
     attempt.artifacts = dict(getattr(attempt, "artifacts", {}) or {})
     attempt.evidence = dict(getattr(attempt, "evidence", {}) or {})
     constraints_updated = _ensure_procedure_item_source_hints(task)
+    procedure_scaffold_updated = _ensure_canonical_procedure_scaffold(storage, task)
     if task.state != TaskState.WORKING:
         task.state = TaskState.WORKING
     storage.commit()
-    if dependency_handoff_updated or constraints_updated or task.state == TaskState.WORKING:
+    if dependency_handoff_updated or constraints_updated or procedure_scaffold_updated or task.state == TaskState.WORKING:
         await notify_fn(task.task_id, task.state.value)
     started_at = time.perf_counter()
     step_history = []
@@ -1177,7 +1229,7 @@ async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueu
 
     try:
         execution_result = None
-        if task.type == TaskType.RESEARCH and _is_root_procedure_task(task):
+        if _is_root_procedure_task(task) and task.type != TaskType.DECOMP:
             await _expand_root_procedure_task(
                 task,
                 storage,
