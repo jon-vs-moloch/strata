@@ -226,6 +226,38 @@ def _task_trajectory_block(task_trajectory: Optional[Dict[str, Any]]) -> str:
     return "\n" + "\n".join(lines) + "\n"
 
 
+def _normalize_task_graph_context(task_graph_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = dict(task_graph_context or {})
+    if not payload:
+        return {}
+    if any(key in payload for key in ("root_title", "current_title", "lineage_path", "dag_nodes")):
+        return {
+            "root_task_id": str(payload.get("root_task_id") or "").strip(),
+            "root_title": str(payload.get("root_title") or "").strip(),
+            "current_task_id": str(payload.get("current_task_id") or "").strip(),
+            "current_title": str(payload.get("current_title") or "").strip(),
+            "lineage_path": list(payload.get("lineage_path") or []),
+            "dag_nodes": list(payload.get("dag_nodes") or []),
+            "truncated": bool(payload.get("truncated")),
+        }
+
+    trajectory = _serialize_task_trajectory(payload)
+    root = dict(trajectory.get("lineage_root") or {})
+    current = dict(trajectory.get("current_task") or {})
+    recent_path = list(trajectory.get("recent_path") or [])
+    graph_nodes = list(trajectory.get("graph_nodes") or [])
+    return {
+        "root_task_id": str(root.get("task_id") or "").strip(),
+        "root_title": str(root.get("title") or "").strip(),
+        "current_task_id": str(current.get("task_id") or "").strip(),
+        "current_title": str(current.get("title") or "").strip(),
+        "lineage_path": recent_path,
+        "dag_nodes": graph_nodes,
+        "truncated": False,
+        "handoff_summary": dict(trajectory.get("handoff_summary") or {}),
+    }
+
+
 def _normalize_research_context_hints(context_hints: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     normalized = dict(context_hints or {})
     normalized["spec_paths"] = _compact_string_list(normalized.get("spec_paths") or [], limit=8, char_limit=180)
@@ -283,6 +315,7 @@ def _build_iteration_limit_autopsy(
 ) -> Dict[str, Any]:
     warm_count = max(1, int(policy.get("warm_history_count", 5) or 5))
     warm_history = [_serialize_research_turn(message) for message in messages[-warm_count:]]
+    normalized_task_graph_context = _normalize_task_graph_context(task_graph_context)
     return {
         "failure_kind": "iteration_budget_exhausted",
         "task_description": str(task_description or ""),
@@ -580,7 +613,7 @@ def _build_prompt_snapshot_payload(
             "preferred_start_paths": list(preferred_start_paths or []),
             "focused_guidance": _clip_lines(focused_guidance, 600),
             "handoff_context": dict(handoff_context or {}),
-            "task_graph_context": dict(task_graph_context or {}),
+            "task_graph_context": normalized_task_graph_context,
             "repo_snapshot_preview": _clip_lines(repo_snapshot, 1200),
         },
     }
@@ -661,17 +694,21 @@ def _build_research_system_prompt(
         continuation_nudge = """
 [TOOL-RESULT CONTINUATION]
 - This step exists because a prior explicit step already executed one tool call and handed you the result.
+- The inherited tool result is present in this prompt right now. Do not claim you lack access to it unless it is actually absent from the prompt text.
 - Your first job is to interpret the inherited tool result, not to repeat the same tool reflexively.
 - You must choose exactly one of these outcomes:
   1. `finalize_research` immediately if the inherited result is already sufficient.
   2. Make exactly one new structured tool call if one additional bounded lookup is genuinely required.
         - Do NOT emit multiple tool calls in this step.
         - Do NOT perform a broad repo scan after inheriting a focused tool result unless you can justify why the inherited result was insufficient.
+- Before making another tool call, name the exact missing fact and why the inherited result does not already answer it.
+- If the inherited result is a spec, page, or code excerpt directly relevant to the task, the default action should be synthesis/finalization, not a fresh repo scan.
 """
-    task_graph_block = _render_task_graph_prompt_block(task_graph_context)
+    normalized_task_graph_context = _normalize_task_graph_context(task_graph_context)
+    task_graph_block = _render_task_graph_prompt_block(normalized_task_graph_context)
     research_judgment_block = _render_research_judgment_block(
         handoff_context=handoff_context,
-        task_graph_context=task_graph_context,
+        task_graph_context=normalized_task_graph_context,
     )
 
     return f"""You are an Expert Research Agent building a persistent knowledge library.
@@ -757,7 +794,8 @@ class ResearchModule:
         ).strip()
         disallow_broad_repo_scan = bool(context_hints.get("disallow_broad_repo_scan"))
         handoff_context = dict(context_hints.get("handoff_context") or {})
-        task_graph_context = dict((task_context or {}).get("task_trajectory") or {}) or _task_graph_snapshot(self.storage, task_context=task_context)
+        raw_task_graph_context = dict((task_context or {}).get("task_trajectory") or {}) or _task_graph_snapshot(self.storage, task_context=task_context)
+        task_graph_context = _normalize_task_graph_context(raw_task_graph_context)
         research_lane = infer_lane_from_session_id((task_context or {}).get("session_id"))
         research_task_type = str((task_context or {}).get("type") or "").strip() or "RESEARCH"
         research_task_id = str((task_context or {}).get("task_id") or "").strip() or None
@@ -986,7 +1024,16 @@ class ResearchModule:
             handoff_context=handoff_context,
             task_graph_context=task_graph_context,
         )
-        user_message = f"RESEARCH TASK: {task_description}\\nPlease begin your research. Call tools to gather data."
+        if handoff_context and str(handoff_context.get("source_module") or "").strip() in {"research", "implementation"}:
+            user_message = (
+                f"RESEARCH CONTINUATION TASK: {task_description}\n"
+                "You already have an inherited tool result in context. "
+                "Your first responsibility is to decide whether that inherited result is sufficient to answer the question. "
+                "If it is sufficient, call finalize_research now. "
+                "If it is not sufficient, make exactly one new bounded tool call and do not start fresh."
+            )
+        else:
+            user_message = f"RESEARCH TASK: {task_description}\\nPlease begin your research. Call tools to gather data."
         messages = [
             {
                 "role": "system",
