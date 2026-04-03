@@ -256,6 +256,38 @@ def test_background_worker_enqueue_runnable_tasks_respects_lane_and_paused_state
     assert agent_task_id not in queued
 
 
+def test_pause_task_does_not_cancel_active_attempt():
+    storage_factory = make_storage_factory()
+    storage = storage_factory()
+    task = storage.tasks.create(
+        title="Active agent task",
+        description="Continue current attempt, then pause.",
+        session_id="agent:default",
+        state=TaskState.WORKING,
+        constraints={"lane": "agent"},
+    )
+    attempt = storage.attempts.create(task_id=task.task_id)
+    storage.commit()
+    task_id = task.task_id
+    attempt_id = attempt.attempt_id
+    storage.close()
+
+    worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())
+    worker._current_task_ids["local_agent"] = task_id
+
+    assert worker.pause_task(task_id) is True
+
+    paused_storage = storage_factory()
+    paused_task = paused_storage.tasks.get_by_id(task_id)
+    paused_attempt = paused_storage.attempts.get_by_id(attempt_id)
+    assert paused_task is not None
+    assert paused_task.constraints.get("paused") is True
+    assert paused_task.state == TaskState.WORKING
+    assert paused_attempt is not None
+    assert paused_attempt.outcome is None
+    paused_storage.close()
+
+
 def test_background_worker_seeds_per_work_pool_agent_preflight():
     storage_factory = make_storage_factory()
     worker = BackgroundWorker(storage_factory=storage_factory, model_adapter=DummyModel())

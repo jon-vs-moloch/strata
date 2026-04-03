@@ -171,7 +171,7 @@ def test_runtime_admin_exposes_attempt_observability_endpoint(tmp_path):
             return 0
 
         async def wait_until_idle(self, timeout=10.0):
-            return True
+            return False
 
         def clear_queue(self):
             return 0
@@ -246,8 +246,8 @@ def test_runtime_admin_pause_aborts_inflight_and_logs_operator_action(tmp_path):
         async def enqueue_runnable_tasks(self, *_args, **_kwargs):
             return 0
 
-        async def wait_until_idle(self, timeout=10.0):
-            return True
+        async def wait_until_idle(self, timeout=10.0, lane=None):
+            return False
 
         def clear_queue(self):
             return 0
@@ -291,15 +291,15 @@ def test_runtime_admin_pause_aborts_inflight_and_logs_operator_action(tmp_path):
     payload = response.json()
     assert payload["status"] == "paused"
     assert payload["lane"] == "agent"
-    assert payload["aborted"] is True
-    assert worker.stop_calls == ["agent"]
+    assert payload["draining"] is True
+    assert worker.stop_calls == []
     assert worker.pause_calls == ["agent"]
 
     refreshed = StorageManager(session=session_factory())
     events = refreshed.parameters.peek_parameter("operator_action_log", default_value=[]) or []
     assert events[-1]["action"] == "pause_worker"
     assert events[-1]["target"] == "agent"
-    assert events[-1]["result"]["aborted"] is True
+    assert events[-1]["result"]["draining"] is True
     refreshed.close()
     storage.close()
 

@@ -1219,9 +1219,14 @@ class BackgroundWorker:
             snapshot["activity_label"] = "Stopped"
             snapshot["activity_reason"] = "Worker is offline."
         elif status == "PAUSED":
-            snapshot["activity_mode"] = "PAUSED"
-            snapshot["activity_label"] = "Paused"
-            snapshot["activity_reason"] = "Execution is paused."
+            if current_task_id:
+                snapshot["activity_mode"] = "DRAINING"
+                snapshot["activity_label"] = "Draining"
+                snapshot["activity_reason"] = "Execution is paused. Active work is finishing gracefully."
+            else:
+                snapshot["activity_mode"] = "PAUSED"
+                snapshot["activity_label"] = "Paused"
+                snapshot["activity_reason"] = "Execution is paused."
         elif tier_health == "error":
             snapshot["activity_mode"] = "OFFLINE"
             snapshot["activity_label"] = "Offline"
@@ -2449,19 +2454,14 @@ class BackgroundWorker:
         return cancelled
 
     def pause_task(self, task_id: str) -> bool:
+        active_task_ids = {item for item in self._current_task_ids.values() if item}
+        is_active = task_id in active_task_ids
         updated = self._update_task_control_state(
             task_id,
             paused=True,
-            state=TaskState.PENDING,
-            attempt_outcome=AttemptOutcome.CANCELLED if task_id in {item for item in self._current_task_ids.values() if item} else None,
-            reason="Paused by operator.",
+            state=None if is_active else TaskState.PENDING,
         )
-        if not updated:
-            return False
-        for lane_name, current_task_id in self._current_task_ids.items():
-            if current_task_id == task_id and self._current_processes.get(lane_name):
-                self._current_processes[lane_name].cancel()
-        return True
+        return bool(updated)
 
     async def resume_task(self, task_id: str) -> bool:
         updated = self._update_task_control_state(
@@ -2635,9 +2635,14 @@ class BackgroundWorker:
             snapshot["activity_label"] = "Stopped"
             snapshot["activity_reason"] = "Worker is offline."
         elif status == "PAUSED":
-            snapshot["activity_mode"] = "PAUSED"
-            snapshot["activity_label"] = "Paused"
-            snapshot["activity_reason"] = "Execution is paused."
+            if current_task_id:
+                snapshot["activity_mode"] = "DRAINING"
+                snapshot["activity_label"] = "Draining"
+                snapshot["activity_reason"] = "Execution is paused. Active work is finishing gracefully."
+            else:
+                snapshot["activity_mode"] = "PAUSED"
+                snapshot["activity_label"] = "Paused"
+                snapshot["activity_reason"] = "Execution is paused."
         elif tier_health == "error":
             snapshot["activity_mode"] = "OFFLINE"
             snapshot["activity_label"] = "Offline"

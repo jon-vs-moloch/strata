@@ -716,9 +716,9 @@ def register_runtime_admin_routes(
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
-        aborted = worker.stop_current(normalized_lane)
         worker.pause(normalized_lane)
-        response = {"status": "paused", "lane": normalized_lane, "aborted": bool(aborted)}
+        draining = not await worker.wait_until_idle(timeout=0.05, lane=normalized_lane)
+        response = {"status": "paused", "lane": normalized_lane, "draining": bool(draining)}
         _append_operator_action(
             storage,
             action="pause_worker",
