@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from strata.core.lanes import normalize_lane
+from strata.core.lanes import normalize_lane, normalize_work_pool, VALID_WORK_POOLS
 from strata.orchestrator.worker.runtime_ipc import (
     append_worker_command,
     default_worker_status,
@@ -55,26 +55,41 @@ class ExternalWorkerHandle:
     async def enqueue(self, task_id: str):
         append_worker_command("enqueue", task_id=str(task_id))
 
-    def pause(self, lane: str | None = None):
-        append_worker_command("pause_worker", lane=normalize_lane(lane))
+    def pause(self, lane: str | None = None, work_pool: str | None = None):
+        append_worker_command("pause_worker", lane=normalize_lane(lane), work_pool=normalize_work_pool(work_pool))
 
-    def resume(self, lane: str | None = None):
-        append_worker_command("resume_worker", lane=normalize_lane(lane))
+    def resume(self, lane: str | None = None, work_pool: str | None = None):
+        append_worker_command("resume_worker", lane=normalize_lane(lane), work_pool=normalize_work_pool(work_pool))
 
-    def stop_current(self, lane: str | None = None):
-        append_worker_command("stop_worker", lane=normalize_lane(lane))
+    def stop_current(self, lane: str | None = None, work_pool: str | None = None):
+        append_worker_command("stop_worker", lane=normalize_lane(lane), work_pool=normalize_work_pool(work_pool))
         return True
 
-    async def wait_until_idle(self, timeout: float = 5.0, lane: Optional[str] = None) -> bool:
+    async def wait_until_idle(self, timeout: float = 5.0, lane: Optional[str] = None, work_pool: Optional[str] = None) -> bool:
         normalized_lane = normalize_lane(lane)
+        normalized_work_pool = normalize_work_pool(work_pool)
         deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout))
         while asyncio.get_running_loop().time() < deadline:
             status = self.status
-            if normalized_lane:
+            if normalized_work_pool:
+                details = dict((status.get("work_pools") or {}).get(normalized_work_pool) or {})
+                if not details.get("current_task_id") and not int(details.get("queue_depth") or 0):
+                    return True
+            elif normalized_lane:
                 details = dict((status.get("lane_details") or {}).get(normalized_lane) or {})
                 if not details.get("current_task_id") and not int(details.get("queue_depth") or 0):
                     return True
             else:
+                work_pool_details = dict(status.get("work_pools") or {})
+                if work_pool_details:
+                    if all(
+                        not dict(work_pool_details.get(name) or {}).get("current_task_id")
+                        and not int(dict(work_pool_details.get(name) or {}).get("queue_depth") or 0)
+                        for name in VALID_WORK_POOLS
+                    ):
+                        return True
+                    await asyncio.sleep(0.1)
+                    continue
                 lane_details = dict(status.get("lane_details") or {})
                 if all(
                     not dict(lane_details.get(name) or {}).get("current_task_id")
@@ -108,4 +123,3 @@ class ExternalWorkerHandle:
     async def replay_task(self, task_id: str) -> bool:
         append_worker_command("replay_task", task_id=str(task_id))
         return True
-

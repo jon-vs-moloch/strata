@@ -233,20 +233,20 @@ def test_runtime_admin_pause_aborts_inflight_and_logs_operator_action(tmp_path):
             self.pause_calls = []
             self.stop_calls = []
 
-        def pause(self, lane=None):
-            self.pause_calls.append(lane)
+        def pause(self, lane=None, work_pool=None):
+            self.pause_calls.append({"lane": lane, "work_pool": work_pool})
 
         def resume(self, *_args, **_kwargs):
             return None
 
-        def stop_current(self, lane=None):
-            self.stop_calls.append(lane)
+        def stop_current(self, lane=None, work_pool=None):
+            self.stop_calls.append({"lane": lane, "work_pool": work_pool})
             return True
 
         async def enqueue_runnable_tasks(self, *_args, **_kwargs):
             return 0
 
-        async def wait_until_idle(self, timeout=10.0, lane=None):
+        async def wait_until_idle(self, timeout=10.0, lane=None, work_pool=None):
             return False
 
         def clear_queue(self):
@@ -293,7 +293,7 @@ def test_runtime_admin_pause_aborts_inflight_and_logs_operator_action(tmp_path):
     assert payload["lane"] == "agent"
     assert payload["draining"] is True
     assert worker.stop_calls == []
-    assert worker.pause_calls == ["agent"]
+    assert worker.pause_calls == [{"lane": "agent", "work_pool": None}]
 
     refreshed = StorageManager(session=session_factory())
     events = refreshed.parameters.peek_parameter("operator_action_log", default_value=[]) or []

@@ -969,6 +969,7 @@ class BackgroundWorker:
         self._running = False
         self._paused = False
         self._paused_lanes: set[str] = set()
+        self._paused_work_pools: set[str] = set()
         self._current_processes: Dict[str, Optional[asyncio.Task]] = {pool: None for pool in WORK_POOL_NAMES}
         self._current_task_ids: Dict[str, Optional[str]] = {pool: None for pool in WORK_POOL_NAMES}
         self._lane_started_at: Dict[str, Optional[datetime]] = {pool: None for pool in WORK_POOL_NAMES}
@@ -1552,16 +1553,22 @@ class BackgroundWorker:
             str(getattr(task, "task_id", "") or ""),
         )
 
-    async def wait_until_idle(self, timeout: float = 5.0, lane: Optional[str] = None) -> bool:
+    async def wait_until_idle(self, timeout: float = 5.0, lane: Optional[str] = None, work_pool: Optional[str] = None) -> bool:
         normalized_lane = normalize_lane(lane)
+        normalized_work_pool = normalize_work_pool(work_pool)
         deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout))
         while asyncio.get_running_loop().time() < deadline:
-            if normalized_lane:
+            if normalized_work_pool:
+                if self._current_processes.get(normalized_work_pool) is None:
+                    return True
+            elif normalized_lane:
                 if all(self._current_processes.get(pool) is None for pool in _work_pools_for_lane(normalized_lane)):
                     return True
             elif all(process is None for process in self._current_processes.values()):
                 return True
             await asyncio.sleep(0.05)
+        if normalized_work_pool:
+            return self._current_processes.get(normalized_work_pool) is None
         if normalized_lane:
             return all(self._current_processes.get(pool) is None for pool in _work_pools_for_lane(normalized_lane))
         return all(process is None for process in self._current_processes.values())
@@ -1751,7 +1758,11 @@ class BackgroundWorker:
         lane_queue = self._work_pool_queue(normalized_work_pool)
         idle_ticks = 0
         while self._running:
-            if self._paused or _lane_for_work_pool(normalized_work_pool) in self._paused_lanes:
+            if (
+                self._paused
+                or _lane_for_work_pool(normalized_work_pool) in self._paused_lanes
+                or normalized_work_pool in self._paused_work_pools
+            ):
                 await asyncio.sleep(0.5)
                 continue
             if self._tier_health.get(normalized_work_pool) == "error":
@@ -1768,7 +1779,10 @@ class BackgroundWorker:
                     lane_queue.task_done()
                     await asyncio.sleep(0.05)
                     continue
-                if task_work_pool and _lane_for_work_pool(task_work_pool) in self._paused_lanes:
+                if task_work_pool and (
+                    _lane_for_work_pool(task_work_pool) in self._paused_lanes
+                    or normalize_work_pool(task_work_pool) in self._paused_work_pools
+                ):
                     await self._work_pool_queue(task_work_pool).put(task_id)
                     lane_queue.task_done()
                     await asyncio.sleep(0.1)
@@ -2422,21 +2436,36 @@ class BackgroundWorker:
         finally:
             storage.session.close()
 
-    def pause(self, lane: Optional[str] = None):
+    def pause(self, lane: Optional[str] = None, work_pool: Optional[str] = None):
+        normalized_work_pool = normalize_work_pool(work_pool)
+        if normalized_work_pool:
+            self._paused_work_pools.add(normalized_work_pool)
+            return
         normalized_lane = normalize_lane(lane)
         if normalized_lane:
             self._paused_lanes.add(normalized_lane)
             return
         self._paused = True
 
-    def resume(self, lane: Optional[str] = None):
+    def resume(self, lane: Optional[str] = None, work_pool: Optional[str] = None):
+        normalized_work_pool = normalize_work_pool(work_pool)
+        if normalized_work_pool:
+            self._paused_work_pools.discard(normalized_work_pool)
+            return
         normalized_lane = normalize_lane(lane)
         if normalized_lane:
             self._paused_lanes.discard(normalized_lane)
             return
         self._paused = False
 
-    def stop_current(self, lane: Optional[str] = None):
+    def stop_current(self, lane: Optional[str] = None, work_pool: Optional[str] = None):
+        normalized_work_pool = normalize_work_pool(work_pool)
+        if normalized_work_pool:
+            process = self._current_processes.get(normalized_work_pool)
+            if process:
+                process.cancel()
+                return True
+            return False
         normalized_lane = normalize_lane(lane)
         if normalized_lane:
             cancelled = False
@@ -2518,6 +2547,8 @@ class BackgroundWorker:
             return "STOPPED"
         if self._paused or normalized_lane in self._paused_lanes:
             return "PAUSED"
+        if any(pool in self._paused_work_pools for pool in _work_pools_for_lane(normalized_lane)):
+            return "PAUSED"
         if self._current_processes.get(normalized_lane) is not None:
             return "RUNNING"
         legacy_queues = getattr(self, "_queues", None) or {}
@@ -2534,7 +2565,7 @@ class BackgroundWorker:
         normalized_pool = normalize_work_pool(work_pool)
         snapshot: Dict[str, object] = {
             "work_pool": normalized_pool,
-            "status": "STOPPED" if not self._running else ("PAUSED" if self._paused or _lane_for_work_pool(normalized_pool) in self._paused_lanes else ("RUNNING" if self._current_processes.get(normalized_pool) is not None else "IDLE")),
+            "status": "STOPPED" if not self._running else ("PAUSED" if self._paused or _lane_for_work_pool(normalized_pool) in self._paused_lanes or normalized_pool in self._paused_work_pools else ("RUNNING" if self._current_processes.get(normalized_pool) is not None else "IDLE")),
             "tier_health": self._tier_health.get(normalized_pool or "", "unknown"),
             "preflight_health": self._agent_preflight_health.get(normalized_pool or "", "pending"),
             "preflight_task_id": self._agent_preflight_task_ids.get(normalized_pool or ""),
@@ -2707,6 +2738,7 @@ class BackgroundWorker:
             "worker": "STOPPED" if not self._running else ("PAUSED" if self._paused else "RUNNING"),
             "global_paused": self._paused,
             "paused_lanes": sorted(self._paused_lanes),
+            "paused_work_pools": sorted(self._paused_work_pools),
             "tiers": {
                 "trainer": self._lane_health("trainer"),
                 "agent": self._lane_health("agent"),

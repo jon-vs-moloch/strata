@@ -35,6 +35,7 @@ const TRANSPORT_FRIENDLY_NAMES = {
 };
 
 const CHAT_LANES = ['trainer', 'agent'];
+const WORK_POOL_SCOPES = ['trainer', 'local_agent', 'remote_agent'];
 
 const defaultSessionIdForLane = (lane) => `${lane}:default`;
 const draftSessionIdForLane = (lane) => `${lane}:draft-${Date.now()}`;
@@ -90,6 +91,42 @@ const laneForTask = (task) => {
   const explicitLane = normalizeLaneKey(task?.lane);
   if (explicitLane) return explicitLane;
   return laneForSessionId(task?.session_id);
+};
+
+const workPoolForTask = (task) => {
+  const constraints = task?.constraints && typeof task.constraints === 'object' ? task.constraints : {};
+  const explicit = String(
+    task?.work_pool
+      || task?.execution_profile
+      || constraints.work_pool
+      || constraints.execution_profile
+      || ''
+  ).trim().toLowerCase();
+  if (explicit === 'trainer' || explicit === 'local_agent' || explicit === 'remote_agent') return explicit;
+  return laneForTask(task) === 'trainer' ? 'trainer' : 'local_agent';
+};
+
+const scopeToLane = (scope) => {
+  const normalized = String(scope || '').trim().toLowerCase();
+  if (normalized === 'trainer') return 'trainer';
+  if (normalized === 'local_agent' || normalized === 'remote_agent' || normalized === 'agent') return 'agent';
+  return 'trainer';
+};
+
+const matchesScope = (task, scope) => {
+  if (scope === 'home') return true;
+  if (scope === 'trainer' || scope === 'local_agent' || scope === 'remote_agent') {
+    return workPoolForTask(task) === scope;
+  }
+  return laneForTask(task) === scopeToLane(scope);
+};
+
+const scopeLabel = (scope) => {
+  if (scope === 'local_agent') return 'Local Agent';
+  if (scope === 'remote_agent') return 'Remote Agent';
+  if (scope === 'trainer') return 'Trainer';
+  if (scope === 'home') return 'Strata Home';
+  return 'Agent';
 };
 
 const normalizeLaneStatusMap = (raw) => {
@@ -1229,6 +1266,8 @@ function App() {
     home: null,
     trainer: defaultSessionIdForLane('trainer'),
     agent: defaultSessionIdForLane('agent'),
+    local_agent: defaultSessionIdForLane('agent'),
+    remote_agent: defaultSessionIdForLane('agent'),
   });
   const [sessionList, setSessionList] = useState([]);
   const [activeNav, setActiveNav]     = useState('chat');   // 'chat' | 'tasks' | 'history' | 'knowledge' | 'procedures' | 'workbench' | 'dashboard' | 'settings'
@@ -1253,10 +1292,11 @@ function App() {
   const [workPoolDetails, setWorkPoolDetails] = useState(normalizeWorkPoolDetailMap(null));
   const [globalPaused, setGlobalPaused] = useState(false);
   const [pausedLanes, setPausedLanes] = useState([]);
+  const [pausedWorkPools, setPausedWorkPools] = useState([]);
   const [rebooting, setRebooting] = useState(false);
   const [reconnectingBackend, setReconnectingBackend] = useState(false);
   const [desiredGlobalEnabled, setDesiredGlobalEnabled] = useState(true);
-  const [desiredLaneEnabled, setDesiredLaneEnabled] = useState({ trainer: true, agent: true });
+  const [desiredWorkPoolEnabled, setDesiredWorkPoolEnabled] = useState({ trainer: true, local_agent: true, remote_agent: true });
   const [telemetry, setTelemetry] = useState(null);
   const [providerTelemetry, setProviderTelemetry] = useState({});
   const [dashboard, setDashboard] = useState(null);
@@ -1305,10 +1345,10 @@ function App() {
 
   const [tiers, setTiers] = useState({ trainer: 'unknown', agent: 'unknown' });
   const [showCloudModal, setShowCloudModal] = useState(false);
-  const sessionId = scopeSessionIds[currentScope] || (currentScope === 'home' ? null : defaultSessionIdForLane(currentScope));
+  const sessionId = scopeSessionIds[currentScope] || (currentScope === 'home' ? null : defaultSessionIdForLane(scopeToLane(currentScope)));
   const effectiveLane = currentScope === 'home'
     ? (sessionId ? laneForSessionId(sessionId) : chatLane)
-    : currentScope;
+    : scopeToLane(currentScope);
   const isDraftSession = isDraftSessionId(sessionId);
   const currentDraft = Object.values(laneDrafts).flat().find((draft) => draft?.session_id === sessionId) || null;
   const activeChatRoute = routingSummary?.[effectiveLane] || routingSummary?.chat || null;
@@ -1404,11 +1444,12 @@ function App() {
   useEffect(() => {
     if (workerApiStatus !== 'ok') return;
     setDesiredGlobalEnabled(workerStatus !== 'PAUSED' && workerStatus !== 'STOPPED');
-    setDesiredLaneEnabled({
+    setDesiredWorkPoolEnabled({
       trainer: !pausedLanes.includes('trainer'),
-      agent: !pausedLanes.includes('agent'),
+      local_agent: !pausedWorkPools.includes('local_agent') && !pausedLanes.includes('agent'),
+      remote_agent: !pausedWorkPools.includes('remote_agent') && !pausedLanes.includes('agent'),
     });
-  }, [pausedLanes, workerApiStatus, workerStatus]);
+  }, [pausedLanes, pausedWorkPools, workerApiStatus, workerStatus]);
 
   useEffect(() => {
     setOpenReactionMenuId('');
@@ -1445,6 +1486,7 @@ function App() {
         setWorkerStatus(res.data.status.worker);
         setGlobalPaused(Boolean(res.data.status.global_paused));
         setPausedLanes(Array.isArray(res.data.status.paused_lanes) ? res.data.status.paused_lanes.map(normalizeLaneKey).filter(Boolean) : []);
+        setPausedWorkPools(Array.isArray(res.data.status.paused_work_pools) ? res.data.status.paused_work_pools : []);
         const nextLaneStatuses = normalizeLaneStatusMap(res.data.status.lanes);
         const nextLaneDetails = normalizeLaneDetailMap(res.data.status.lane_details);
         const nextWorkPoolDetails = normalizeWorkPoolDetailMap(res.data.status.work_pools);
@@ -1526,16 +1568,26 @@ function App() {
     }
   };
 
-  const handlePause = async (lane = null) => {
+  const handlePause = async (target = null) => {
     try {
-      await axios.post(`${API}/admin/worker/pause`, null, lane ? { params: { lane } } : undefined);
+      const params = target?.workPool
+        ? { work_pool: target.workPool }
+        : target?.lane
+        ? { lane: target.lane }
+        : undefined;
+      await axios.post(`${API}/admin/worker/pause`, null, params ? { params } : undefined);
       await fetchWorkerStatus();
     } catch (e) { console.error(e); }
   };
 
-  const handleResume = async (lane = null) => {
+  const handleResume = async (target = null) => {
     try {
-      await axios.post(`${API}/admin/worker/resume`, null, lane ? { params: { lane } } : undefined);
+      const params = target?.workPool
+        ? { work_pool: target.workPool }
+        : target?.lane
+        ? { lane: target.lane }
+        : undefined;
+      await axios.post(`${API}/admin/worker/resume`, null, params ? { params } : undefined);
       await fetchWorkerStatus();
     } catch (e) { console.error(e); }
   };
@@ -2621,7 +2673,8 @@ function App() {
   ];
   const topTabs = [
     { id: 'home', label: 'Global', subtitle: 'System-wide view and controls', accent: 'neutral' },
-    { id: 'agent', label: 'Agent', subtitle: 'Agent-model execution instance', accent: 'agent' },
+    { id: 'local_agent', label: 'Local Agent', subtitle: 'Local worker execution instance', accent: 'agent' },
+    { id: 'remote_agent', label: 'Remote Agent', subtitle: 'Cloud worker execution instance', accent: 'agent' },
     { id: 'trainer', label: 'Trainer', subtitle: 'Bootstrap / supervision instance', accent: 'trainer' },
   ];
 
@@ -2630,21 +2683,20 @@ function App() {
   const laneCurrentTaskTitles = React.useMemo(() => {
     const byId = new Map(tasks.map((task) => [task.id, stripInlineMarkdown(task.title || '')]));
     return {
-      trainer: byId.get(laneDetails?.trainer?.current_task_id) || '',
-      agent: byId.get(laneDetails?.agent?.current_task_id) || '',
+      trainer: byId.get(workPoolDetails?.trainer?.current_task_id || laneDetails?.trainer?.current_task_id) || '',
+      local_agent: byId.get(workPoolDetails?.local_agent?.current_task_id) || '',
+      remote_agent: byId.get(workPoolDetails?.remote_agent?.current_task_id) || '',
     };
-  }, [laneDetails, tasks]);
+  }, [laneDetails, workPoolDetails, tasks]);
   const scopeFilterLane = currentScope === 'home' ? null : effectiveLane;
   const scopedActiveTaskTree = scopeFilterLane
     ? activeTaskTree.filter((task) => {
-        const lane = laneForTask(task);
-        return !lane || lane === scopeFilterLane;
+        return matchesScope(task, currentScope);
       })
     : activeTaskTree;
   const scopedFinishedTaskTree = scopeFilterLane
     ? finishedTaskTree.filter((task) => {
-        const lane = laneForTask(task);
-        return !lane || lane === scopeFilterLane;
+        return matchesScope(task, currentScope);
       })
     : finishedTaskTree;
   const scopedQueuedTaskTree = React.useMemo(
@@ -2794,14 +2846,16 @@ function App() {
   };
   const getFocusedTaskPath = (scopeId) => {
     if (scopeId === 'home') return [];
-    const laneTaskId = String(laneDetails?.[scopeId]?.current_task_id || '').trim();
+    const scopeDetail = WORK_POOL_SCOPES.includes(scopeId)
+      ? (workPoolDetails?.[scopeId] || defaultLaneDetail)
+      : (laneDetails?.[scopeId] || defaultLaneDetail);
+    const laneTaskId = String(scopeDetail?.current_task_id || '').trim();
     if (laneTaskId) {
       const livePath = findTaskPathById(fullTaskTree, laneTaskId);
       if (livePath.length) return livePath;
     }
     const scopedTree = activeTaskTree.filter((task) => {
-      const lane = laneForTask(task);
-      return !lane || lane === scopeId;
+      return matchesScope(task, scopeId);
     });
     const root = pickFocusedTask(scopedTree);
     if (!root) return [];
@@ -2820,12 +2874,13 @@ function App() {
     if (scopeId === 'home') {
       const scopedTasks = tasks;
       const trainerActive = tasks.some((task) => laneForTask(task) === 'trainer' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
-      const agentActive = tasks.some((task) => laneForTask(task) === 'agent' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
+      const localActive = tasks.some((task) => workPoolForTask(task) === 'local_agent' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
+      const remoteActive = tasks.some((task) => workPoolForTask(task) === 'remote_agent' && !['complete', 'abandoned', 'cancelled'].includes(task.status));
       const blocked = scopedTasks.filter((task) => task.status === 'blocked').length;
       const working = scopedTasks.filter((task) => task.status === 'working').length;
-      const activeLanes = [trainerActive, agentActive].filter(Boolean).length;
+      const activeLanes = [trainerActive, localActive, remoteActive].filter(Boolean).length;
       return {
-        percent: activeLanes === 0 ? 0 : Math.round(((trainerActive ? 1 : 0) + (agentActive ? 1 : 0)) / 2 * 100),
+        percent: activeLanes === 0 ? 0 : Math.round(((trainerActive ? 1 : 0) + (localActive ? 1 : 0) + (remoteActive ? 1 : 0)) / 3 * 100),
         summary: `${activeLanes || 0} active lane${activeLanes === 1 ? '' : 's'}`,
         currentTitle: blocked > 0 ? `${blocked} blocked` : working > 0 ? `${working} working` : 'Idle',
         label: blocked > 0 ? `${blocked} blocked` : working > 0 ? `${working} working` : 'Idle',
@@ -2835,12 +2890,14 @@ function App() {
       };
     }
 
-    const laneDetail = scopeId === 'home' ? null : (laneDetails?.[scopeId] || defaultLaneDetail);
+    const laneDetail = scopeId === 'home'
+      ? null
+      : (WORK_POOL_SCOPES.includes(scopeId) ? (workPoolDetails?.[scopeId] || defaultLaneDetail) : (laneDetails?.[scopeId] || defaultLaneDetail));
     const laneTaskId = String(laneDetail?.current_task_id || '').trim();
     const path = laneTaskId ? findTaskPathById(fullTaskTree, laneTaskId) : [];
     const root = path[0];
     if (!root) {
-      const blocked = tasks.filter((task) => laneForTask(task) === scopeId && task.status === 'blocked').length;
+      const blocked = tasks.filter((task) => matchesScope(task, scopeId) && task.status === 'blocked').length;
       const laneMode = String(laneDetail?.activity_mode || '').trim().toUpperCase();
       const stalledReason = String(laneDetail?.step_detail || laneDetail?.step_label || '').trim();
       const laneTaskTitle = String(laneCurrentTaskTitles?.[scopeId] || laneDetail?.current_task_title || '').trim();
@@ -2954,12 +3011,12 @@ function App() {
     if (scopeId === 'home') {
       return buildScopeTaskProgress('home');
     }
-    const laneDetail = laneDetails?.[scopeId] || defaultLaneDetail;
-    const laneMode = String(laneDetail?.activity_mode || laneStatuses?.[scopeId] || '').trim().toUpperCase();
+    const laneDetail = WORK_POOL_SCOPES.includes(scopeId) ? (workPoolDetails?.[scopeId] || defaultLaneDetail) : (laneDetails?.[scopeId] || defaultLaneDetail);
+    const laneMode = String(laneDetail?.activity_mode || laneDetail?.status || laneStatuses?.[scopeId] || '').trim().toUpperCase();
     const activeTaskId = String(laneDetail?.current_task_id || '').trim();
     const resolvedLivePath = activeTaskId ? findTaskPathById(fullTaskTree, activeTaskId) : [];
     const livePath = resolvedLivePath.length ? resolvedLivePath : getFocusedTaskPath(scopeId);
-    const laneTasks = tasks.filter((task) => laneForTask(task) === scopeId);
+    const laneTasks = tasks.filter((task) => matchesScope(task, scopeId));
     const blocked = laneTasks.filter((task) => task.status === 'blocked').length;
     const working = laneTasks.filter((task) => task.status === 'working').length;
     const pending = laneTasks.filter((task) => task.status === 'pending').length;
@@ -3037,7 +3094,7 @@ function App() {
   }, [activeNav, currentScope, visibleTaskTree, activeTaskTree, laneDetails, fullTaskTree]);
   const loopMeta = routingSummary?.supervision?.active_jobs?.length
     ? `${routingSummary.supervision.active_jobs.length} active bootstrap job${routingSummary.supervision.active_jobs.length > 1 ? 's' : ''}`
-    : `trainer ${String(laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · agent ${String(laneDetails?.agent?.activity_label || 'Idle').toLowerCase()}`;
+    : `trainer ${String(workPoolDetails?.trainer?.activity_label || laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · local ${String(workPoolDetails?.local_agent?.activity_label || 'Idle').toLowerCase()} · remote ${String(workPoolDetails?.remote_agent?.activity_label || 'Idle').toLowerCase()}`;
 
   return (
     <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw', background: '#0a0a0c', fontFamily: "'Outfit', sans-serif" }}>
@@ -3171,16 +3228,17 @@ function App() {
               );
             })}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px', width: '100%', minWidth: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '12px', width: '100%', minWidth: 0 }}>
           {topTabs.map((tab) => {
             const active = currentScope === tab.id;
             const showGlobalControls = tab.id === 'home';
-            const isLane = tab.id === 'trainer' || tab.id === 'agent';
+            const isWorkPool = tab.id === 'trainer' || tab.id === 'local_agent' || tab.id === 'remote_agent';
             const progress = buildTopScopeCardProgress(tab.id);
+            const poolDetail = isWorkPool ? (workPoolDetails?.[tab.id] || defaultLaneDetail) : defaultLaneDetail;
             const agentEnabled = tab.id === 'home'
               ? desiredGlobalEnabled
-              : desiredLaneEnabled[tab.id];
-            const agentSuppressedByGlobal = isLane && globalPaused;
+              : desiredWorkPoolEnabled[tab.id];
+            const agentSuppressedByGlobal = isWorkPool && globalPaused;
             return (
               <TopModeTab
                 key={tab.id}
@@ -3189,41 +3247,41 @@ function App() {
                 active={active}
                 detail={tab.id === 'home' ? loopMeta : buildLaneMeta(tab.id)}
                 tickerItems={tab.id === 'home'
-                  ? [...(laneDetails?.trainer?.ticker_items || []), ...(laneDetails?.agent?.ticker_items || [])].slice(-10)
-                  : (laneDetails?.[tab.id]?.ticker_items || [])}
-                status={tab.id === 'home' ? workerStatus : (laneDetails?.[tab.id]?.activity_mode || laneStatuses?.[tab.id] || 'IDLE')}
+                  ? [...(workPoolDetails?.trainer?.ticker_items || []), ...(workPoolDetails?.local_agent?.ticker_items || []), ...(workPoolDetails?.remote_agent?.ticker_items || [])].slice(-10)
+                  : (poolDetail?.ticker_items || [])}
+                status={tab.id === 'home' ? workerStatus : (poolDetail?.activity_mode || poolDetail?.status || 'IDLE')}
                 agentEnabled={agentEnabled}
                 agentSuppressedByGlobal={agentSuppressedByGlobal}
                 apiStatus={workerApiStatus}
-                showControls={isLane || showGlobalControls}
+                showControls={isWorkPool || showGlobalControls}
                 progress={progress}
                 toggleChecked={Boolean(agentEnabled)}
                 togglePending={tab.id === 'home' ? reconnectingBackend : false}
                 onPause={showGlobalControls ? (() => {
                   setDesiredGlobalEnabled(false);
                   void handlePause();
-                }) : (isLane ? (() => {
-                  setDesiredLaneEnabled((prev) => ({ ...prev, [tab.id]: false }));
-                  void handlePause(tab.id);
+                }) : (isWorkPool ? (() => {
+                  setDesiredWorkPoolEnabled((prev) => ({ ...prev, [tab.id]: false }));
+                  void handlePause({ workPool: tab.id });
                 }) : undefined)}
                 onResume={showGlobalControls ? (() => {
                   setDesiredGlobalEnabled(true);
                   void handleResume();
-                }) : (isLane ? (() => {
-                  setDesiredLaneEnabled((prev) => ({ ...prev, [tab.id]: true }));
-                  void handleResume(tab.id);
+                }) : (isWorkPool ? (() => {
+                  setDesiredWorkPoolEnabled((prev) => ({ ...prev, [tab.id]: true }));
+                  void handleResume({ workPool: tab.id });
                 }) : undefined)}
                 onReconnect={showGlobalControls ? (() => { void handleReconnect(); }) : undefined}
-                onPauseTask={isLane ? (() => handlePauseTask(progress?.taskId)) : undefined}
-                onResumeTask={isLane ? (() => handleResumeTask(progress?.taskId)) : undefined}
-                onStopTask={isLane ? (() => handleStopTask(progress?.taskId)) : undefined}
+                onPauseTask={isWorkPool ? (() => handlePauseTask(progress?.taskId)) : undefined}
+                onResumeTask={isWorkPool ? (() => handleResumeTask(progress?.taskId)) : undefined}
+                onStopTask={isWorkPool ? (() => handleStopTask(progress?.taskId)) : undefined}
                 onClick={() => {
                   if (tab.id === 'home') {
                     setCurrentScope('home');
                     setScopeSessionIds((prev) => ({ ...prev, home: prev.home || sessionId }));
                     return;
                   }
-                  setChatLane(tab.id);
+                  setChatLane(scopeToLane(tab.id));
                   setCurrentScope(tab.id);
                   setMessages([]);
                   setSendError('');
@@ -3365,17 +3423,17 @@ function App() {
             ) : (
               <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'white' }}>
                 {activeNav === 'dashboard'
-                  ? (currentScope === 'home' ? 'Strata Home' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Dashboard`)
+                  ? (currentScope === 'home' ? 'Strata Home' : `${scopeLabel(currentScope)} Dashboard`)
                   : activeNav === 'history'
-                  ? (currentScope === 'home' ? 'History' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} History`)
+                  ? (currentScope === 'home' ? 'History' : `${scopeLabel(currentScope)} History`)
                   : activeNav === 'tasks'
-                  ? (currentScope === 'home' ? 'Tasks' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Tasks`)
+                  ? (currentScope === 'home' ? 'Tasks' : `${scopeLabel(currentScope)} Tasks`)
                   : activeNav === 'knowledge'
-                  ? (currentScope === 'home' ? 'Knowledge Base' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Knowledge`)
+                  ? (currentScope === 'home' ? 'Knowledge Base' : `${scopeLabel(currentScope)} Knowledge`)
                 : activeNav === 'procedures'
-                  ? (currentScope === 'home' ? 'Procedures' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Procedures`)
+                  ? (currentScope === 'home' ? 'Procedures' : `${scopeLabel(currentScope)} Procedures`)
                   : activeNav === 'workbench'
-                  ? (currentScope === 'home' ? 'Workbench' : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} Workbench`)
+                  ? (currentScope === 'home' ? 'Workbench' : `${scopeLabel(currentScope)} Workbench`)
                   : 'Settings'}
               </h1>
             )}

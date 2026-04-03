@@ -710,59 +710,74 @@ def register_runtime_admin_routes(
         return {"status": worker.status}
 
     @app.post("/admin/worker/pause")
-    async def pause_worker(lane: str | None = None, storage=Depends(get_storage)):
+    async def pause_worker(lane: str | None = None, work_pool: str | None = None, storage=Depends(get_storage)):
         normalized_lane = normalize_lane(lane)
+        normalized_work_pool = normalize_work_pool(work_pool)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
-        worker.pause(normalized_lane)
-        draining = not await worker.wait_until_idle(timeout=0.05, lane=normalized_lane)
-        response = {"status": "paused", "lane": normalized_lane, "draining": bool(draining)}
+        if work_pool is not None and normalized_work_pool is None:
+            raw_pool = str(work_pool or "").strip().lower()
+            if raw_pool:
+                raise HTTPException(status_code=400, detail="work_pool must be 'trainer', 'local_agent', or 'remote_agent'")
+        worker.pause(normalized_lane, work_pool=normalized_work_pool)
+        draining = not await worker.wait_until_idle(timeout=0.05, lane=normalized_lane or None, work_pool=normalized_work_pool)
+        response = {"status": "paused", "lane": normalized_lane, "work_pool": normalized_work_pool, "draining": bool(draining)}
         _append_operator_action(
             storage,
             action="pause_worker",
-            target=normalized_lane or "global",
-            payload={"lane": normalized_lane},
+            target=normalized_work_pool or normalized_lane or "global",
+            payload={"lane": normalized_lane, "work_pool": normalized_work_pool},
             result=response,
         )
         storage.commit()
         return response
 
     @app.post("/admin/worker/resume")
-    async def resume_worker(lane: str | None = None, storage=Depends(get_storage)):
+    async def resume_worker(lane: str | None = None, work_pool: str | None = None, storage=Depends(get_storage)):
         normalized_lane = normalize_lane(lane)
+        normalized_work_pool = normalize_work_pool(work_pool)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
-        worker.resume(normalized_lane)
-        replayed = await worker.enqueue_runnable_tasks(normalized_lane)
-        response = {"status": "running", "lane": normalized_lane, "replayed": replayed}
+        if work_pool is not None and normalized_work_pool is None:
+            raw_pool = str(work_pool or "").strip().lower()
+            if raw_pool:
+                raise HTTPException(status_code=400, detail="work_pool must be 'trainer', 'local_agent', or 'remote_agent'")
+        worker.resume(normalized_lane, work_pool=normalized_work_pool)
+        replayed = await worker.enqueue_runnable_tasks(normalized_work_pool or normalized_lane)
+        response = {"status": "running", "lane": normalized_lane, "work_pool": normalized_work_pool, "replayed": replayed}
         _append_operator_action(
             storage,
             action="resume_worker",
-            target=normalized_lane or "global",
-            payload={"lane": normalized_lane},
+            target=normalized_work_pool or normalized_lane or "global",
+            payload={"lane": normalized_lane, "work_pool": normalized_work_pool},
             result=response,
         )
         storage.commit()
         return response
 
     @app.post("/admin/worker/stop")
-    async def stop_worker(lane: str | None = None, storage=Depends(get_storage)):
+    async def stop_worker(lane: str | None = None, work_pool: str | None = None, storage=Depends(get_storage)):
         normalized_lane = normalize_lane(lane)
+        normalized_work_pool = normalize_work_pool(work_pool)
         if lane is not None and normalized_lane is None:
             raw_lane = str(lane or "").strip().lower()
             if raw_lane:
                 raise HTTPException(status_code=400, detail="lane must be 'trainer' or 'agent'")
-        aborted = worker.stop_current(normalized_lane)
-        response = {"status": "stopped", "aborted": aborted, "lane": normalized_lane}
+        if work_pool is not None and normalized_work_pool is None:
+            raw_pool = str(work_pool or "").strip().lower()
+            if raw_pool:
+                raise HTTPException(status_code=400, detail="work_pool must be 'trainer', 'local_agent', or 'remote_agent'")
+        aborted = worker.stop_current(normalized_lane, work_pool=normalized_work_pool)
+        response = {"status": "stopped", "aborted": aborted, "lane": normalized_lane, "work_pool": normalized_work_pool}
         _append_operator_action(
             storage,
             action="stop_worker",
-            target=normalized_lane or "global",
-            payload={"lane": normalized_lane},
+            target=normalized_work_pool or normalized_lane or "global",
+            payload={"lane": normalized_lane, "work_pool": normalized_work_pool},
             result=response,
         )
         storage.commit()

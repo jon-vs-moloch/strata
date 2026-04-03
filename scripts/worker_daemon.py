@@ -68,16 +68,17 @@ async def _dispatch_command(worker: BackgroundWorker, command: dict) -> None:
     action = str(command.get("action") or "").strip().lower()
     payload = dict(command.get("payload") or {})
     lane = payload.get("lane")
+    work_pool = payload.get("work_pool")
     task_id = payload.get("task_id")
     if action == "enqueue" and task_id:
         await worker.enqueue(str(task_id))
     elif action == "pause_worker":
-        worker.pause(lane)
+        worker.pause(lane, work_pool=work_pool)
     elif action == "resume_worker":
-        worker.resume(lane)
-        await worker.enqueue_runnable_tasks(lane)
+        worker.resume(lane, work_pool=work_pool)
+        await worker.enqueue_runnable_tasks(work_pool or lane)
     elif action == "stop_worker":
-        worker.stop_current(lane)
+        worker.stop_current(lane, work_pool=work_pool)
     elif action == "clear_queue":
         worker.clear_queue(lane)
     elif action == "replay_pending":
@@ -146,4 +147,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as exc:
+        _configure_logging()
+        logger.exception("Worker daemon crashed: %s", exc)
+        write_worker_status({"pid": os.getpid(), "status": default_worker_status(f"Worker daemon crashed: {exc}")})
+        raise
