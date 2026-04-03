@@ -10,6 +10,16 @@ from strata.schemas.models import ModelPool, ModelEndpoint
 from strata.schemas.execution import ExecutionContext
 from strata.models.providers import LocalProvider, CloudProvider, BaseModelProvider
 
+
+POOL_ALIASES = {
+    "agent": "local_agent",
+}
+
+
+def canonical_pool_name(pool_name: Optional[str]) -> str:
+    normalized = str(pool_name or "").strip().lower()
+    return POOL_ALIASES.get(normalized, normalized)
+
 REGISTRY_PRESETS = {
     "trainer": {
         "cerebras_glm_4_7": {
@@ -46,7 +56,7 @@ REGISTRY_PRESETS = {
             "tags": ["free-tier", "fallback", "openai-compatible"],
         },
     },
-    "agent": {
+    "local_agent": {
         "lmstudio_local": {
             "provider": "lmstudio",
             "model": "mlx-qwen3.5-4b-claude-4.6-opus-reasoning-distilled-v2",
@@ -67,6 +77,30 @@ REGISTRY_PRESETS = {
             "tags": ["local", "ollama"],
         },
     },
+    "remote_agent": {
+        "google_gemma_3_27b": {
+            "provider": "google",
+            "model": "gemma-3-27b-it",
+            "transport": "cloud",
+            "api_key_env": "GEMINI_API_KEY",
+            "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            "requests_per_minute": 20,
+            "max_concurrency": 1,
+            "min_interval_ms": 3000,
+            "tags": ["cloud", "worker", "comparison", "openai-compatible"],
+        },
+        "openrouter_worker": {
+            "provider": "openrouter",
+            "model": "openrouter/free",
+            "transport": "cloud",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "endpoint_url": "https://openrouter.ai/api/v1/chat/completions",
+            "requests_per_minute": 10,
+            "max_concurrency": 1,
+            "min_interval_ms": 6000,
+            "tags": ["cloud", "worker", "fallback", "openai-compatible"],
+        },
+    },
 }
 
 class ModelRegistry:
@@ -80,9 +114,10 @@ class ModelRegistry:
             self._load_config(config)
 
     def _normalize_pool_config(self, pool_name: str, pool_value: Any) -> Dict[str, Any]:
+        canonical_name = canonical_pool_name(pool_name)
         if isinstance(pool_value, list):
             return {
-                "name": pool_name,
+                "name": canonical_name,
                 "allow_cloud": True,
                 "allow_local": True,
                 "preferred_transport": None,
@@ -90,13 +125,13 @@ class ModelRegistry:
             }
         if isinstance(pool_value, dict):
             normalized = dict(pool_value)
-            normalized.setdefault("name", pool_name)
+            normalized.setdefault("name", canonical_name)
             normalized.setdefault("allow_cloud", True)
             normalized.setdefault("allow_local", True)
             normalized.setdefault("preferred_transport", None)
             normalized["endpoints"] = list(normalized.get("endpoints") or [])
             return normalized
-        raise ValueError(f"Invalid pool config for '{pool_name}': expected list or dict.")
+        raise ValueError(f"Invalid pool config for '{canonical_name}': expected list or dict.")
 
     def _load_config(self, config: Dict[str, Any]):
         if not config:
@@ -105,18 +140,19 @@ class ModelRegistry:
         pools: Dict[str, ModelPool] = {}
         for pool_name, pool_value in config.items():
             normalized_pool = self._normalize_pool_config(pool_name, pool_value)
+            canonical_name = str(normalized_pool.get("name") or canonical_pool_name(pool_name))
             endpoints = [ModelEndpoint(**endpoint) for endpoint in normalized_pool.get("endpoints") or []]
-            pools[pool_name] = ModelPool(
-                name=pool_name,
+            pools[canonical_name] = ModelPool(
+                name=canonical_name,
                 allow_cloud=bool(normalized_pool.get("allow_cloud", True)),
                 allow_local=bool(normalized_pool.get("allow_local", True)),
                 preferred_transport=normalized_pool.get("preferred_transport"),
                 endpoints=endpoints,
             )
-            normalized_config[pool_name] = {
-                "allow_cloud": pools[pool_name].allow_cloud,
-                "allow_local": pools[pool_name].allow_local,
-                "preferred_transport": pools[pool_name].preferred_transport,
+            normalized_config[canonical_name] = {
+                "allow_cloud": pools[canonical_name].allow_cloud,
+                "allow_local": pools[canonical_name].allow_local,
+                "preferred_transport": pools[canonical_name].preferred_transport,
                 "endpoints": [endpoint.model_dump() for endpoint in endpoints],
             }
         self._config = normalized_config
@@ -139,7 +175,7 @@ class ModelRegistry:
         """
         @summary Resolves the concrete endpoint for the given execution context.
         """
-        pool_name = context.mode
+        pool_name = canonical_pool_name(context.mode)
         if pool_name not in self.pools:
             raise ValueError(f"No model pool found for context mode '{pool_name}'")
 
@@ -247,7 +283,7 @@ DEFAULT_CONFIG = {
             }
         ],
     },
-    "agent": {
+    "local_agent": {
         "allow_cloud": False,
         "allow_local": True,
         "preferred_transport": "local",
@@ -260,6 +296,23 @@ DEFAULT_CONFIG = {
                 "requests_per_minute": 6,
                 "max_concurrency": 1,
                 "min_interval_ms": 4000
+            }
+        ],
+    },
+    "remote_agent": {
+        "allow_cloud": True,
+        "allow_local": False,
+        "preferred_transport": "cloud",
+        "endpoints": [
+            {
+                "provider": "google",
+                "model": "gemma-3-27b-it",
+                "transport": "cloud",
+                "api_key_env": "GEMINI_API_KEY",
+                "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "requests_per_minute": 20,
+                "max_concurrency": 1,
+                "min_interval_ms": 3000
             }
         ],
     },

@@ -14,6 +14,52 @@ const API_KEY_LINKS = {
   openrouter: 'https://openrouter.ai/settings/keys',
 };
 
+const DEFAULT_POOL_ORDER = ['trainer', 'local_agent', 'remote_agent'];
+
+const poolTheme = (pool) => {
+  if (pool === 'trainer') {
+    return {
+      title: 'Trainer Pool',
+      presetTitle: 'Trainer Presets',
+      accent: '#8257e5',
+      accentSoft: 'rgba(130,87,229,0.15)',
+      accentBorder: 'rgba(130,87,229,0.3)',
+      accentText: '#cfc3ff',
+      transportOrder: ['cloud', 'local'],
+    };
+  }
+  if (pool === 'remote_agent') {
+    return {
+      title: 'Remote Agent Profile',
+      presetTitle: 'Remote Agent Presets',
+      accent: '#4fc3ff',
+      accentSoft: 'rgba(79,195,255,0.12)',
+      accentBorder: 'rgba(79,195,255,0.25)',
+      accentText: '#bfefff',
+      transportOrder: ['cloud', 'local'],
+    };
+  }
+  return {
+    title: 'Local Agent Profile',
+    presetTitle: 'Local Agent Presets',
+    accent: '#00d9ff',
+    accentSoft: 'rgba(0,217,255,0.12)',
+    accentBorder: 'rgba(0,217,255,0.25)',
+    accentText: '#9fefff',
+    transportOrder: ['local', 'cloud'],
+  };
+};
+
+const defaultPoolConfig = (pool) => {
+  if (pool === 'trainer') {
+    return { allow_cloud: true, allow_local: false, preferred_transport: 'cloud', endpoints: [] };
+  }
+  if (pool === 'remote_agent') {
+    return { allow_cloud: true, allow_local: false, preferred_transport: 'cloud', endpoints: [] };
+  }
+  return { allow_cloud: false, allow_local: true, preferred_transport: 'local', endpoints: [] };
+};
+
 const DashboardPanel = ({ title, children }) => (
   <div style={{ background: '#141418', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '14px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
     <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, letterSpacing: '0.12em' }}>{title}</div>
@@ -57,9 +103,9 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
   const [throttleMode, setThrottleMode] = useState('quiet');
   const [autoSwapLocalMissing, setAutoSwapLocalMissing] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
-  const [registryConfig, setRegistryConfig] = useState({ trainer: [], agent: [] });
-  const [registryPresets, setRegistryPresets] = useState({ trainer: {}, agent: {} });
-  const [registryCatalog, setRegistryCatalog] = useState({ trainer: { endpoints: [] }, agent: { endpoints: [] } });
+  const [registryConfig, setRegistryConfig] = useState({ trainer: [], local_agent: [], remote_agent: [] });
+  const [registryPresets, setRegistryPresets] = useState({ trainer: {}, local_agent: {}, remote_agent: {} });
+  const [registryCatalog, setRegistryCatalog] = useState({ trainer: { endpoints: [] }, local_agent: { endpoints: [] }, remote_agent: { endpoints: [] } });
   const [savingRegistry, setSavingRegistry] = useState(false);
   const [desktopUpdateStatus, setDesktopUpdateStatus] = useState(null);
   const [channelManifestStatus, setChannelManifestStatus] = useState(null);
@@ -84,12 +130,7 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       };
     }
     const legacyEndpoints = Array.isArray(raw) ? raw : [];
-    return {
-      allow_cloud: pool === 'trainer',
-      allow_local: pool === 'agent',
-      preferred_transport: pool === 'trainer' ? 'cloud' : 'local',
-      endpoints: legacyEndpoints,
-    };
+    return { ...defaultPoolConfig(pool), endpoints: legacyEndpoints };
   }, [registryConfig]);
 
   const getPoolEndpoint = useCallback((pool, index = 0) => {
@@ -178,7 +219,7 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     try {
       const res = await axios.get(`${apiUrl}/admin/registry/catalog`);
       if (res?.data?.status === 'ok') {
-        setRegistryCatalog(res.data.catalog || { trainer: { endpoints: [] }, agent: { endpoints: [] } });
+        setRegistryCatalog(res.data.catalog || { trainer: { endpoints: [] }, local_agent: { endpoints: [] }, remote_agent: { endpoints: [] } });
       }
     } catch (e) {
       console.error('Failed to load registry catalog', e);
@@ -189,7 +230,7 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     try {
       const res = await axios.get(`${apiUrl}/admin/registry/presets`);
       if (res.data.status === 'ok') {
-        setRegistryPresets(res.data.presets || { trainer: {}, agent: {} });
+        setRegistryPresets(res.data.presets || { trainer: {}, local_agent: {}, remote_agent: {} });
       }
     } catch (e) {
       console.error('Failed to load registry presets', e);
@@ -226,8 +267,8 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     const endpoints = [...poolConfig.endpoints];
     if (!endpoints[index]) endpoints[index] = {};
     endpoints[index] = { ...endpoints[index], [field]: value };
-    if (!endpoints[index].transport) endpoints[index].transport = pool === 'trainer' ? 'cloud' : 'local';
-    if (!endpoints[index].provider) endpoints[index].provider = pool === 'trainer' ? 'openrouter' : 'lmstudio';
+    if (!endpoints[index].transport) endpoints[index].transport = defaultPoolConfig(pool).preferred_transport;
+    if (!endpoints[index].provider) endpoints[index].provider = pool === 'trainer' ? 'openrouter' : (pool === 'remote_agent' ? 'google' : 'lmstudio');
     const next = {
       ...registryConfig,
       [pool]: {
@@ -415,7 +456,17 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
     borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)',
     display: 'flex', flexDirection: 'column', gap: '8px'
   };
-  const visiblePools = currentScope === 'home' ? ['trainer', 'agent'] : [currentScope];
+  const availablePools = Array.from(new Set([
+    ...DEFAULT_POOL_ORDER,
+    ...Object.keys(registryConfig || {}),
+    ...Object.keys(registryPresets || {}),
+    ...Object.keys(registryCatalog || {}),
+  ]));
+  const visiblePools = currentScope === 'home'
+    ? availablePools
+    : currentScope === 'trainer'
+      ? ['trainer']
+      : availablePools.filter((pool) => pool !== 'trainer');
   const effectiveLatestVersion = channelManifestStatus?.version || desktopUpdateStatus?.latest_version;
   const desktopLatestAhead = effectiveLatestVersion
     && desktopUpdateStatus?.current_version
@@ -435,8 +486,8 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
       <DashboardPanel title="SETTINGS SCOPE">
         <div style={{ fontSize: '13px', color: '#c7c8d6', lineHeight: 1.6 }}>
           {currentScope === 'home'
-            ? 'Global settings view. Shared controls are shown here, along with both trainer and agent model-pool configuration.'
-            : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} scope. This page is focused on settings relevant to the currently selected lane.`}
+            ? 'Global settings view. Shared controls are shown here, along with trainer and agent-profile model configuration.'
+            : `${currentScope === 'trainer' ? 'Trainer' : 'Agent'} scope. This page is focused on settings relevant to the currently selected lane and its agent profiles.`}
         </div>
       </DashboardPanel>
 
@@ -591,130 +642,84 @@ export default function SettingsView({ onResetDatabase, apiUrl, currentScope = '
           ))}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px' }}>
-          {visiblePools.includes('trainer') && (
-            <div>
-              <div style={{ ...sectionLabel, marginBottom: '6px' }}>STRONG PRESETS</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                {Object.keys(registryPresets.trainer || {}).map((presetKey) => (
-                  <button key={presetKey} onClick={() => applyPreset('trainer', presetKey)} style={{ background: 'rgba(130,87,229,0.15)', border: '1px solid rgba(130,87,229,0.3)', borderRadius: '999px', color: '#cfc3ff', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
-                    {presetKey}
-                  </button>
-                ))}
+          {visiblePools.map((pool) => {
+            const theme = poolTheme(pool);
+            const presetKeys = Object.keys(registryPresets[pool] || {});
+            if (!presetKeys.length) return null;
+            return (
+              <div key={`${pool}-presets`}>
+                <div style={{ ...sectionLabel, marginBottom: '6px' }}>{theme.presetTitle.toUpperCase()}</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {presetKeys.map((presetKey) => (
+                    <button key={presetKey} onClick={() => applyPreset(pool, presetKey)} style={{ background: theme.accentSoft, border: `1px solid ${theme.accentBorder}`, borderRadius: '999px', color: theme.accentText, padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                      {presetKey}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
-          {visiblePools.includes('agent') && (
-            <div>
-              <div style={{ ...sectionLabel, marginBottom: '6px' }}>WEAK PRESETS</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                {Object.keys(registryPresets.agent || {}).map((presetKey) => (
-                  <button key={presetKey} onClick={() => applyPreset('agent', presetKey)} style={{ background: 'rgba(0,217,255,0.12)', border: '1px solid rgba(0,217,255,0.25)', borderRadius: '999px', color: '#9fefff', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
-                    {presetKey}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+            );
+          })}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {visiblePools.includes('trainer') && (
-            <div style={inputGroupStyle}>
-              <div style={{ fontSize: '11px', fontWeight: 700, color: '#8257e5', marginBottom: '4px', letterSpacing: '0.05em' }}>STRONG POOL</div>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#cfc3ff', fontSize: '11px' }}>
-                  <input type="checkbox" checked={Boolean(getPoolConfig('trainer').allow_cloud)} onChange={(e) => void updatePoolSetting('trainer', 'allow_cloud', e.target.checked)} />
-                  Allow cloud
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#cfc3ff', fontSize: '11px' }}>
-                  <input type="checkbox" checked={Boolean(getPoolConfig('trainer').allow_local)} onChange={(e) => void updatePoolSetting('trainer', 'allow_local', e.target.checked)} />
-                  Allow local
-                </label>
-                <select value={getPoolConfig('trainer').preferred_transport || ''} onChange={(e) => void updatePoolSetting('trainer', 'preferred_transport', e.target.value || null)} style={{ ...infoValue, maxWidth: '180px' }}>
-                  <option value="">Auto transport</option>
-                  <option value="cloud">Prefer cloud</option>
-                  <option value="local">Prefer local</option>
-                </select>
-              </div>
-              {getPoolEndpoint('trainer').provider && API_KEY_LINKS[getPoolEndpoint('trainer').provider] && (
-                <a href={API_KEY_LINKS[getPoolEndpoint('trainer').provider]} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#bca9ff', textDecoration: 'none' }}>
-                  Open {getPoolEndpoint('trainer').provider} API key page
-                </a>
-              )}
-              <input style={infoValue} placeholder="Provider (e.g. google, openrouter, lmstudio)" value={getPoolEndpoint('trainer').provider || ''} onChange={(e) => handleUpdateRegistry('trainer', 'provider', e.target.value)} />
-              <select style={infoValue} value={getPoolEndpoint('trainer').transport || 'cloud'} onChange={(e) => handleUpdateRegistry('trainer', 'transport', e.target.value)}>
-                <option value="cloud">Cloud</option>
-                <option value="local">Local</option>
-              </select>
-              <input style={infoValue} placeholder="Model (e.g. anthropic/claude-3.5-sonnet)" value={getPoolEndpoint('trainer').model || ''} onChange={(e) => handleUpdateRegistry('trainer', 'model', e.target.value)} />
-              <input style={infoValue} placeholder="Endpoint URL (e.g. https://openrouter.ai/api/v1/chat/completions)" value={getPoolEndpoint('trainer').endpoint_url || ''} onChange={(e) => handleUpdateRegistry('trainer', 'endpoint_url', e.target.value)} />
-              <input style={infoValue} placeholder="API Key Env (e.g. OPENROUTER_API_KEY)" value={getPoolEndpoint('trainer').api_key_env || ''} onChange={(e) => handleUpdateRegistry('trainer', 'api_key_env', e.target.value)} />
-              <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={getPoolEndpoint('trainer').requests_per_minute || ''} onChange={(e) => handleUpdateRegistry('trainer', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={getPoolEndpoint('trainer').max_concurrency || ''} onChange={(e) => handleUpdateRegistry('trainer', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={getPoolEndpoint('trainer').min_interval_ms || ''} onChange={(e) => handleUpdateRegistry('trainer', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              {Array.isArray(registryCatalog.trainer?.endpoints) && registryCatalog.trainer.endpoints[0]?.transport === 'local' ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <div style={{ fontSize: '11px', color: '#8d8ea1' }}>
-                    Local catalog: {registryCatalog.trainer.endpoints[0]?.status === 'ok' ? `${(registryCatalog.trainer.endpoints[0]?.models || []).length} models detected` : (registryCatalog.trainer.endpoints[0]?.error || registryCatalog.trainer.endpoints[0]?.status || 'unknown')}
-                  </div>
-                  {registryCatalog.trainer.endpoints[0]?.status === 'ok' && registryCatalog.trainer.endpoints[0]?.configured_model_present === false && autoSwapLocalMissing ? (
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      {(registryCatalog.trainer.endpoints[0]?.models || []).slice(0, 4).map((modelId) => (
-                        <button key={modelId} type="button" onClick={() => handleUpdateRegistry('trainer', 'model', modelId)} style={{ background: 'rgba(214,173,113,0.14)', border: '1px solid rgba(214,173,113,0.24)', borderRadius: '999px', color: '#f3ddbf', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
-                          Switch to {modelId}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
+          {visiblePools.map((pool) => {
+            const theme = poolTheme(pool);
+            const poolConfig = getPoolConfig(pool);
+            const endpoint = getPoolEndpoint(pool);
+            const catalogEntry = Array.isArray(registryCatalog[pool]?.endpoints) ? registryCatalog[pool].endpoints[0] : null;
+            return (
+              <div key={pool} style={inputGroupStyle}>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: theme.accent, marginBottom: '4px', letterSpacing: '0.05em' }}>{theme.title.toUpperCase()}</div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: theme.accentText, fontSize: '11px' }}>
+                    <input type="checkbox" checked={Boolean(poolConfig.allow_cloud)} onChange={(e) => void updatePoolSetting(pool, 'allow_cloud', e.target.checked)} />
+                    Allow cloud
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: theme.accentText, fontSize: '11px' }}>
+                    <input type="checkbox" checked={Boolean(poolConfig.allow_local)} onChange={(e) => void updatePoolSetting(pool, 'allow_local', e.target.checked)} />
+                    Allow local
+                  </label>
+                  <select value={poolConfig.preferred_transport || ''} onChange={(e) => void updatePoolSetting(pool, 'preferred_transport', e.target.value || null)} style={{ ...infoValue, maxWidth: '180px' }}>
+                    <option value="">Auto transport</option>
+                    {theme.transportOrder.map((transport) => (
+                      <option key={transport} value={transport}>{transport === 'cloud' ? 'Prefer cloud' : 'Prefer local'}</option>
+                    ))}
+                  </select>
                 </div>
-              ) : null}
-            </div>
-          )}
-          {visiblePools.includes('agent') && (
-            <div style={inputGroupStyle}>
-              <div style={{ fontSize: '11px', fontWeight: 700, color: '#00d9ff', marginBottom: '4px', letterSpacing: '0.05em' }}>WEAK POOL</div>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#9fefff', fontSize: '11px' }}>
-                  <input type="checkbox" checked={Boolean(getPoolConfig('agent').allow_cloud)} onChange={(e) => void updatePoolSetting('agent', 'allow_cloud', e.target.checked)} />
-                  Allow cloud
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#9fefff', fontSize: '11px' }}>
-                  <input type="checkbox" checked={Boolean(getPoolConfig('agent').allow_local)} onChange={(e) => void updatePoolSetting('agent', 'allow_local', e.target.checked)} />
-                  Allow local
-                </label>
-                <select value={getPoolConfig('agent').preferred_transport || ''} onChange={(e) => void updatePoolSetting('agent', 'preferred_transport', e.target.value || null)} style={{ ...infoValue, maxWidth: '180px' }}>
-                  <option value="">Auto transport</option>
-                  <option value="local">Prefer local</option>
-                  <option value="cloud">Prefer cloud</option>
+                {endpoint.provider && API_KEY_LINKS[endpoint.provider] && (
+                  <a href={API_KEY_LINKS[endpoint.provider]} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: theme.accentText, textDecoration: 'none' }}>
+                    Open {endpoint.provider} API key page
+                  </a>
+                )}
+                <input style={infoValue} placeholder="Provider (e.g. google, openrouter, lmstudio)" value={endpoint.provider || ''} onChange={(e) => handleUpdateRegistry(pool, 'provider', e.target.value)} />
+                <select style={infoValue} value={endpoint.transport || defaultPoolConfig(pool).preferred_transport} onChange={(e) => handleUpdateRegistry(pool, 'transport', e.target.value)}>
+                  <option value="cloud">Cloud</option>
+                  <option value="local">Local</option>
                 </select>
-              </div>
-              <input style={infoValue} placeholder="Provider (e.g. lmstudio, ollama, openrouter)" value={getPoolEndpoint('agent').provider || ''} onChange={(e) => handleUpdateRegistry('agent', 'provider', e.target.value)} />
-              <select style={infoValue} value={getPoolEndpoint('agent').transport || 'local'} onChange={(e) => handleUpdateRegistry('agent', 'transport', e.target.value)}>
-                <option value="local">Local</option>
-                <option value="cloud">Cloud</option>
-              </select>
-              <input style={infoValue} placeholder="Model (e.g. qwen3.5-9b-distilled)" value={getPoolEndpoint('agent').model || ''} onChange={(e) => handleUpdateRegistry('agent', 'model', e.target.value)} />
-              <input style={infoValue} placeholder="Endpoint URL (e.g. http://127.0.0.1:1234/v1/chat/completions)" value={getPoolEndpoint('agent').endpoint_url || ''} onChange={(e) => handleUpdateRegistry('agent', 'endpoint_url', e.target.value)} />
-              <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={getPoolEndpoint('agent').requests_per_minute || ''} onChange={(e) => handleUpdateRegistry('agent', 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={getPoolEndpoint('agent').max_concurrency || ''} onChange={(e) => handleUpdateRegistry('agent', 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={getPoolEndpoint('agent').min_interval_ms || ''} onChange={(e) => handleUpdateRegistry('agent', 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
-              {Array.isArray(registryCatalog.agent?.endpoints) && registryCatalog.agent.endpoints[0]?.transport === 'local' ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <div style={{ fontSize: '11px', color: '#8d8ea1' }}>
-                    Local catalog: {registryCatalog.agent.endpoints[0]?.status === 'ok' ? `${(registryCatalog.agent.endpoints[0]?.models || []).length} models detected` : (registryCatalog.agent.endpoints[0]?.error || registryCatalog.agent.endpoints[0]?.status || 'unknown')}
-                  </div>
-                  {registryCatalog.agent.endpoints[0]?.status === 'ok' && registryCatalog.agent.endpoints[0]?.configured_model_present === false && autoSwapLocalMissing ? (
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      {(registryCatalog.agent.endpoints[0]?.models || []).slice(0, 4).map((modelId) => (
-                        <button key={modelId} type="button" onClick={() => handleUpdateRegistry('agent', 'model', modelId)} style={{ background: 'rgba(0,217,255,0.12)', border: '1px solid rgba(0,217,255,0.24)', borderRadius: '999px', color: '#b9f8ff', padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
-                          Switch to {modelId}
-                        </button>
-                      ))}
+                <input style={infoValue} placeholder="Model id" value={endpoint.model || ''} onChange={(e) => handleUpdateRegistry(pool, 'model', e.target.value)} />
+                <input style={infoValue} placeholder="Endpoint URL" value={endpoint.endpoint_url || ''} onChange={(e) => handleUpdateRegistry(pool, 'endpoint_url', e.target.value)} />
+                <input style={infoValue} placeholder="API Key Env (optional)" value={endpoint.api_key_env || ''} onChange={(e) => handleUpdateRegistry(pool, 'api_key_env', e.target.value)} />
+                <input type="number" style={infoValue} placeholder="Requests / minute (optional)" value={endpoint.requests_per_minute || ''} onChange={(e) => handleUpdateRegistry(pool, 'requests_per_minute', e.target.value ? parseInt(e.target.value, 10) : null)} />
+                <input type="number" style={infoValue} placeholder="Max concurrency (optional)" value={endpoint.max_concurrency || ''} onChange={(e) => handleUpdateRegistry(pool, 'max_concurrency', e.target.value ? parseInt(e.target.value, 10) : null)} />
+                <input type="number" style={infoValue} placeholder="Min interval ms (optional)" value={endpoint.min_interval_ms || ''} onChange={(e) => handleUpdateRegistry(pool, 'min_interval_ms', e.target.value ? parseInt(e.target.value, 10) : null)} />
+                {catalogEntry?.transport === 'local' ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ fontSize: '11px', color: '#8d8ea1' }}>
+                      Local catalog: {catalogEntry?.status === 'ok' ? `${(catalogEntry?.models || []).length} models detected` : (catalogEntry?.error || catalogEntry?.status || 'unknown')}
                     </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-          )}
+                    {catalogEntry?.status === 'ok' && catalogEntry?.configured_model_present === false && autoSwapLocalMissing ? (
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                        {(catalogEntry?.models || []).slice(0, 4).map((modelId) => (
+                          <button key={modelId} type="button" onClick={() => handleUpdateRegistry(pool, 'model', modelId)} style={{ background: theme.accentSoft, border: `1px solid ${theme.accentBorder}`, borderRadius: '999px', color: theme.accentText, padding: '6px 10px', fontSize: '11px', cursor: 'pointer' }}>
+                            Switch to {modelId}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </DashboardPanel>
 

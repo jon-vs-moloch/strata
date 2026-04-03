@@ -1,17 +1,17 @@
 """
 @module schemas.execution
 @purpose Define Pydantic schemas for runtime execution contexts and tiers.
-@key_exports ExecutionContext, TrainerExecutionContext, AgentExecutionContext
+@key_exports ExecutionContext, TrainerExecutionContext, AgentExecutionContext, LocalAgentExecutionContext, RemoteAgentExecutionContext
 """
 
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, List
+from typing import Optional
 
 class ExecutionContext(BaseModel):
     """
     @summary Base runtime context for STRATA tasks.
     """
-    mode: Literal["trainer", "agent"] = Field(..., description="The context tier.")
+    mode: str = Field(..., description="The execution profile or tier.")
     allow_cloud: Optional[bool] = Field(
         None,
         description="Optional override for whether cloud transport is permitted. If unset, the pool policy decides.",
@@ -28,14 +28,29 @@ class TrainerExecutionContext(ExecutionContext):
     """
     @summary Runtime optimized for complex planning and supervision.
     """
-    mode: Literal["trainer"] = "trainer"
+    mode: str = "trainer"
     allow_cloud: Optional[bool] = None
     allow_local: Optional[bool] = None
 
-class AgentExecutionContext(ExecutionContext):
+class LocalAgentExecutionContext(ExecutionContext):
     """
-    @summary Runtime optimized for constrained or lower-cost execution.
+    @summary Local worker runtime optimized for constrained or lower-cost execution.
     """
-    mode: Literal["agent"] = "agent"
+    mode: str = "local_agent"
     allow_cloud: Optional[bool] = None
     allow_local: Optional[bool] = None
+
+
+class RemoteAgentExecutionContext(ExecutionContext):
+    """
+    @summary Cloud worker runtime used to compare scaffold quality against stronger remote inference.
+    """
+    mode: str = "remote_agent"
+    allow_cloud: Optional[bool] = None
+    allow_local: Optional[bool] = None
+
+
+class AgentExecutionContext(LocalAgentExecutionContext):
+    """
+    @summary Backward-compatible alias for the default local worker profile.
+    """

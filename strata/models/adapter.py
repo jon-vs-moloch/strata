@@ -6,6 +6,24 @@ from strata.schemas.execution import ExecutionContext, TrainerExecutionContext
 from strata.models.registry import registry
 from strata.models.providers import ModelResponse, persist_provider_telemetry_snapshot
 
+
+def _is_local_worker_profile(mode: str) -> bool:
+    return str(mode or "").strip().lower() in {"agent", "local_agent"}
+
+
+def _is_worker_profile(mode: str) -> bool:
+    return str(mode or "").strip().lower() in {"agent", "local_agent", "remote_agent"}
+
+
+def _selected_model_lookup(selected_models: Dict[str, str], mode: str) -> Optional[str]:
+    normalized = str(mode or "").strip().lower()
+    selected = selected_models.get(normalized)
+    if selected:
+        return selected
+    if normalized == "local_agent":
+        return selected_models.get("agent")
+    return None
+
 class ModelAdapter:
     """
     @summary Universal bridge between the orchestrator and any inference engine.
@@ -45,16 +63,16 @@ class ModelAdapter:
             )
 
     def _resolve_endpoint(self):
-        preferred_model = self._selected_models.get(self.context.mode)
+        preferred_model = _selected_model_lookup(self._selected_models, self.context.mode)
         return self.registry.resolve_endpoint_for_context(
             self.context,
             preferred_model=preferred_model,
         )
 
     async def _maybe_autoswap_local_model(self) -> None:
-        if self.context.mode != "agent":
+        if not _is_local_worker_profile(self.context.mode):
             return
-        preferred_model = str(self._selected_models.get(self.context.mode) or "").strip()
+        preferred_model = str(_selected_model_lookup(self._selected_models, self.context.mode) or "").strip()
         endpoint = self.registry.resolve_endpoint_for_context(self.context, preferred_model=preferred_model or None)
         if str(getattr(endpoint, "transport", "") or "").strip().lower() != "local":
             return
@@ -91,7 +109,7 @@ class ModelAdapter:
     @property
     def active_model(self) -> str:
         endpoint = self._resolve_endpoint()
-        return self._selected_models.get(self.context.mode, endpoint.model)
+        return _selected_model_lookup(self._selected_models, self.context.mode) or endpoint.model
 
     @active_model.setter
     def active_model(self, model_id: str):
@@ -106,19 +124,19 @@ class ModelAdapter:
         try:
             await self._maybe_autoswap_local_model()
             # Enforce Context Restrictions
-            if self.context.evaluation_run and self.context.mode == "agent":
+            if self.context.evaluation_run and _is_local_worker_profile(self.context.mode):
                 # Strict local-only enforcement for evaluation
                 if self.context.allow_cloud:
                     return {"status": "error", "message": "CRITICAL: Cloud usage attempted during weak-eval. Aborting."}
 
             provider = self.registry.get_provider_for_context(
                 self.context,
-                preferred_model=self._selected_models.get(self.context.mode),
+                preferred_model=_selected_model_lookup(self._selected_models, self.context.mode),
             )
             self._validate_lane_transport(provider)
             
             # Log for auditability
-            selected_model = str(self._selected_models.get(self.context.mode) or "").strip()
+            selected_model = str(_selected_model_lookup(self._selected_models, self.context.mode) or "").strip()
             run_id = str(getattr(self.context, "run_id", "") or "").strip()
             print(
                 "DEBUG [Context: %s run_id=%s preferred_model=%s] Routing to %s/%s (Transport: %s)"
@@ -137,7 +155,7 @@ class ModelAdapter:
             persist_provider_telemetry_snapshot()
 
             # Post-call validation: if weak-eval but used cloud provider, mark as invalid
-            if self.context.evaluation_run and self.context.mode == "agent" and provider.__class__.__name__ == "CloudProvider":
+            if self.context.evaluation_run and _is_local_worker_profile(self.context.mode) and provider.__class__.__name__ == "CloudProvider":
                  return {"status": "error", "message": "CRITICAL: Cloud provider violation detected in weak-eval context."}
 
             return {
