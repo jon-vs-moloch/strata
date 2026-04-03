@@ -35,14 +35,14 @@ REGISTRY_PRESETS = {
         },
         "google_gemma_3_27b": {
             "provider": "google",
-            "model": "gemma-3-27b-it",
+            "model": "gemma-4-31b-it",
             "transport": "cloud",
             "api_key_env": "GEMINI_API_KEY",
             "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             "requests_per_minute": 20,
             "max_concurrency": 1,
             "min_interval_ms": 3000,
-            "tags": ["free-tier", "gemma", "openai-compatible"],
+            "tags": ["free-tier", "gemma", "gemma-4", "openai-compatible"],
         },
         "openrouter_free": {
             "provider": "openrouter",
@@ -80,14 +80,14 @@ REGISTRY_PRESETS = {
     "remote_agent": {
         "google_gemma_3_27b": {
             "provider": "google",
-            "model": "gemma-3-27b-it",
+            "model": "gemma-4-31b-it",
             "transport": "cloud",
             "api_key_env": "GEMINI_API_KEY",
             "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             "requests_per_minute": 20,
             "max_concurrency": 1,
             "min_interval_ms": 3000,
-            "tags": ["cloud", "worker", "comparison", "openai-compatible"],
+            "tags": ["cloud", "worker", "comparison", "gemma-4", "openai-compatible"],
         },
         "openrouter_worker": {
             "provider": "openrouter",
@@ -273,7 +273,7 @@ DEFAULT_CONFIG = {
         "endpoints": [
             {
                 "provider": "google",
-                "model": "gemma-3-27b-it",
+                "model": "gemma-4-31b-it",
                 "transport": "cloud",
                 "api_key_env": "GEMINI_API_KEY",
                 "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
@@ -306,7 +306,7 @@ DEFAULT_CONFIG = {
         "endpoints": [
             {
                 "provider": "google",
-                "model": "gemma-3-27b-it",
+                "model": "gemma-4-31b-it",
                 "transport": "cloud",
                 "api_key_env": "GEMINI_API_KEY",
                 "endpoint_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",

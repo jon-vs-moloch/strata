@@ -3,6 +3,7 @@ from sqlalchemy.orm import sessionmaker
 
 from strata.models.providers import LocalProvider
 from strata.models.providers import (
+    CloudProvider,
     GenericOpenAICompatibleProvider,
     get_latest_persisted_provider_telemetry,
     persist_provider_telemetry_snapshot,
@@ -126,3 +127,54 @@ def test_provider_telemetry_snapshot_can_buffer_before_flush(tmp_path):
         if after_storage is not None:
             after_storage.close()
         storage.close()
+
+
+def test_google_gemma_compatibility_payload_folds_system_and_tools():
+    provider = CloudProvider(
+        model_id="gemma-4-31b-it",
+        provider_id="google",
+        endpoint_url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    )
+
+    payload = provider._build_payload(
+        [
+            {"role": "system", "content": "Be careful."},
+            {"role": "user", "content": "Inspect the repo."},
+        ],
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_directory",
+                        "description": "List files",
+                        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    },
+                }
+            ]
+        },
+        compatibility_mode=True,
+    )
+
+    assert "tools" not in payload
+    assert payload["messages"][0]["role"] == "user"
+    assert "SYSTEM INSTRUCTIONS" in payload["messages"][0]["content"]
+    assert "AVAILABLE TOOLS" in payload["messages"][-1]["content"]
+
+
+def test_google_gemma_compatibility_parser_recovers_tool_call():
+    provider = CloudProvider(
+        model_id="gemma-4-31b-it",
+        provider_id="google",
+        endpoint_url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    )
+
+    tool_calls = provider._parse_compatibility_tool_call(
+        """```json
+{"tool_call":{"name":"read_file","arguments":{"path":"README.md"}}}
+```"""
+    )
+
+    assert tool_calls is not None
+    assert tool_calls[0]["function"]["name"] == "read_file"
+    assert '"path":"README.md"' in tool_calls[0]["function"]["arguments"]

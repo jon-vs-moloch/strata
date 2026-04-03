@@ -6,6 +6,8 @@
 
 import httpx
 import asyncio
+import json
+import re
 from typing import Any, Dict, Optional, List, Literal
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -450,6 +452,167 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             "reasoning_keys": sorted(list(reasoning.keys())) if isinstance(reasoning, dict) else [],
         }
 
+    def _is_google_gemma(self) -> bool:
+        return str(self.provider_id or "").strip().lower() == "google" and str(self.model_id or "").strip().lower().startswith("gemma-")
+
+    def _compatibility_retry_needed(self, status_code: int, response_text: str, payload: Dict[str, Any]) -> bool:
+        if status_code != 400 or not self._is_google_gemma():
+            return False
+        text = str(response_text or "")
+        if "Function calling is not enabled" in text and bool(payload.get("tools")):
+            return True
+        if "Developer instruction is not enabled" in text:
+            return True
+        if "system role is not supported" in text.lower():
+            return True
+        return False
+
+    def _fold_system_into_user_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        system_parts: List[str] = []
+        non_system: List[Dict[str, str]] = []
+        for message in list(messages or []):
+            role = str((message or {}).get("role") or "").strip().lower()
+            content = str((message or {}).get("content") or "")
+            if not content.strip():
+                continue
+            if role == "system":
+                system_parts.append(content.strip())
+                continue
+            normalized_role = role if role in {"user", "assistant", "tool"} else "user"
+            non_system.append({"role": normalized_role, "content": content})
+        if system_parts:
+            merged = "SYSTEM INSTRUCTIONS:\n" + "\n\n".join(system_parts).strip()
+            if non_system and non_system[0]["role"] == "user":
+                non_system[0]["content"] = merged + "\n\nUSER REQUEST:\n" + non_system[0]["content"]
+            else:
+                non_system.insert(0, {"role": "user", "content": merged})
+        return non_system or [{"role": "user", "content": "Proceed with the request."}]
+
+    def _render_tool_compatibility_instruction(self, tools: List[Dict[str, Any]]) -> str:
+        rows: List[str] = []
+        for tool in list(tools or []):
+            function = dict((tool or {}).get("function") or {})
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            description = " ".join(str(function.get("description") or "").split()).strip()
+            parameters = function.get("parameters")
+            schema_text = ""
+            if parameters is not None:
+                try:
+                    schema_text = json.dumps(parameters, separators=(",", ":"), ensure_ascii=True)
+                except Exception:
+                    schema_text = str(parameters)
+                if len(schema_text) > 500:
+                    schema_text = schema_text[:497] + "..."
+            line = f"- {name}"
+            if description:
+                line += f": {description}"
+            if schema_text:
+                line += f" | args_schema={schema_text}"
+            rows.append(line)
+        if not rows:
+            return ""
+        return (
+            "AVAILABLE TOOLS:\n"
+            + "\n".join(rows)
+            + "\n\n"
+            + "If and only if a tool is necessary, respond with exactly one fenced JSON block of the form:\n"
+            + "```json\n"
+            + '{"tool_call":{"name":"tool_name","arguments":{"arg":"value"}}}\n'
+            + "```\n"
+            + "Do not call more than one tool. If no tool is needed, answer normally."
+        )
+
+    def _build_payload(
+        self,
+        messages: List[Dict[str, Any]],
+        kwargs: Dict[str, Any],
+        *,
+        compatibility_mode: bool = False,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
+            "stream": False,
+            "temperature": kwargs.get("temperature", 0.7),
+        }
+        if "top_p" in kwargs:
+            payload["top_p"] = kwargs["top_p"]
+        if "max_tokens" in kwargs:
+            payload["max_tokens"] = kwargs["max_tokens"]
+        if "reasoning_effort" in kwargs:
+            payload["reasoning_effort"] = kwargs["reasoning_effort"]
+        if "reasoning" in kwargs:
+            payload["reasoning"] = kwargs["reasoning"]
+        if "response_format" in kwargs:
+            payload["response_format"] = kwargs["response_format"]
+        if "tools" in kwargs:
+            payload["tools"] = kwargs["tools"]
+
+        if compatibility_mode and self._is_google_gemma():
+            compat_messages = self._fold_system_into_user_messages(messages)
+            compat_instruction = self._render_tool_compatibility_instruction(list(kwargs.get("tools") or []))
+            if compat_instruction:
+                if compat_messages and compat_messages[-1]["role"] == "user":
+                    compat_messages[-1]["content"] = compat_messages[-1]["content"].rstrip() + "\n\n" + compat_instruction
+                else:
+                    compat_messages.append({"role": "user", "content": compat_instruction})
+            payload["messages"] = compat_messages
+            payload.pop("tools", None)
+        return payload
+
+    def _parse_compatibility_tool_call(self, content: str) -> Optional[List[Dict[str, Any]]]:
+        normalized = str(content or "").strip()
+        if not normalized:
+            return None
+        candidates: List[str] = []
+        fenced = re.findall(r"```(?:json)?\s*(.*?)```", normalized, re.DOTALL | re.IGNORECASE)
+        candidates.extend(part.strip() for part in fenced if str(part).strip())
+        candidates.append(normalized)
+        for candidate in candidates:
+            parsed_obj: Optional[Dict[str, Any]] = None
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    parsed_obj = parsed
+            except Exception:
+                json_match = re.search(r"\{.*\}", candidate, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(0))
+                        if isinstance(parsed, dict):
+                            parsed_obj = parsed
+                    except Exception:
+                        parsed_obj = None
+            if not parsed_obj:
+                continue
+            tool_payload = parsed_obj.get("tool_call") or parsed_obj.get("function_call")
+            if not isinstance(tool_payload, dict):
+                continue
+            name = str(tool_payload.get("name") or "").strip()
+            arguments = tool_payload.get("arguments")
+            if not name:
+                continue
+            if isinstance(arguments, str):
+                arguments_json = arguments
+            else:
+                try:
+                    arguments_json = json.dumps(arguments or {}, separators=(",", ":"), ensure_ascii=True)
+                except Exception:
+                    arguments_json = "{}"
+            return [
+                {
+                    "id": f"compat_{name}",
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments_json,
+                    },
+                }
+            ]
+        return None
+
     async def complete(self, messages: List[Dict[str, str]], **kwargs) -> ModelResponse:
         max_retries = kwargs.get("max_retries", 3)
         backoff_time = 2.0
@@ -466,36 +629,19 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         else:
             timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
-        payload = {
-            "model": self.model_id,
-            "messages": messages,
-            "stream": False,
-            "temperature": kwargs.get("temperature", 0.7)
-        }
-        if "top_p" in kwargs:
-            payload["top_p"] = kwargs["top_p"]
-        if "max_tokens" in kwargs:
-            payload["max_tokens"] = kwargs["max_tokens"]
-        if "reasoning_effort" in kwargs:
-            payload["reasoning_effort"] = kwargs["reasoning_effort"]
-        if "reasoning" in kwargs:
-            payload["reasoning"] = kwargs["reasoning"]
-        if "tools" in kwargs:
-            payload["tools"] = kwargs["tools"]
-        if "response_format" in kwargs:
-            payload["response_format"] = kwargs["response_format"]
-
         state = self._get_throttle_state(kwargs)
         telemetry = self._get_telemetry_state(kwargs)
 
         async with state.semaphore:
             for retry in range(max_retries):
+                compatibility_mode = False
                 try:
                     request_origin = self._request_origin(kwargs)
                     telemetry.request_count += 1
                     telemetry.last_request_at = datetime.utcnow().isoformat()
                     started_at = asyncio.get_running_loop().time()
                     await self._wait_for_turn(state, telemetry, request_origin=request_origin)
+                    payload = self._build_payload(messages, kwargs, compatibility_mode=compatibility_mode)
                     async with httpx.AsyncClient() as client:
                         response = await client.post(self.endpoint_url, json=payload, headers=headers, timeout=timeout)
                         response.raise_for_status()
@@ -510,6 +656,8 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         message_obj = result.get("choices", [{}])[0].get("message", {})
                         content = message_obj.get("content", "")
                         tool_calls = message_obj.get("tool_calls", None)
+                        if not tool_calls and compatibility_mode:
+                            tool_calls = self._parse_compatibility_tool_call(content)
 
                         return ModelResponse(
                             status="success",
@@ -552,6 +700,35 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
                         await self._apply_retry_after(state, effective_retry_after_s)
                     else:
                         effective_retry_after_s = retry_after_s
+
+                    if self._compatibility_retry_needed(status_code, clipped_body, payload) and not compatibility_mode:
+                        compatibility_mode = True
+                        try:
+                            compat_payload = self._build_payload(messages, kwargs, compatibility_mode=True)
+                            async with httpx.AsyncClient() as client:
+                                compat_response = await client.post(self.endpoint_url, json=compat_payload, headers=headers, timeout=timeout)
+                                compat_response.raise_for_status()
+                                telemetry.success_count += 1
+                                telemetry.last_status_code = compat_response.status_code
+                                telemetry.last_success_at = datetime.utcnow().isoformat()
+                                telemetry.last_error = None
+                                telemetry.total_latency_s += asyncio.get_running_loop().time() - started_at
+                                self._record_cloud_success(telemetry)
+                                compat_result = compat_response.json()
+                                message_obj = compat_result.get("choices", [{}])[0].get("message", {})
+                                content = message_obj.get("content", "")
+                                tool_calls = message_obj.get("tool_calls", None) or self._parse_compatibility_tool_call(content)
+                                return ModelResponse(
+                                    status="success",
+                                    content=content,
+                                    tool_calls=tool_calls,
+                                    model=self.model_id,
+                                    provider=self.provider_id,
+                                    usage=self._normalize_usage(compat_result.get("usage") or {}),
+                                    message="",
+                                )
+                        except httpx.HTTPStatusError:
+                            pass
 
                     if retry < max_retries - 1 and status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
                         self._mark_telemetry_dirty()
