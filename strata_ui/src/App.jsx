@@ -3556,6 +3556,7 @@ function App() {
               }}
               workbenchProps={{
                 apiBase: API,
+                currentScope,
                 target: workbenchTarget,
                 history: workbenchHistory,
                 activeTasks: scopedActiveTaskTree,

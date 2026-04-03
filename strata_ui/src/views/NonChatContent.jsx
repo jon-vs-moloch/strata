@@ -2518,6 +2518,7 @@ const SessionTargetCard = ({ messages, metadata }) => {
 };
 
 const WorkbenchView = ({
+  currentScope,
   target,
   activeTasks,
   finishedTasks,
@@ -2539,8 +2540,8 @@ const WorkbenchView = ({
 }) => {
   const [draftPrompt, setDraftPrompt] = useState('');
   const [sendingPrompt, setSendingPrompt] = useState(false);
-  const [responseMode, setResponseMode] = useState('thinking');
   const [activeTool, setActiveTool] = useState(null); // 'explain' | 'verify' | 'audit' | 'fix'
+  const [stepInspection, setStepInspection] = useState(null);
 
   // Task 2.1: Consolidated detail fetching via hook
   const { data: detailedTask, loading: loadingDetail, error: fetchError } = useWorkbenchData(target?.taskId, apiBase);
@@ -2561,6 +2562,13 @@ const WorkbenchView = ({
   const procedureMatch = target?.procedureId
     ? (Array.isArray(procedures) ? procedures.map((procedure) => normalizeProcedureRecord(procedure)).find((procedure) => procedure?.procedure_id === target.procedureId) : null)
     : null;
+  const workbenchLane = normalizeLaneKey(
+    target?.lane
+      || taskMatch?.lane
+      || currentScope
+      || procedureMatch?.target_lane
+      || target?.metadata?.lane
+  ) || 'agent';
   const simulationSessionId = workbenchSimulationSessionId(target);
   const sessionMatch = Array.isArray(messages)
     ? (target?.sessionId
@@ -2569,6 +2577,10 @@ const WorkbenchView = ({
     : [];
   const metadata = target?.metadata || taskMatch || procedureMatch || null;
   const hasTarget = Boolean(target || taskMatch || procedureMatch);
+
+  useEffect(() => {
+    setStepInspection(null);
+  }, [target?.taskId, target?.procedureId, target?.sessionId]);
 
   const applyWorkbenchAction = (action) => {
     setDraftPrompt(buildWorkbenchPrompt(action, target, taskMatch, procedureMatch));
@@ -2582,7 +2594,7 @@ const WorkbenchView = ({
     try {
       await onSendWorkbenchPrompt({
         prompt: normalized,
-        responseMode,
+        responseMode: 'thinking',
         target: overrides.target || target,
         task: overrides.task || taskMatch,
         procedure: overrides.procedure || procedureMatch,
@@ -2596,35 +2608,31 @@ const WorkbenchView = ({
   const handleContextualAction = async (action, item) => {
     if (action === 'preview_step') {
       try {
-        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/preview`);
+        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/preview?lane=${encodeURIComponent(workbenchLane)}`);
         const data = await resp.json();
         if (data.status === 'ok') {
-          onSendMessage && onSendMessage({
-            role: 'system',
-            content: `Prompt preview for "${item.step.title}"\n\nSYSTEM\n${data.messages[0].content}\n\nUSER\n${data.messages[1].content}`,
-            session_id: simulationSessionId,
-            simulation: true,
-            message_metadata: {
-              source_kind: 'workbench_preview',
-              workbench_session: simulationSessionId,
-              procedure_id: item.procedure.procedure_id,
-              step_id: item.step.id,
-            },
+          setStepInspection({
+            kind: 'preview',
+            lane: data.lane || workbenchLane,
+            procedureId: item.procedure.procedure_id,
+            procedureTitle: item.procedure.title,
+            stepId: item.step.id,
+            stepTitle: item.step.title,
+            messages: data.messages || [],
+            createdAt: new Date().toISOString(),
           });
         }
       } catch (err) {
         console.error('Failed to preview step:', err);
-        onSendMessage && onSendMessage({
-          role: 'system',
-          content: `Prompt preview failed for "${item.step.title}". ${err?.message || 'Unknown error.'}`,
-          session_id: simulationSessionId,
-          simulation: true,
-          message_metadata: {
-            source_kind: 'workbench_error',
-            workbench_session: simulationSessionId,
-            procedure_id: item.procedure.procedure_id,
-            step_id: item.step.id,
-          },
+        setStepInspection({
+          kind: 'error',
+          lane: workbenchLane,
+          procedureId: item.procedure.procedure_id,
+          procedureTitle: item.procedure.title,
+          stepId: item.step.id,
+          stepTitle: item.step.title,
+          createdAt: new Date().toISOString(),
+          error: `Prompt preview failed. ${err?.message || 'Unknown error.'}`,
         });
       }
       return;
@@ -2632,49 +2640,49 @@ const WorkbenchView = ({
 
     if (action === 'play_step') {
       try {
-        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/execute`, { method: 'POST' });
+        const resp = await fetch(`${apiBase}/admin/workbench/procedures/${item.procedure.procedure_id}/steps/${item.step.id}/execute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lane: workbenchLane }),
+        });
         const data = await resp.json();
         if (data.status === 'ok') {
-          const modelResp = data.response;
-          onSendMessage && onSendMessage({
-            role: 'assistant',
-            content: `Dry run result for "${item.step.title}"\n\nMODEL\n${modelResp.content || '(no content)'}\n\n${modelResp.tool_calls?.length ? `TOOL CALLS\n${modelResp.tool_calls.map((tc) => `- ${tc.function.name}(${tc.function.arguments})`).join('\n')}` : 'No tool calls returned.'}`,
-            session_id: simulationSessionId,
-            simulation: true,
-            message_metadata: {
-              source_kind: 'workbench_dry_run',
-              workbench_session: simulationSessionId,
-              procedure_id: item.procedure.procedure_id,
-              step_id: item.step.id,
-            },
+          setStepInspection({
+            kind: 'dry_run',
+            lane: data.lane || workbenchLane,
+            procedureId: item.procedure.procedure_id,
+            procedureTitle: item.procedure.title,
+            stepId: item.step.id,
+            stepTitle: item.step.title,
+            createdAt: new Date().toISOString(),
+            messages: data.messages || [],
+            response: data.response || null,
           });
         } else {
-          onSendMessage && onSendMessage({
-            role: 'system',
-            content: `Dry run failed for "${item.step.title}". ${data.message || 'Unknown error.'}`,
-            session_id: simulationSessionId,
-            simulation: true,
-            message_metadata: {
-              source_kind: 'workbench_error',
-              workbench_session: simulationSessionId,
-              procedure_id: item.procedure.procedure_id,
-              step_id: item.step.id,
-            },
+          setStepInspection({
+            kind: 'error',
+            lane: data.lane || workbenchLane,
+            procedureId: item.procedure.procedure_id,
+            procedureTitle: item.procedure.title,
+            stepId: item.step.id,
+            stepTitle: item.step.title,
+            createdAt: new Date().toISOString(),
+            messages: data.messages || [],
+            error: `Dry run failed. ${data.message || 'Unknown error.'}`,
+            response: data.response || null,
           });
         }
       } catch (err) {
         console.error('Failed to play step:', err);
-        onSendMessage && onSendMessage({
-          role: 'system',
-          content: `Dry run failed for "${item.step.title}". ${err?.message || 'Unknown error.'}`,
-          session_id: simulationSessionId,
-          simulation: true,
-          message_metadata: {
-            source_kind: 'workbench_error',
-            workbench_session: simulationSessionId,
-            procedure_id: item.procedure.procedure_id,
-            step_id: item.step.id,
-          },
+        setStepInspection({
+          kind: 'error',
+          lane: workbenchLane,
+          procedureId: item.procedure.procedure_id,
+          procedureTitle: item.procedure.title,
+          stepId: item.step.id,
+          stepTitle: item.step.title,
+          createdAt: new Date().toISOString(),
+          error: `Dry run failed. ${err?.message || 'Unknown error.'}`,
         });
       }
       return;
@@ -2687,7 +2695,7 @@ const WorkbenchView = ({
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({
-             lane: target?.lane || item.procedure?.target_lane,
+             lane: workbenchLane,
              session_id: target?.sessionId || undefined,
            })
          });
@@ -2733,6 +2741,12 @@ const WorkbenchView = ({
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                    <div style={{ width: '6px', height: '6px', borderRadius: '999px', background: '#00f294' }} />
                    <span style={{ fontSize: '10px', fontWeight: 800, color: '#00f294', letterSpacing: '0.04em' }}>LIVE ON {String(taskMatch.lane).toUpperCase()}</span>
+                </div>
+              )}
+              {!taskMatch?.lane && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <div style={{ width: '6px', height: '6px', borderRadius: '999px', background: '#60a5fa' }} />
+                  <span style={{ fontSize: '10px', fontWeight: 800, color: '#60a5fa', letterSpacing: '0.04em' }}>SCOPE {String(workbenchLane).toUpperCase()}</span>
                 </div>
               )}
             </div>
@@ -2817,6 +2831,70 @@ const WorkbenchView = ({
             </details>
           )}
         </DashboardPanel>
+
+        {stepInspection && (
+          <DashboardPanel title={stepInspection.kind === 'preview' ? 'STEP PREVIEW' : stepInspection.kind === 'dry_run' ? 'DRY RUN RESULT' : 'STEP ISSUE'}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                <RoutePill label="LANE" value={String(stepInspection.lane || workbenchLane)} tone="info" />
+                {stepInspection.procedureId && <RoutePill label="PROCEDURE" value={stepInspection.procedureId} tone="success" />}
+                {stepInspection.stepId && <RoutePill label="STEP" value={stepInspection.stepId} />}
+                <RoutePill label="MODE" value={stepInspection.kind === 'dry_run' ? 'dry_run' : stepInspection.kind} tone={stepInspection.kind === 'error' ? 'danger' : 'neutral'} />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <div style={{ color: '#edeeef', fontSize: '18px', fontWeight: 800 }}>{stepInspection.stepTitle || 'Workbench step'}</div>
+                <div style={{ color: '#8d8ea1', fontSize: '12px' }}>
+                  {stepInspection.procedureTitle || 'Workbench'} · {formatAbsoluteTime(stepInspection.createdAt)}
+                </div>
+              </div>
+              {stepInspection.error && (
+                <div style={{ padding: '14px', borderRadius: '12px', background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.18)', color: '#fecaca', fontSize: '12px', lineHeight: 1.6 }}>
+                  {stepInspection.error}
+                </div>
+              )}
+              {Array.isArray(stepInspection.messages) && stepInspection.messages.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
+                  {stepInspection.messages.map((message, index) => (
+                    <div key={`${message.role || 'message'}-${index}`} style={{ borderRadius: '12px', background: '#0f1014', border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                      <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#8d8ea1', fontSize: '10px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                        {message.role || 'message'}
+                      </div>
+                      <pre style={{ margin: 0, padding: '14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#ececf2', fontSize: '12px', lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {String(message.content || '')}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {stepInspection.response && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ borderRadius: '12px', background: '#0f1014', border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#8d8ea1', fontSize: '10px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                      Model Output
+                    </div>
+                    <pre style={{ margin: 0, padding: '14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#ececf2', fontSize: '12px', lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace" }}>
+                      {String(stepInspection.response?.content || '(no content)')}
+                    </pre>
+                  </div>
+                  {Array.isArray(stepInspection.response?.tool_calls) && stepInspection.response.tool_calls.length > 0 && (
+                    <div style={{ borderRadius: '12px', background: '#0f1014', border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                      <div style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)', color: '#8d8ea1', fontSize: '10px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                        Tool Calls
+                      </div>
+                      <div style={{ padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {stepInspection.response.tool_calls.map((toolCall, index) => (
+                          <pre key={`${toolCall?.id || toolCall?.function?.name || 'tool'}-${index}`} style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#ececf2', fontSize: '12px', lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace" }}>
+                            {`${toolCall?.function?.name || 'tool'}(${toolCall?.function?.arguments || ''})`}
+                          </pre>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </DashboardPanel>
+        )}
       </div>
 
       {/* ── COLUMN 2: ACTION CONSOLE / CHAT (30%) ───────────────────────────────── */}
@@ -2891,7 +2969,7 @@ const WorkbenchView = ({
               </div>
             ) : (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#222', fontSize: '12px', textAlign: 'center', padding: '40px' }}>
-                No investigation history for this target. Use the Action Console to query knowledge or propose changes.
+                No conversational investigation history for this target. Preview and dry-run results appear in the main Workbench pane.
               </div>
             )}
           </div>
@@ -2899,23 +2977,8 @@ const WorkbenchView = ({
 
         <div style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', background: '#0a0a0c' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-            <span style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>RESPONSE MODE</span>
-            <div style={{ display: 'inline-flex', borderRadius: '999px', padding: '2px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
-              {['thinking', 'instant'].map(m => (
-                <button
-                  key={m}
-                  onClick={() => setResponseMode(m)}
-                  style={{
-                    background: responseMode === m ? 'rgba(255,255,255,0.08)' : 'transparent',
-                    border: 'none', borderRadius: '999px', padding: '4px 10px', fontSize: '10px',
-                    fontWeight: 800, color: responseMode === m ? 'white' : '#555',
-                    cursor: 'pointer', textTransform: 'uppercase'
-                  }}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
+            <span style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>ACTION CONSOLE</span>
+            <RoutePill label="MODE" value="thinking" />
           </div>
           <textarea
             value={draftPrompt}

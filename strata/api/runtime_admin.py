@@ -46,6 +46,27 @@ def register_runtime_admin_routes(
 ) -> Dict[str, Any]:
     exported: Dict[str, Any] = {}
 
+    def _workbench_adapter_for_lane(lane: str | None):
+        normalized_lane = normalize_lane(lane) or "agent"
+        active_adapter = model_adapter
+        try:
+            lane_adapter = worker._lane_model(normalized_lane) if hasattr(worker, "_lane_model") else None
+            if lane_adapter is not None:
+                active_adapter = lane_adapter
+        except Exception:
+            active_adapter = model_adapter
+        try:
+            context = (
+                TrainerExecutionContext(run_id=f"workbench:{normalized_lane}")
+                if normalized_lane == "trainer"
+                else AgentExecutionContext(run_id=f"workbench:{normalized_lane}")
+            )
+            if hasattr(active_adapter, "bind_execution_context"):
+                active_adapter.bind_execution_context(context)
+        except Exception:
+            pass
+        return normalized_lane, active_adapter
+
     @app.get("/models")
     async def list_models():
         import httpx
@@ -624,7 +645,7 @@ def register_runtime_admin_routes(
         return {"status": "mutated", "task_id": task_id}
 
     @app.get("/admin/workbench/procedures/{procedure_id}/steps/{step_id}/preview")
-    async def preview_procedure_step(procedure_id: str, step_id: str, storage=Depends(get_storage)):
+    async def preview_procedure_step(procedure_id: str, step_id: str, lane: str | None = None, storage=Depends(get_storage)):
         from strata.procedures.registry import get_procedure
         try:
             procedure = get_procedure(storage, procedure_id)
@@ -646,10 +667,12 @@ def register_runtime_admin_routes(
             f"VERIFICATION: {step['verification']}\n\n"
             "Please analyze the current state and determine if this step is complete or if further action is required."
         )
+        effective_lane = normalize_lane(lane) or normalize_lane(procedure.get("target_lane")) or "agent"
         return {
             "status": "ok",
             "procedure_id": procedure_id,
             "step_id": step_id,
+            "lane": effective_lane,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -657,7 +680,12 @@ def register_runtime_admin_routes(
         }
 
     @app.post("/admin/workbench/procedures/{procedure_id}/steps/{step_id}/execute")
-    async def execute_procedure_step(procedure_id: str, step_id: str, storage=Depends(get_storage)):
+    async def execute_procedure_step(
+        procedure_id: str,
+        step_id: str,
+        payload: Dict[str, Any] | None = None,
+        storage=Depends(get_storage),
+    ):
         from strata.procedures.registry import get_procedure
         try:
             procedure = get_procedure(storage, procedure_id)
@@ -684,12 +712,16 @@ def register_runtime_admin_routes(
             {"role": "user", "content": user_prompt},
         ]
 
-        response = await model_adapter.chat(messages)
+        effective_lane, active_adapter = _workbench_adapter_for_lane(
+            (payload or {}).get("lane") or procedure.get("target_lane")
+        )
+        response = await active_adapter.chat(messages)
         if str(response.get("status") or "").strip().lower() != "success":
             return {
                 "status": "error",
                 "procedure_id": procedure_id,
                 "step_id": step_id,
+                "lane": effective_lane,
                 "execution_mode": "dry_run",
                 "messages": messages,
                 "message": response.get("message") or "Dry-run execution failed",
@@ -699,6 +731,7 @@ def register_runtime_admin_routes(
             "status": "ok",
             "procedure_id": procedure_id,
             "step_id": step_id,
+            "lane": effective_lane,
             "execution_mode": "dry_run",
             "messages": messages,
             "response": response,
