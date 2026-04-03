@@ -156,6 +156,11 @@ function describeTaskProgress(task) {
   };
 }
 
+function hasLiveChildWork(task) {
+  const children = Array.isArray(task?.children) ? task.children : [];
+  return children.some((child) => !TERMINAL_STATUSES.has(String(child?.status || '').trim().toLowerCase()));
+}
+
 function buildTaskContext(task) {
   const constraints = task && typeof task.constraints === 'object' && task.constraints ? task.constraints : {};
   const pendingQuestion = task?.pending_question;
@@ -510,11 +515,13 @@ const StructuredArtifactPanel = ({ artifactDisplay }) => {
 
 const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now(), laneDetail = null, detailLevel = 'compact', onOpenProcedure, onOpenTask, onOpenWorkbench, activePathIds = new Set() }) => {
   const isOnActivePath = activePathIds?.has?.(String(task.id)) || false;
+  const hasNonTerminalChildren = useMemo(() => hasLiveChildWork(task), [task]);
+  const effectivelyTerminal = TERMINAL_STATUSES.has(task.status) || (task.status === 'pushed' && !hasNonTerminalChildren);
   const defaultExpanded = useMemo(() => {
     if (isOnActivePath) return true;
-    if (!TERMINAL_STATUSES.has(task.status)) return true;
+    if (!effectivelyTerminal) return true;
     return !isNested && detailLevel === 'full';
-  }, [detailLevel, isNested, task.status, isOnActivePath]);
+  }, [detailLevel, effectivelyTerminal, isNested, isOnActivePath]);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
   useEffect(() => {
     setIsExpanded(defaultExpanded);
@@ -913,6 +920,9 @@ const TaskCardComponent = ({ task, onArchive, isNested = false, nowMs = Date.now
 
 const AttemptRow = ({ attempt, taskId, index, totalAttempts, taskUpdatedAt, defaultExpanded = false, nowMs, hasNewerAttempt = false, laneDetail = null, detailLevel = 'compact' }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  useEffect(() => {
+    setExpanded(defaultExpanded);
+  }, [defaultExpanded]);
   const outcome = OUTCOME_MAP[attempt.outcome] || { color: '#555', Icon: Activity };
   const hasOpenAttempt = !attempt.ended_at && !attempt.outcome;
   const lastActivityAt = hasNewerAttempt ? attempt.started_at : (taskUpdatedAt || attempt.started_at);
