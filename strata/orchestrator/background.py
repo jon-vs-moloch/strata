@@ -16,7 +16,14 @@ from typing import Callable, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 import httpx
 
-from strata.core.lanes import infer_execution_profile_from_task, infer_lane_from_task, infer_work_pool_from_task, normalize_lane
+from strata.core.lanes import (
+    default_work_pool_for_lane,
+    infer_execution_profile_from_task,
+    infer_lane_from_task,
+    infer_work_pool_from_task,
+    normalize_lane,
+    normalize_work_pool,
+)
 from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.feedback.signals import register_feedback_signal
 from strata.storage.models import TaskModel, TaskState, AttemptOutcome, TaskType
@@ -44,6 +51,24 @@ from strata.procedures.registry import build_procedure_task_constraints
 
 logger = logging.getLogger(__name__)
 LANE_NAMES = ("trainer", "agent")
+WORK_POOL_NAMES = ("trainer", "local_agent", "remote_agent")
+
+
+def _work_pool_for_lane(lane: Optional[str]) -> str:
+    normalized_lane = normalize_lane(lane) or "agent"
+    return default_work_pool_for_lane(normalized_lane)
+
+
+def _lane_for_work_pool(work_pool: Optional[str]) -> str:
+    normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+    return "trainer" if normalized_pool == "trainer" else "agent"
+
+
+def _work_pools_for_lane(lane: Optional[str]) -> tuple[str, ...]:
+    normalized_lane = normalize_lane(lane) or "agent"
+    if normalized_lane == "trainer":
+        return ("trainer",)
+    return ("local_agent", "remote_agent")
 
 
 def _models_endpoint_from_chat_endpoint(endpoint: str) -> str:
@@ -937,22 +962,22 @@ class BackgroundWorker:
         self._model_adapter_factory = model_adapter_factory or self._default_model_adapter_factory(model_adapter)
         self._memory = memory
         self._settings_provider = settings_provider or (lambda: {})
-        self._lane_queues: Dict[str, asyncio.Queue] = {lane: asyncio.Queue() for lane in LANE_NAMES}
-        self._running_tasks: Dict[str, Optional[asyncio.Task]] = {lane: None for lane in LANE_NAMES}
+        self._work_pool_queues: Dict[str, asyncio.Queue] = {pool: asyncio.Queue() for pool in WORK_POOL_NAMES}
+        self._running_tasks: Dict[str, Optional[asyncio.Task]] = {pool: None for pool in WORK_POOL_NAMES}
         self._on_update_callback = None
         self._running = False
         self._paused = False
         self._paused_lanes: set[str] = set()
-        self._current_processes: Dict[str, Optional[asyncio.Task]] = {lane: None for lane in LANE_NAMES}
-        self._current_task_ids: Dict[str, Optional[str]] = {lane: None for lane in LANE_NAMES}
-        self._lane_started_at: Dict[str, Optional[datetime]] = {lane: None for lane in LANE_NAMES}
-        self._lane_last_activity_at: Dict[str, Optional[datetime]] = {lane: None for lane in LANE_NAMES}
-        self._lane_activity_details: Dict[str, Dict[str, object]] = {lane: {} for lane in LANE_NAMES}
-        self._lane_step_history: Dict[str, list[Dict[str, object]]] = {lane: [] for lane in LANE_NAMES}
-        self._lane_models: Dict[str, object] = {lane: self._model_adapter_factory() for lane in LANE_NAMES}
+        self._current_processes: Dict[str, Optional[asyncio.Task]] = {pool: None for pool in WORK_POOL_NAMES}
+        self._current_task_ids: Dict[str, Optional[str]] = {pool: None for pool in WORK_POOL_NAMES}
+        self._lane_started_at: Dict[str, Optional[datetime]] = {pool: None for pool in WORK_POOL_NAMES}
+        self._lane_last_activity_at: Dict[str, Optional[datetime]] = {pool: None for pool in WORK_POOL_NAMES}
+        self._lane_activity_details: Dict[str, Dict[str, object]] = {pool: {} for pool in WORK_POOL_NAMES}
+        self._lane_step_history: Dict[str, list[Dict[str, object]]] = {pool: [] for pool in WORK_POOL_NAMES}
+        self._lane_models: Dict[str, object] = {pool: self._model_adapter_factory() for pool in WORK_POOL_NAMES}
         self._active_experiment_id: Optional[str] = None # Added for bootstrap experiments
-        self._tier_health = {"trainer": "unknown", "agent": "unknown"}
-        self._tier_retry_after_s: Dict[str, float] = {lane: 0.0 for lane in LANE_NAMES}
+        self._tier_health = {pool: "unknown" for pool in WORK_POOL_NAMES}
+        self._tier_retry_after_s: Dict[str, float] = {pool: 0.0 for pool in WORK_POOL_NAMES}
 
     def _default_model_adapter_factory(self, template_adapter):
         def _factory():
@@ -964,15 +989,21 @@ class BackgroundWorker:
 
         return _factory
 
+    def _work_pool_queue(self, work_pool: Optional[str]) -> asyncio.Queue:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        return self._work_pool_queues.setdefault(normalized_pool, asyncio.Queue())
+
     def _lane_queue(self, lane: Optional[str]) -> asyncio.Queue:
-        normalized_lane = normalize_lane(lane) or "agent"
-        return self._lane_queues.setdefault(normalized_lane, asyncio.Queue())
+        return self._work_pool_queue(_work_pool_for_lane(lane))
+
+    def _work_pool_model(self, work_pool: Optional[str]):
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
+        if normalized_pool not in self._lane_models:
+            self._lane_models[normalized_pool] = self._model_adapter_factory()
+        return self._lane_models[normalized_pool]
 
     def _lane_model(self, lane: Optional[str]):
-        normalized_lane = normalize_lane(lane) or "agent"
-        if normalized_lane not in self._lane_models:
-            self._lane_models[normalized_lane] = self._model_adapter_factory()
-        return self._lane_models[normalized_lane]
+        return self._work_pool_model(_work_pool_for_lane(lane))
 
     def _settings(self) -> dict:
         try:
@@ -981,24 +1012,145 @@ class BackgroundWorker:
             logger.error(f"Failed to read worker settings; using defaults. ({exc})")
             return {}
 
-    async def _retry_lane_preflight_if_due(self, lane: str) -> bool:
+    def _status_key(self, lane_or_pool: Optional[str]) -> Optional[str]:
+        return normalize_work_pool(lane_or_pool) or normalize_lane(lane_or_pool)
+
+    def _lane_health(self, lane: Optional[str]) -> str:
         normalized_lane = normalize_lane(lane) or "agent"
+        direct_health = str(self._tier_health.get(normalized_lane) or "").lower()
+        if direct_health in {"ok", "error"}:
+            return direct_health
+        healths = [str(self._tier_health.get(pool) or "unknown").lower() for pool in _work_pools_for_lane(normalized_lane)]
+        if any(item == "ok" for item in healths):
+            return "ok"
+        if any(item == "error" for item in healths):
+            return "error"
+        return "unknown"
+
+    def _legacy_lane_runtime_snapshot(self, lane: str) -> Optional[Dict[str, object]]:
+        normalized_lane = normalize_lane(lane)
+        if not normalized_lane:
+            return None
+        current_task_id = self._current_task_ids.get(normalized_lane)
+        current_process = self._current_processes.get(normalized_lane)
+        queue_depth = 0
+        legacy_queues = getattr(self, "_queues", None)
+        try:
+            if legacy_queues and normalized_lane in legacy_queues:
+                queue_depth = legacy_queues.get(normalized_lane).qsize()
+        except Exception:
+            queue_depth = 0
+        if (
+            current_task_id is None
+            and current_process is None
+            and queue_depth <= 0
+            and not self._lane_activity_details.get(normalized_lane)
+            and not self._lane_started_at.get(normalized_lane)
+            and not self._lane_last_activity_at.get(normalized_lane)
+            and normalized_lane not in self._tier_health
+        ):
+            return None
+
+        snapshot: Dict[str, object] = {
+            "work_pool": normalized_lane,
+            "status": "STOPPED"
+            if not self._running
+            else (
+                "PAUSED"
+                if self._paused or normalized_lane in self._paused_lanes
+                else ("RUNNING" if current_process is not None else ("RUNNING" if queue_depth > 0 else "IDLE"))
+            ),
+            "tier_health": self._tier_health.get(normalized_lane, "unknown"),
+            "activity_mode": "UNKNOWN",
+            "activity_label": "Unknown",
+            "activity_reason": "",
+            "queue_depth": queue_depth,
+            "current_task_id": str(current_task_id) if current_task_id else None,
+            "current_task_started_at": None,
+            "current_task_title": "",
+            "current_task_state": None,
+            "active_attempt_id": None,
+            "step": "",
+            "step_label": "",
+            "step_detail": "",
+            "step_updated_at": None,
+            "progress_label": "",
+            "recent_steps": [],
+            "ticker_items": [],
+            "last_activity_at": None,
+            "heartbeat_state": "unknown",
+            "heartbeat_age_s": None,
+        }
+        started_at = _parse_timestamp(self._lane_started_at.get(normalized_lane))
+        if started_at is not None:
+            snapshot["current_task_started_at"] = started_at.isoformat()
+        last_activity_at = _parse_timestamp(self._lane_last_activity_at.get(normalized_lane))
+        if last_activity_at is not None:
+            snapshot["last_activity_at"] = last_activity_at.isoformat()
+        snapshot.update(dict(self._lane_activity_details.get(normalized_lane) or {}))
+        now = datetime.now(timezone.utc)
+        if last_activity_at is not None:
+            heartbeat_age_s = max(0.0, (now - last_activity_at).total_seconds())
+            snapshot["heartbeat_age_s"] = round(heartbeat_age_s, 2)
+            if heartbeat_age_s <= 45:
+                snapshot["heartbeat_state"] = "active"
+            elif heartbeat_age_s <= 180:
+                snapshot["heartbeat_state"] = "quiet"
+            else:
+                snapshot["heartbeat_state"] = "stalled"
+
+        status = str(snapshot["status"] or "UNKNOWN")
+        tier_health = str(snapshot["tier_health"] or "unknown").lower()
+        if status == "STOPPED":
+            snapshot["activity_mode"] = "STOPPED"
+            snapshot["activity_label"] = "Stopped"
+            snapshot["activity_reason"] = "Worker is offline."
+        elif status == "PAUSED":
+            snapshot["activity_mode"] = "PAUSED"
+            snapshot["activity_label"] = "Paused"
+            snapshot["activity_reason"] = "Execution is paused."
+        elif tier_health == "error":
+            snapshot["activity_mode"] = "OFFLINE"
+            snapshot["activity_label"] = "Offline"
+            snapshot["activity_reason"] = "Lane health is degraded."
+        elif current_task_id:
+            if snapshot["heartbeat_state"] == "stalled":
+                snapshot["activity_mode"] = "STALLED"
+                snapshot["activity_label"] = "Stalled"
+                snapshot["activity_reason"] = str(snapshot.get("step_detail") or snapshot.get("step_label") or "Waiting for progress heartbeat.").strip()
+            else:
+                snapshot["activity_mode"] = "GENERATING"
+                snapshot["activity_label"] = "Generating"
+                snapshot["activity_reason"] = str(snapshot.get("step_detail") or snapshot.get("step_label") or snapshot.get("current_task_title") or "Making progress.").strip()
+        elif queue_depth:
+            snapshot["activity_mode"] = "QUEUED"
+            snapshot["activity_label"] = "Queued"
+            snapshot["activity_reason"] = "Runnable work is queued."
+        else:
+            snapshot["activity_mode"] = "IDLE"
+            snapshot["activity_label"] = "Idle"
+            snapshot["activity_reason"] = "No runnable work is queued."
+        return snapshot
+
+    async def _retry_work_pool_preflight_if_due(self, work_pool: str) -> bool:
+        normalized_pool = normalize_work_pool(work_pool) or "local_agent"
         now = asyncio.get_running_loop().time()
-        if now < float(self._tier_retry_after_s.get(normalized_lane) or 0.0):
+        if now < float(self._tier_retry_after_s.get(normalized_pool) or 0.0):
             return False
 
-        from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
+        from strata.schemas.execution import TrainerExecutionContext, LocalAgentExecutionContext, RemoteAgentExecutionContext
 
-        context = (
-            TrainerExecutionContext(run_id=f"recheck_{normalized_lane}")
-            if normalized_lane == "trainer"
-            else AgentExecutionContext(run_id=f"recheck_{normalized_lane}")
-        )
+        if normalized_pool == "trainer":
+            context = TrainerExecutionContext(run_id=f"recheck_{normalized_pool}")
+        elif normalized_pool == "remote_agent":
+            context = RemoteAgentExecutionContext(run_id=f"recheck_{normalized_pool}")
+        else:
+            context = LocalAgentExecutionContext(run_id=f"recheck_{normalized_pool}")
         settings = self._settings()
-        lane_model = self._lane_model(normalized_lane)
+        lane_model = self._work_pool_model(normalized_pool)
         try:
             ok, reason = await _preflight_lane_model(
-                normalized_lane,
+                normalized_pool,
                 lane_model,
                 context,
                 auto_swap_local_missing=bool(
@@ -1010,16 +1162,16 @@ class BackgroundWorker:
             ok, reason = False, str(exc)
 
         if ok:
-            self._tier_health[normalized_lane] = "ok"
-            self._tier_retry_after_s[normalized_lane] = 0.0
-            logger.warning("Lane '%s' recovered after background preflight retry.", normalized_lane)
+            self._tier_health[normalized_pool] = "ok"
+            self._tier_retry_after_s[normalized_pool] = 0.0
+            logger.warning("Work pool '%s' recovered after background preflight retry.", normalized_pool)
             return True
 
-        self._tier_health[normalized_lane] = "error"
-        self._tier_retry_after_s[normalized_lane] = now + 60.0
+        self._tier_health[normalized_pool] = "error"
+        self._tier_retry_after_s[normalized_pool] = now + 60.0
         logger.warning(
-            "Lane '%s' remains unavailable after background preflight retry: %s",
-            normalized_lane,
+            "Work pool '%s' remains unavailable after background preflight retry: %s",
+            normalized_pool,
             reason or "unknown preflight error",
         )
         return False
@@ -1028,19 +1180,20 @@ class BackgroundWorker:
         if self._running:
             return
             
-        # 1. Deep preflight model check (trainer-agent + agent)
-        logger.info("Performing deep preflight check (trainer-agent + agent tiers)...")
-        from strata.schemas.execution import TrainerExecutionContext, AgentExecutionContext
+        # 1. Deep preflight model check by work pool
+        logger.info("Performing deep preflight check for trainer/local_agent/remote_agent work pools...")
+        from strata.schemas.execution import TrainerExecutionContext, LocalAgentExecutionContext, RemoteAgentExecutionContext
         settings = self._settings()
         
         contexts = [
             ("trainer", TrainerExecutionContext(run_id="preflight")),
-            ("agent", AgentExecutionContext(run_id="preflight"))
+            ("local_agent", LocalAgentExecutionContext(run_id="preflight")),
+            ("remote_agent", RemoteAgentExecutionContext(run_id="preflight")),
         ]
 
         for name, ctx in contexts:
-            logger.info(f"Checking {name} model tier...")
-            lane_model = self._lane_model(name)
+            logger.info(f"Checking {name} work pool...")
+            lane_model = self._work_pool_model(name)
             try:
                 ok, reason = await _preflight_lane_model(
                     name,
@@ -1053,35 +1206,42 @@ class BackgroundWorker:
                 )
                 if not ok:
                     raise RuntimeError(reason)
-                logger.info(f"  -> {name} tier is reachable.")
+                logger.info(f"  -> {name} work pool is reachable.")
                 self._tier_health[name] = "ok"
                 self._tier_retry_after_s[name] = 0.0
             except Exception as e:
                 # Special case: if the trainer-agent tier is missing a cloud key,
                 # we do not necessarily want to hard-fail if the local agent tier is alive.
                 # We still log it loudly so the operator knows bootstrap quality is degraded.
-                logger.error(f"  -> {name} tier FAILED check: {e}")
+                logger.error(f"  -> {name} work pool FAILED check: {e}")
                 self._tier_health[name] = "error"
                 self._tier_retry_after_s[name] = asyncio.get_running_loop().time() + 60.0
-                logger.warning("Worker proceeding with lane '%s' unavailable until its configured transport is healthy again.", name)
+                logger.warning("Worker proceeding with work pool '%s' unavailable until its configured transport is healthy again.", name)
 
         if all(status == "error" for status in self._tier_health.values()):
-            raise Exception("Worker cannot start: both trainer and agent lanes are unreachable.")
+            raise Exception("Worker cannot start: all configured work pools are unreachable.")
 
         # 2. Start Recovery Sweep
         await recover_tasks(
             self._storage_factory,
-            self._lane_queue("trainer"),
+            self._work_pool_queue("trainer"),
             recover_orphaned_running=not settings.get("testing_mode", False),
             requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
-            task_filter=lambda task: normalize_lane(infer_lane_from_task(task)) == "trainer",
+            task_filter=lambda task: (infer_work_pool_from_task(task) or default_work_pool_for_lane(infer_lane_from_task(task))) == "trainer",
         )
         await recover_tasks(
             self._storage_factory,
-            self._lane_queue("agent"),
+            self._work_pool_queue("local_agent"),
             recover_orphaned_running=not settings.get("testing_mode", False),
             requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
-            task_filter=lambda task: normalize_lane(infer_lane_from_task(task)) == "agent",
+            task_filter=lambda task: (infer_work_pool_from_task(task) or default_work_pool_for_lane(infer_lane_from_task(task))) == "local_agent",
+        )
+        await recover_tasks(
+            self._storage_factory,
+            self._work_pool_queue("remote_agent"),
+            recover_orphaned_running=not settings.get("testing_mode", False),
+            requeue_existing_pending=settings.get("replay_pending_tasks_on_startup", False),
+            task_filter=lambda task: (infer_work_pool_from_task(task) or default_work_pool_for_lane(infer_lane_from_task(task))) == "remote_agent",
         )
         if not settings.get("testing_mode", False):
             replayed = await self.enqueue_runnable_tasks()
@@ -1092,8 +1252,8 @@ class BackgroundWorker:
         self._running = True
         if not settings.get("testing_mode", False):
             await self._ensure_lane_idle_policies(settings)
-        for lane in LANE_NAMES:
-            self._running_tasks[lane] = asyncio.create_task(self._loop(lane), name=f"background-worker:{lane}")
+        for work_pool in WORK_POOL_NAMES:
+            self._running_tasks[work_pool] = asyncio.create_task(self._loop(work_pool), name=f"background-worker:{work_pool}")
         logger.info("BackgroundWorker started (Hardened Startup)")
 
     async def stop(self):
@@ -1152,12 +1312,12 @@ class BackgroundWorker:
         attempt_id: Optional[str] = None,
         progress_label: Optional[str] = None,
     ) -> None:
-        normalized_lane = normalize_lane(lane)
-        if not normalized_lane:
+        status_key = self._status_key(lane)
+        if not status_key:
             return
         now = datetime.now(timezone.utc)
-        self._lane_last_activity_at[normalized_lane] = now
-        details = dict(self._lane_activity_details.get(normalized_lane) or {})
+        self._lane_last_activity_at[status_key] = now
+        details = dict(self._lane_activity_details.get(status_key) or {})
         event = {
             "step": str(step or "").strip().lower() or "unknown",
             "label": str(label or "").strip() or "Working",
@@ -1180,7 +1340,7 @@ class BackgroundWorker:
             details["active_attempt_id"] = str(attempt_id or "")
         if progress_label is not None:
             details["progress_label"] = str(progress_label or "")
-        history = list(self._lane_step_history.get(normalized_lane) or [])
+        history = list(self._lane_step_history.get(status_key) or [])
         previous = history[-1] if history else None
         duplicate_event = (
             isinstance(previous, dict)
@@ -1190,21 +1350,21 @@ class BackgroundWorker:
         )
         if not duplicate_event:
             history.append(event)
-        self._lane_step_history[normalized_lane] = history[-18:]
-        details["recent_steps"] = list(self._lane_step_history[normalized_lane][-6:])
+        self._lane_step_history[status_key] = history[-18:]
+        details["recent_steps"] = list(self._lane_step_history[status_key][-6:])
         ticker_items = []
-        for item in self._lane_step_history[normalized_lane][-8:]:
+        for item in self._lane_step_history[status_key][-8:]:
             rendered = f"{item.get('label')}{f': {item.get('detail')}' if item.get('detail') else ''}"
             if not ticker_items or ticker_items[-1] != rendered:
                 ticker_items.append(rendered)
         details["ticker_items"] = ticker_items
-        self._lane_activity_details[normalized_lane] = details
+        self._lane_activity_details[status_key] = details
 
     async def enqueue(self, task_id: str):
         await self.enqueue_with_priority(task_id, front=False)
         
     async def enqueue_with_priority(self, task_id: str, *, front: bool = False):
-        queue = self._lane_queue(self._lane_for_task_id(task_id))
+        queue = self._work_pool_queue(self._work_pool_for_task_id(task_id))
         if task_id in {queued_task_id for queued_task_id in list(getattr(queue, "_queue", []))}:
             logger.info("Skipped enqueue for task %s because it is already queued.", task_id)
             return
@@ -1271,20 +1431,22 @@ class BackgroundWorker:
         deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout))
         while asyncio.get_running_loop().time() < deadline:
             if normalized_lane:
-                if self._current_processes.get(normalized_lane) is None:
+                if all(self._current_processes.get(pool) is None for pool in _work_pools_for_lane(normalized_lane)):
                     return True
             elif all(process is None for process in self._current_processes.values()):
                 return True
             await asyncio.sleep(0.05)
         if normalized_lane:
-            return self._current_processes.get(normalized_lane) is None
+            return all(self._current_processes.get(pool) is None for pool in _work_pools_for_lane(normalized_lane))
         return all(process is None for process in self._current_processes.values())
 
     def clear_queue(self, lane: Optional[str] = None) -> int:
         cleared = 0
-        lanes = [normalize_lane(lane)] if normalize_lane(lane) else list(LANE_NAMES)
-        for lane_name in lanes:
-            queue = self._lane_queue(lane_name)
+        pools = [normalize_work_pool(lane)] if normalize_work_pool(lane) else (
+            list(_work_pools_for_lane(lane)) if normalize_lane(lane) else list(WORK_POOL_NAMES)
+        )
+        for pool_name in pools:
+            queue = self._work_pool_queue(pool_name)
             while True:
                 try:
                     queue.get_nowait()
@@ -1307,6 +1469,16 @@ class BackgroundWorker:
         finally:
             storage.session.close()
 
+    def _work_pool_for_task_id(self, task_id: str) -> Optional[str]:
+        storage = self._storage_factory()
+        try:
+            task = storage.session.query(TaskModel).filter_by(task_id=task_id).first()
+            if not task:
+                return None
+            return normalize_work_pool(infer_work_pool_from_task(task))
+        finally:
+            storage.session.close()
+
     def _task_is_paused(self, task_id: str) -> bool:
         storage = self._storage_factory()
         try:
@@ -1321,8 +1493,9 @@ class BackgroundWorker:
         normalized_lane = normalize_lane(lane)
         if not normalized_lane:
             return False
-        if self._current_processes.get(normalized_lane) is not None:
-            return True
+        for work_pool in _work_pools_for_lane(normalized_lane):
+            if self._current_processes.get(work_pool) is not None:
+                return True
         storage = self._storage_factory()
         try:
             query = storage.session.query(TaskModel).filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
@@ -1342,6 +1515,7 @@ class BackgroundWorker:
 
     async def enqueue_runnable_tasks(self, lane: Optional[str] = None) -> int:
         normalized_lane = normalize_lane(lane)
+        normalized_work_pool = normalize_work_pool(lane)
         storage = self._storage_factory()
         try:
             query = storage.session.query(TaskModel).filter(TaskModel.state.in_([TaskState.PENDING, TaskState.WORKING]))
@@ -1361,6 +1535,9 @@ class BackgroundWorker:
                 task_lane = normalize_lane(infer_lane_from_task(task))
                 if normalized_lane and task_lane != normalized_lane:
                     continue
+                task_work_pool = normalize_work_pool(infer_work_pool_from_task(task))
+                if normalized_work_pool and task_work_pool != normalized_work_pool:
+                    continue
                 if task.dependencies and any(dep.state != TaskState.COMPLETE for dep in task.dependencies):
                     continue
                 if task.task_id in {task_id for task_id in self._current_task_ids.values() if task_id}:
@@ -1377,7 +1554,7 @@ class BackgroundWorker:
             return
 
         if (
-            self._tier_health.get("trainer") == "ok"
+            self._lane_health("trainer") == "ok"
             and "trainer" not in self._paused_lanes
             and not self._lane_has_runnable_or_active_work("trainer")
         ):
@@ -1401,11 +1578,11 @@ class BackgroundWorker:
 
         if (
             settings.get("automatic_task_generation", False)
-            and self._tier_health.get("agent") != "error"
+            and self._lane_health("agent") != "error"
             and "agent" not in self._paused_lanes
         ):
             if not self._lane_has_runnable_or_active_work("agent"):
-                await run_idle_tasks(self._storage_factory, self._lane_model("agent"), self._lane_queue("agent"))
+                await run_idle_tasks(self._storage_factory, self._work_pool_model("local_agent"), self._work_pool_queue("local_agent"))
 
     def _update_task_control_state(
         self,
@@ -1444,29 +1621,29 @@ class BackgroundWorker:
             storage.session.close()
 
     async def _loop(self, lane: str):
-        normalized_lane = normalize_lane(lane) or "agent"
-        lane_queue = self._lane_queue(normalized_lane)
+        normalized_work_pool = normalize_work_pool(lane) or "local_agent"
+        lane_queue = self._work_pool_queue(normalized_work_pool)
         idle_ticks = 0
         while self._running:
-            if self._paused or normalized_lane in self._paused_lanes:
+            if self._paused or _lane_for_work_pool(normalized_work_pool) in self._paused_lanes:
                 await asyncio.sleep(0.5)
                 continue
-            if self._tier_health.get(normalized_lane) == "error":
-                await self._retry_lane_preflight_if_due(normalized_lane)
+            if self._tier_health.get(normalized_work_pool) == "error":
+                await self._retry_work_pool_preflight_if_due(normalized_work_pool)
                 await asyncio.sleep(1.0)
                 continue
 
             try:
                 task_id = await asyncio.wait_for(lane_queue.get(), timeout=1.0)
                 idle_ticks = 0
-                task_lane = self._lane_for_task_id(task_id)
-                if task_lane and normalize_lane(task_lane) != normalized_lane:
-                    await self._lane_queue(task_lane).put(task_id)
+                task_work_pool = self._work_pool_for_task_id(task_id)
+                if task_work_pool and normalize_work_pool(task_work_pool) != normalized_work_pool:
+                    await self._work_pool_queue(task_work_pool).put(task_id)
                     lane_queue.task_done()
                     await asyncio.sleep(0.05)
                     continue
-                if task_lane and task_lane in self._paused_lanes:
-                    await lane_queue.put(task_id)
+                if task_work_pool and _lane_for_work_pool(task_work_pool) in self._paused_lanes:
+                    await self._work_pool_queue(task_work_pool).put(task_id)
                     lane_queue.task_done()
                     await asyncio.sleep(0.1)
                     continue
@@ -1474,30 +1651,30 @@ class BackgroundWorker:
                     lane_queue.task_done()
                     continue
 
-                self._current_task_ids[normalized_lane] = task_id
+                self._current_task_ids[normalized_work_pool] = task_id
                 now = datetime.now(timezone.utc)
-                self._lane_started_at[normalized_lane] = now
-                self._lane_last_activity_at[normalized_lane] = now
-                self._lane_activity_details[normalized_lane] = {
+                self._lane_started_at[normalized_work_pool] = now
+                self._lane_last_activity_at[normalized_work_pool] = now
+                self._lane_activity_details[normalized_work_pool] = {
                     "current_task_id": str(task_id),
                     "step": "queued",
                     "step_label": "Starting task",
                     "step_detail": "",
                     "step_updated_at": now.isoformat(),
                 }
-                self._lane_step_history[normalized_lane] = []
-                self._current_processes[normalized_lane] = asyncio.create_task(self._run_task_cycle(task_id, lane=normalized_lane))
+                self._lane_step_history[normalized_work_pool] = []
+                self._current_processes[normalized_work_pool] = asyncio.create_task(self._run_task_cycle(task_id, lane=_lane_for_work_pool(normalized_work_pool)))
                 try:
-                    await self._current_processes[normalized_lane]
+                    await self._current_processes[normalized_work_pool]
                 except asyncio.CancelledError:
                     logger.info(f"Task process {task_id} was forced STOPPED.")
                 finally:
-                    self._current_processes[normalized_lane] = None
-                    self._current_task_ids[normalized_lane] = None
-                    self._lane_started_at[normalized_lane] = None
-                    self._lane_last_activity_at[normalized_lane] = datetime.now(timezone.utc)
-                    self._lane_activity_details[normalized_lane] = {}
-                    self._lane_step_history[normalized_lane] = []
+                    self._current_processes[normalized_work_pool] = None
+                    self._current_task_ids[normalized_work_pool] = None
+                    self._lane_started_at[normalized_work_pool] = None
+                    self._lane_last_activity_at[normalized_work_pool] = datetime.now(timezone.utc)
+                    self._lane_activity_details[normalized_work_pool] = {}
+                    self._lane_step_history[normalized_work_pool] = []
                     await self._ensure_lane_idle_policies()
 
                 lane_queue.task_done()
@@ -1508,7 +1685,7 @@ class BackgroundWorker:
                     if settings.get("testing_mode", False):
                         logger.info("Testing mode active; skipping autonomous idle task generation.")
                     else:
-                        replayed = await self.enqueue_runnable_tasks(normalized_lane)
+                        replayed = await self.enqueue_runnable_tasks(normalized_work_pool)
                         if replayed:
                             logger.info("Worker idle with runnable backlog; re-enqueued %s task(s).", replayed)
                             idle_ticks = 0
@@ -1531,6 +1708,7 @@ class BackgroundWorker:
             if not task or task.state in [TaskState.COMPLETE, TaskState.CANCELLED]:
                 return
             if (task.constraints or {}).get("system_job"):
+                task_work_pool = infer_work_pool_from_task(task) or infer_execution_profile_from_task(task) or lane or "local_agent"
                 self._mark_lane_progress(
                     lane or infer_lane_from_task(task),
                     step="queued",
@@ -1543,7 +1721,7 @@ class BackgroundWorker:
                 await run_eval_job_task(
                     task,
                     storage,
-                    self._lane_model(lane),
+                    self._work_pool_model(task_work_pool),
                     progress_fn=lambda **payload: self._mark_lane_progress(
                         lane or infer_lane_from_task(task),
                         step=payload.get("step", "system_job"),
@@ -1573,7 +1751,7 @@ class BackgroundWorker:
             
             task_lane = normalize_lane(lane or infer_lane_from_task(task)) or "agent"
             task_work_pool = infer_work_pool_from_task(task) or infer_execution_profile_from_task(task) or context.mode
-            lane_model = self._lane_model(task_lane)
+            lane_model = self._work_pool_model(task_work_pool)
             lane_model.bind_execution_context(context)
             logger.info(f"Routing task {task_id} to {context.mode} execution context [Exp: {self._active_experiment_id}]")
             self._mark_lane_progress(
@@ -2105,11 +2283,13 @@ class BackgroundWorker:
     def stop_current(self, lane: Optional[str] = None):
         normalized_lane = normalize_lane(lane)
         if normalized_lane:
-            process = self._current_processes.get(normalized_lane)
-            if process:
-                process.cancel()
-                return True
-            return False
+            cancelled = False
+            for pool in _work_pools_for_lane(normalized_lane):
+                process = self._current_processes.get(pool)
+                if process:
+                    process.cancel()
+                    cancelled = True
+            return cancelled
         cancelled = False
         for process in self._current_processes.values():
             if process:
@@ -2189,13 +2369,22 @@ class BackgroundWorker:
             return "PAUSED"
         if self._current_processes.get(normalized_lane) is not None:
             return "RUNNING"
+        legacy_queues = getattr(self, "_queues", None) or {}
+        direct_queue = legacy_queues.get(normalized_lane)
+        if direct_queue is not None and direct_queue.qsize() > 0:
+            return "RUNNING"
+        if any(self._current_processes.get(pool) is not None for pool in _work_pools_for_lane(normalized_lane)):
+            return "RUNNING"
+        if any(self._work_pool_queue(pool).qsize() > 0 for pool in _work_pools_for_lane(normalized_lane)):
+            return "RUNNING"
         return "IDLE"
 
-    def _lane_runtime_snapshot(self, lane: str) -> Dict[str, object]:
-        normalized_lane = normalize_lane(lane)
+    def _work_pool_runtime_snapshot(self, work_pool: str) -> Dict[str, object]:
+        normalized_pool = normalize_work_pool(work_pool)
         snapshot: Dict[str, object] = {
-            "status": self.lane_status(lane),
-            "tier_health": self._tier_health.get(normalized_lane or "", "unknown"),
+            "work_pool": normalized_pool,
+            "status": "STOPPED" if not self._running else ("PAUSED" if self._paused or _lane_for_work_pool(normalized_pool) in self._paused_lanes else ("RUNNING" if self._current_processes.get(normalized_pool) is not None else "IDLE")),
+            "tier_health": self._tier_health.get(normalized_pool or "", "unknown"),
             "activity_mode": "UNKNOWN",
             "activity_label": "Unknown",
             "activity_reason": "",
@@ -2216,13 +2405,13 @@ class BackgroundWorker:
             "heartbeat_state": "unknown",
             "heartbeat_age_s": None,
         }
-        if not normalized_lane:
+        if not normalized_pool:
             return snapshot
 
-        snapshot["queue_depth"] = self._lane_queue(normalized_lane).qsize()
-        current_task_id = self._current_task_ids.get(normalized_lane)
-        started_at = _parse_timestamp(self._lane_started_at.get(normalized_lane))
-        last_activity_at = _parse_timestamp(self._lane_last_activity_at.get(normalized_lane)) or started_at
+        snapshot["queue_depth"] = self._work_pool_queue(normalized_pool).qsize()
+        current_task_id = self._current_task_ids.get(normalized_pool)
+        started_at = _parse_timestamp(self._lane_started_at.get(normalized_pool))
+        last_activity_at = _parse_timestamp(self._lane_last_activity_at.get(normalized_pool)) or started_at
 
         if current_task_id:
             snapshot["current_task_id"] = str(current_task_id)
@@ -2230,7 +2419,7 @@ class BackgroundWorker:
             snapshot["current_task_started_at"] = started_at.isoformat()
         if last_activity_at is not None:
             snapshot["last_activity_at"] = last_activity_at.isoformat()
-        snapshot.update(dict(self._lane_activity_details.get(normalized_lane) or {}))
+        snapshot.update(dict(self._lane_activity_details.get(normalized_pool) or {}))
 
         # Reconcile volatile in-memory lane activity with durable task/attempt state so
         # operator-facing status does not drift from the actual active branch.
@@ -2268,7 +2457,7 @@ class BackgroundWorker:
                     if attempt_started is not None:
                         snapshot["current_task_started_at"] = attempt_started.isoformat()
             except Exception:
-                logger.debug("Failed to reconcile lane runtime snapshot for %s", normalized_lane, exc_info=True)
+                logger.debug("Failed to reconcile work pool runtime snapshot for %s", normalized_pool, exc_info=True)
             finally:
                 if storage is not None:
                     storage.session.close()
@@ -2317,13 +2506,51 @@ class BackgroundWorker:
             snapshot["activity_reason"] = "No runnable work is queued."
         return snapshot
 
+    def _lane_runtime_snapshot(self, lane: str) -> Dict[str, object]:
+        normalized_lane = normalize_lane(lane)
+        snapshot = self._work_pool_runtime_snapshot(_work_pool_for_lane(normalized_lane))
+        if not normalized_lane:
+            return snapshot
+        legacy_snapshot = self._legacy_lane_runtime_snapshot(normalized_lane)
+        if legacy_snapshot is not None:
+            snapshot.update({k: v for k, v in legacy_snapshot.items() if k != "work_pool"})
+            snapshot["work_pool"] = legacy_snapshot.get("work_pool")
+        pools = _work_pools_for_lane(normalized_lane)
+        pool_snapshots = [self._work_pool_runtime_snapshot(pool) for pool in pools]
+        snapshot["status"] = self.lane_status(normalized_lane)
+        snapshot["queue_depth"] = sum(int(item.get("queue_depth") or 0) for item in pool_snapshots)
+        if legacy_snapshot is not None:
+            snapshot["queue_depth"] = int(snapshot.get("queue_depth") or 0) + int(legacy_snapshot.get("queue_depth") or 0)
+        healths = [str(item.get("tier_health") or "unknown").lower() for item in pool_snapshots]
+        legacy_health = str(legacy_snapshot.get("tier_health") or "unknown").lower() if legacy_snapshot is not None else "unknown"
+        if legacy_health == "ok" or any(item == "ok" for item in healths):
+            snapshot["tier_health"] = "ok"
+        elif legacy_health == "error" or any(item == "error" for item in healths):
+            snapshot["tier_health"] = "error"
+        else:
+            snapshot["tier_health"] = "unknown"
+        active_pool = next((item for item in pool_snapshots if item.get("current_task_id")), None)
+        if active_pool is None:
+            active_pool = next((item for item in pool_snapshots if str(item.get("status") or "").upper() == "RUNNING"), None)
+        if active_pool is None and legacy_snapshot is not None and legacy_snapshot.get("current_task_id"):
+            active_pool = legacy_snapshot
+        if active_pool is None and legacy_snapshot is not None and str(legacy_snapshot.get("status") or "").upper() == "RUNNING":
+            active_pool = legacy_snapshot
+        if active_pool is not None:
+            snapshot.update({k: v for k, v in active_pool.items() if k not in {"tier_health", "queue_depth", "status"}})
+            snapshot["work_pool"] = active_pool.get("work_pool")
+        return snapshot
+
     @property
     def status(self):
         return {
             "worker": "STOPPED" if not self._running else ("PAUSED" if self._paused else "RUNNING"),
             "global_paused": self._paused,
             "paused_lanes": sorted(self._paused_lanes),
-            "tiers": self._tier_health,
+            "tiers": {
+                "trainer": self._lane_health("trainer"),
+                "agent": self._lane_health("agent"),
+            },
             "lanes": {
                 "trainer": self.lane_status("trainer"),
                 "agent": self.lane_status("agent"),
@@ -2331,5 +2558,9 @@ class BackgroundWorker:
             "lane_details": {
                 "trainer": self._lane_runtime_snapshot("trainer"),
                 "agent": self._lane_runtime_snapshot("agent"),
+            },
+            "work_pools": {
+                pool: self._work_pool_runtime_snapshot(pool)
+                for pool in WORK_POOL_NAMES
             },
         }
