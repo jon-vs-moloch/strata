@@ -58,7 +58,7 @@ from strata.specs.bootstrap import (
     resolve_spec_proposal,
     resubmit_spec_proposal_with_clarification,
 )
-from strata.procedures.registry import ensure_onboarding_task, ensure_startup_smoke_task
+from strata.procedures.registry import ensure_startup_smoke_task
 from strata.runtime_config import (
     GLOBAL_SETTINGS,
     SETTINGS_PARAMETER_DESCRIPTION,
@@ -249,11 +249,7 @@ async def lifespan(app: FastAPI):
             storage.rollback()
         seeded_smoke = ensure_startup_smoke_task(storage, _worker)
         if seeded_smoke is not None:
-            logger.info("Seeded startup smoke task %s during API startup.", getattr(seeded_smoke, "task_id", "unknown"))
-        else:
-            seeded_onboarding = ensure_onboarding_task(storage, _worker)
-            if seeded_onboarding is not None:
-                logger.info("Seeded onboarding task %s during API startup.", getattr(seeded_onboarding, "task_id", "unknown"))
+            logger.info("Seeded preflight task %s during API startup.", getattr(seeded_smoke, "task_id", "unknown"))
     finally:
         storage.close()
     if _embed_worker:

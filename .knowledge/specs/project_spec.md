@@ -27,7 +27,7 @@ Normal operating mode:
 - the default bootstrap relationship is supervisory trainer -> agent, with both tiers allowed to propose bounded mutations
 - trainer and agent lanes should execute independently and avoid shared bottlenecks; a busy or stalled trainer loop must not prevent agent work from running, and vice versa
 - trainer and agent should use distinct inference pools by default; cross-tier assistance should be expressed as explicit task/review handoffs rather than silent cross-pool execution
-- onboarding is an agent-facing startup procedure; trainer bootstrap and supervision work should continue unless explicitly paused, rather than waiting on operator-facing onboarding steps that do not belong to the trainer role
+- preflight is the default agent-facing startup procedure; trainer bootstrap and supervision work should continue unless explicitly paused, rather than waiting on operator-facing startup checks that do not belong to the trainer role
 - evals should support diagnosis and promotion decisions, not dominate wall-clock activity when the system could be doing useful work
 - trainer supervision should treat verifier findings and deterministic contradictions as first-class evidence; repeated verifier failures without correction indicate a system-level supervision gap, not merely a task that needs more retries
 - verification policy should be shared across tiers and anneal from measured error rate rather than from hardcoded role-specific trust
@@ -65,7 +65,7 @@ Operational guidance:
 - when the system detects durable user intent, route it into the spec proposal workflow rather than mutating the spec casually
 - when alignment work is triggered, the spec files above are the source of truth and should be cited explicitly
 - every nontrivial system decision should be explainable in terms of either direct user instruction or spec-derived policy; “the system decided” is not an acceptable terminal explanation
-- seed operator onboarding before agent-side idle alignment; if onboarding is still active or incomplete, prefer progressing or clarifying onboarding over inventing freeform alignment work
+- seed preflight before agent-side idle alignment; do not require onboarding to auto-run before alignment unless the operator explicitly asks for onboarding
 - if the spec is missing detail, prefer a bounded spec-hardening task over claiming the project vision is unknown
 - when repository facts are uncertain, prefer verification or explicit uncertainty over asserting absence from a partial snapshot
 - when duplicate detection, routing, or mutation selection is ambiguous, prefer a hybrid pipeline: deterministic preflight first, then inference over the reduced ambiguity set

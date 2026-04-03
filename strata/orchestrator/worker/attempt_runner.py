@@ -354,14 +354,22 @@ def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
             ],
             "guidance": "Inspect the split API/worker launch and runtime IPC surfaces directly.",
         },
-        "desktop_surface": {
+        "operator_runtime_surface": {
             "preferred_paths": [
                 "src-tauri/src/main.rs",
                 "strata_ui/src/App.jsx",
                 "strata_ui/src/views/SettingsView.jsx",
                 "docs/spec/desktop-distribution.md",
             ],
-            "guidance": "Inspect the desktop shell and update/status surfaces directly rather than scanning the repo root.",
+            "guidance": "Inspect the operator-visible runtime status and task-inspection surfaces directly rather than scanning the repo root.",
+        },
+        "procedure_workbench_surface": {
+            "preferred_paths": [
+                "strata_ui/src/App.jsx",
+                "strata_ui/src/views/NonChatContent.jsx",
+                "docs/spec/workbench-implementation-plan.md",
+            ],
+            "guidance": "Inspect the Procedure and Workbench/debugging surfaces directly; verify they are product-visible rather than backend-only.",
         },
         "agent_name": {
             "preferred_paths": [
@@ -1024,7 +1032,7 @@ def _run_startup_smoke_check(task: TaskModel) -> Dict[str, Any] | None:
             },
         }
 
-    if item_id == "desktop_surface":
+    if item_id == "operator_runtime_surface":
         app_text = _read_text_if_available(root_dir / "strata_ui/src/App.jsx")
         settings_text = _read_text_if_available(root_dir / "strata_ui/src/views/SettingsView.jsx")
         desktop_text = _read_text_if_available(root_dir / "src-tauri/src/main.rs")
@@ -1032,12 +1040,13 @@ def _run_startup_smoke_check(task: TaskModel) -> Dict[str, Any] | None:
             "settings_has_updater_surface": "desktop_update_status" in settings_text,
             "desktop_has_update_command": "desktop_update_status" in desktop_text,
             "app_has_lane_status_surface": "TopModeTab" in app_text and "laneDetails" in app_text,
+            "app_has_task_inspection_surface": "Open in Workbench" in app_text or "FOCUS TASK" in app_text,
         }
         satisfied = not missing_paths and all(surface_markers.values())
         summary = (
-            "Verified desktop runtime status/update surfaces are present."
+            "Verified operator runtime inspection surfaces are present."
             if satisfied
-            else "Desktop runtime status/update surfaces could not be verified deterministically."
+            else "Operator runtime inspection surfaces could not be verified deterministically."
         )
         return {
             "satisfied": satisfied,
@@ -1047,6 +1056,33 @@ def _run_startup_smoke_check(task: TaskModel) -> Dict[str, Any] | None:
                 "item_id": item_id,
                 "path_checks": path_checks,
                 "markers": surface_markers,
+                "missing_paths": missing_paths,
+            },
+        }
+
+    if item_id == "procedure_workbench_surface":
+        nonchat_text = _read_text_if_available(root_dir / "strata_ui/src/views/NonChatContent.jsx")
+        app_text = _read_text_if_available(root_dir / "strata_ui/src/App.jsx")
+        workbench_markers = {
+            "workbench_view_present": "WorkbenchView" in nonchat_text,
+            "procedure_target_card_present": "ProcedureTargetCard" in nonchat_text,
+            "task_open_in_workbench_present": "OPEN IN WORKBENCH" in nonchat_text or "Open in Workbench" in app_text,
+            "procedure_nav_present": "'workbench'" in app_text and "'procedures'" in app_text,
+        }
+        satisfied = not missing_paths and all(workbench_markers.values())
+        summary = (
+            "Verified Procedure and Workbench inspection surfaces are present."
+            if satisfied
+            else "Procedure and Workbench inspection surfaces could not be verified deterministically."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "markers": workbench_markers,
                 "missing_paths": missing_paths,
             },
         }

@@ -494,23 +494,23 @@ def register_runtime_admin_routes(
         Base.metadata.create_all(engine)
 
         restored = storage.__class__()
-        onboarding_task_id = None
+        preflight_task_id = None
         try:
             restored.parameters.set_parameter(
                 key=settings_parameter_key,
                 value=preserved_settings,
                 description=settings_parameter_description,
             )
-            onboarding_task = None
+            preflight_task = None
             try:
-                onboarding_task = queue_procedure(
+                preflight_task = queue_procedure(
                     restored,
                     worker,
-                    procedure_id="operator_onboarding",
+                    procedure_id="preflight",
                 )
-                onboarding_task_id = str(getattr(onboarding_task, "task_id", "") or "") or None
+                preflight_task_id = str(getattr(preflight_task, "task_id", "") or "") or None
             except Exception:
-                onboarding_task = None
+                preflight_task = None
             restored.commit()
         finally:
             restored.close()
@@ -523,8 +523,8 @@ def register_runtime_admin_routes(
             "aborted_active_task": bool(aborted),
             "cleared_queue": cleared_queue,
             "preserved_settings": True,
-            "seeded_onboarding": bool(onboarding_task),
-            "onboarding_task_id": onboarding_task_id,
+            "seeded_preflight": bool(preflight_task),
+            "preflight_task_id": preflight_task_id,
         }
 
     @app.post("/admin/fresh-start")

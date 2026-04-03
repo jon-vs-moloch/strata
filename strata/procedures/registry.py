@@ -26,7 +26,7 @@ from strata.system_capabilities import (
 
 PROCEDURE_REGISTRY_KEY = "procedure_registry"
 DEFAULT_PROCEDURE_LANE = "agent"
-STARTUP_SMOKE_PROCEDURE_ID = "startup_sanity_check"
+STARTUP_SMOKE_PROCEDURE_ID = "preflight"
 ONBOARDING_PROCEDURE_ID = "operator_onboarding"
 DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
     BOOTSTRAP_CYCLE_PROCEDURE_ID: {
@@ -193,8 +193,8 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
     },
     STARTUP_SMOKE_PROCEDURE_ID: {
         "procedure_id": STARTUP_SMOKE_PROCEDURE_ID,
-        "title": "Startup Sanity Check",
-        "summary": "Resolve a small, source-grounded startup checklist to prove the harness can complete bounded Procedure work.",
+        "title": "Preflight",
+        "summary": "Run a small, source-grounded startup checklist that tests intended operator-visible behavior before broader autonomous work begins.",
         "repeatable": True,
         "lifecycle_state": "vetted",
         "lineage_id": STARTUP_SMOKE_PROCEDURE_ID,
@@ -203,13 +203,13 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
         "target_lane": DEFAULT_PROCEDURE_LANE,
         "task_type": "RESEARCH",
         "instructions": (
-            "Run this startup sanity checklist before rich onboarding. Treat each item as a small, source-grounded verification task. "
-            "Prefer direct evidence from the hinted sources, and cash out each item explicitly."
+            "Run this preflight checklist before broader autonomous work. Treat each item as a small, source-grounded verification task "
+            "about intended product behavior, not just repository existence. Prefer direct evidence from the hinted sources, and cash out each item explicitly."
         ),
         "checklist": [
             {
                 "id": "spec_presence",
-                "title": "Confirm the core spec files are present",
+                "title": "Confirm the core spec surfaces are present",
                 "verification": "The canonical constitution and project spec locations exist and are readable.",
             },
             {
@@ -218,20 +218,26 @@ DEFAULT_PROCEDURES: Dict[str, Dict[str, Any]] = {
                 "verification": "The system can identify separate API and worker launch surfaces in the codebase.",
             },
             {
-                "id": "desktop_surface",
-                "title": "Confirm the desktop shell exposes runtime status",
-                "verification": "The desktop codebase includes visible runtime status/update surfaces for the operator.",
+                "id": "operator_runtime_surface",
+                "title": "Confirm the operator can inspect live runtime state",
+                "verification": "The desktop/UI surface includes visible lane status and task inspection surfaces for the operator.",
+            },
+            {
+                "id": "procedure_workbench_surface",
+                "title": "Confirm Procedure and Workbench inspection surfaces exist",
+                "verification": "The UI exposes Procedure inspection and Workbench/debugging entry points instead of hiding them behind backend-only machinery.",
             },
         ],
         "success_criteria": {
             "required_checklist_ids": [
                 "spec_presence",
                 "runtime_wiring",
-                "desktop_surface",
+                "operator_runtime_surface",
+                "procedure_workbench_surface",
             ],
             "deliverables": [
-                "A concise startup sanity summary",
-                "Durable evidence that the startup smoke Procedure completed",
+                "A concise preflight summary",
+                "Durable evidence that the preflight Procedure completed",
             ],
         },
     },
@@ -608,9 +614,6 @@ def ensure_startup_smoke_task(storage, worker, *, session_id: Optional[str] = No
 
 
 def ensure_onboarding_task(storage, worker, *, session_id: Optional[str] = None, lane: Optional[str] = None):
-    smoke_status = get_startup_smoke_status(storage)
-    if not smoke_status.get("has_completed"):
-        return None
     status = get_onboarding_status(storage)
     if not status.get("needs_queue"):
         return None

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from sqlalchemy.exc import OperationalError
 
 from strata.env import load_local_env
 from strata.memory.semantic import SemanticMemory
@@ -46,11 +47,18 @@ def _configure_logging() -> None:
 def _load_runtime_settings() -> dict:
     storage = StorageManager()
     try:
-        persisted = storage.parameters.get_parameter(
-            key=SETTINGS_PARAMETER_KEY,
-            default_value=dict(GLOBAL_SETTINGS),
-            description=SETTINGS_PARAMETER_DESCRIPTION,
-        ) or {}
+        try:
+            persisted = storage.parameters.get_parameter(
+                key=SETTINGS_PARAMETER_KEY,
+                default_value=dict(GLOBAL_SETTINGS),
+                description=SETTINGS_PARAMETER_DESCRIPTION,
+            ) or {}
+        except OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            logger.warning("Worker daemon started before runtime tables existed; using default settings for bootstrap.")
+            storage.rollback()
+            return normalized_settings(dict(GLOBAL_SETTINGS))
         return normalized_settings(persisted)
     finally:
         storage.close()
