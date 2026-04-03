@@ -9,11 +9,26 @@ from typing import Any, Optional
 
 
 VALID_LANES = {"trainer", "agent"}
+VALID_WORK_POOLS = {"trainer", "local_agent", "remote_agent"}
+WORK_POOL_ALIASES = {
+    "agent": "local_agent",
+}
 
 
 def normalize_lane(value: Any) -> Optional[str]:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in VALID_LANES else None
+
+
+def normalize_work_pool(value: Any) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    normalized = WORK_POOL_ALIASES.get(normalized, normalized)
+    return normalized if normalized in VALID_WORK_POOLS else None
+
+
+def default_work_pool_for_lane(lane: Any) -> str:
+    normalized_lane = normalize_lane(lane) or "agent"
+    return "trainer" if normalized_lane == "trainer" else "local_agent"
 
 
 def infer_lane_from_session_id(session_id: Optional[str]) -> Optional[str]:
@@ -50,3 +65,20 @@ def session_matches_lane(session_id: Optional[str], lane: Any) -> bool:
 def infer_lane_from_task(task: Any) -> Optional[str]:
     constraints = dict(getattr(task, "constraints", {}) or {})
     return normalize_lane(constraints.get("lane")) or infer_lane_from_session_id(getattr(task, "session_id", None))
+
+
+def infer_work_pool_from_task(task: Any) -> Optional[str]:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    return (
+        normalize_work_pool(constraints.get("work_pool"))
+        or normalize_work_pool(constraints.get("execution_profile"))
+        or (
+            default_work_pool_for_lane(infer_lane_from_task(task))
+            if infer_lane_from_task(task)
+            else None
+        )
+    )
+
+
+def infer_execution_profile_from_task(task: Any) -> Optional[str]:
+    return infer_work_pool_from_task(task)

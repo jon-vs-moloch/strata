@@ -98,6 +98,34 @@ def test_failed_attempt_is_closed_when_task_body_raises(monkeypatch):
     assert attempt.ended_at is not None
 
 
+def test_child_task_inherits_parent_work_pool():
+    storage = make_storage()
+    parent = storage.tasks.create(
+        title="Parent task",
+        description="Owns a remote branch.",
+        session_id="agent:default",
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "agent", "work_pool": "remote_agent", "execution_profile": "remote_agent"},
+    )
+    storage.commit()
+
+    child = storage.tasks.create(
+        title="Child task",
+        description="Should stay on the same work pool.",
+        session_id="agent:default",
+        parent_task_id=parent.task_id,
+        state=TaskState.PENDING,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "agent"},
+    )
+    storage.commit()
+
+    assert child.constraints["lane"] == "agent"
+    assert child.constraints["work_pool"] == "remote_agent"
+    assert child.constraints["execution_profile"] == "remote_agent"
+
+
 def test_failed_attempt_persists_sidecar_autopsy_after_flush(monkeypatch):
     storage = make_storage()
     task = storage.tasks.create(

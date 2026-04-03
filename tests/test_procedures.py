@@ -29,10 +29,10 @@ def test_default_onboarding_procedure_is_available():
 
     procedures = list_procedures(storage)
     onboarding = get_procedure(storage, "operator_onboarding")
-    smoke = get_procedure(storage, "startup_sanity_check")
+    smoke = get_procedure(storage, "preflight")
 
     assert any(item["procedure_id"] == "operator_onboarding" for item in procedures)
-    assert any(item["procedure_id"] == "startup_sanity_check" for item in procedures)
+    assert any(item["procedure_id"] == "preflight" for item in procedures)
     assert onboarding["title"] == "Operator Onboarding"
     assert onboarding["lifecycle_state"] == "vetted"
     assert onboarding["checklist"]
@@ -56,6 +56,23 @@ def test_queue_procedure_creates_verifiable_task():
     )
     assert question
     assert question["escalation_mode"] == "non_blocking"
+
+
+def test_queue_procedure_can_target_remote_agent_profile():
+    storage = make_storage()
+
+    task = queue_procedure(
+        storage,
+        None,
+        procedure_id="preflight",
+        lane="agent",
+        work_pool="remote_agent",
+    )
+
+    assert task.session_id == "agent:default"
+    assert task.constraints["lane"] == "agent"
+    assert task.constraints["work_pool"] == "remote_agent"
+    assert task.constraints["execution_profile"] == "remote_agent"
 
 
 def test_onboarding_status_and_ensure_task_are_idempotent():
@@ -95,7 +112,7 @@ def test_startup_smoke_status_and_ensure_task_are_idempotent():
 
     task = ensure_startup_smoke_task(storage, None)
     assert task is not None
-    assert task.constraints["procedure_id"] == "startup_sanity_check"
+    assert task.constraints["procedure_id"] == "preflight"
 
     active = get_startup_smoke_status(storage)
     assert active["has_active"] is True

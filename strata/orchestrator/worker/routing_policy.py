@@ -9,7 +9,14 @@ hide all meaningful work behind the trainer.
 
 from typing import Literal, Union
 from strata.storage.models import TaskModel, TaskType
-from strata.schemas.execution import ExecutionContext, TrainerExecutionContext, AgentExecutionContext
+from strata.core.lanes import infer_execution_profile_from_task
+from strata.schemas.execution import (
+    ExecutionContext,
+    TrainerExecutionContext,
+    AgentExecutionContext,
+    LocalAgentExecutionContext,
+    RemoteAgentExecutionContext,
+)
 
 def select_model_tier(task: TaskModel) -> ExecutionContext:
     """
@@ -22,6 +29,11 @@ def select_model_tier(task: TaskModel) -> ExecutionContext:
     from agent to trainer here.
     """
     run_id = f"run_{task.task_id}"
+    execution_profile = infer_execution_profile_from_task(task)
+    if execution_profile == "remote_agent":
+        return RemoteAgentExecutionContext(run_id=run_id)
+    if execution_profile == "local_agent":
+        return LocalAgentExecutionContext(run_id=run_id)
 
     # Default to the agent tier for normal system work. Future cross-pool escalation, if any,
     # should be an explicit policy with its own telemetry rather than an implicit

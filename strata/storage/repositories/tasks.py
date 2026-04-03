@@ -13,7 +13,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from uuid import uuid4
 from strata.storage.models import TaskModel, TaskState
-from strata.core.lanes import infer_lane_from_session_id, infer_lane_from_task, normalize_lane
+from strata.core.lanes import (
+    default_work_pool_for_lane,
+    infer_lane_from_session_id,
+    infer_lane_from_task,
+    infer_work_pool_from_task,
+    normalize_lane,
+    normalize_work_pool,
+)
 from strata.storage.sqlite_write import flush_with_write_lock, is_sqlite_locked_error
 
 
@@ -92,14 +99,25 @@ class TaskRepository:
         """
         constraints = dict(kwargs.get("constraints") or {})
         explicit_lane = normalize_lane(constraints.get("lane"))
+        explicit_work_pool = normalize_work_pool(constraints.get("work_pool")) or normalize_work_pool(constraints.get("execution_profile"))
         parent_task = None
         if not explicit_lane and kwargs.get("parent_task_id"):
             parent_task = self.get_by_id(kwargs["parent_task_id"])
             explicit_lane = infer_lane_from_task(parent_task) if parent_task else None
+        if not explicit_work_pool and kwargs.get("parent_task_id"):
+            parent_task = parent_task or self.get_by_id(kwargs["parent_task_id"])
+            explicit_work_pool = infer_work_pool_from_task(parent_task) if parent_task else None
         if not explicit_lane:
             explicit_lane = infer_lane_from_session_id(kwargs.get("session_id"))
         if explicit_lane:
             constraints["lane"] = explicit_lane
+        if explicit_work_pool:
+            constraints["work_pool"] = explicit_work_pool
+            constraints.setdefault("execution_profile", explicit_work_pool)
+        elif explicit_lane:
+            inferred_pool = default_work_pool_for_lane(explicit_lane)
+            constraints.setdefault("work_pool", inferred_pool)
+            constraints.setdefault("execution_profile", inferred_pool)
         constraints["provenance"] = _default_task_provenance(
             provenance=constraints.get("provenance"),
             parent_task_id=kwargs.get("parent_task_id"),

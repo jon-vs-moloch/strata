@@ -16,7 +16,7 @@ from typing import Callable, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 import httpx
 
-from strata.core.lanes import infer_lane_from_task, normalize_lane
+from strata.core.lanes import infer_execution_profile_from_task, infer_lane_from_task, infer_work_pool_from_task, normalize_lane
 from strata.experimental.trace_review import list_attempt_observability_artifacts
 from strata.feedback.signals import register_feedback_signal
 from strata.storage.models import TaskModel, TaskState, AttemptOutcome, TaskType
@@ -1571,21 +1571,29 @@ class BackgroundWorker:
                     evaluation_run=True
                 )
             
-            lane_model = self._lane_model(lane or context.mode)
+            task_lane = normalize_lane(lane or infer_lane_from_task(task)) or "agent"
+            task_work_pool = infer_work_pool_from_task(task) or infer_execution_profile_from_task(task) or context.mode
+            lane_model = self._lane_model(task_lane)
             lane_model.bind_execution_context(context)
             logger.info(f"Routing task {task_id} to {context.mode} execution context [Exp: {self._active_experiment_id}]")
             self._mark_lane_progress(
-                lane or context.mode,
+                task_lane,
                 step="routing",
                 label="Routing",
-                detail=f"{task.type.value.lower()} via {context.mode}",
+                detail=f"{task.type.value.lower()} via {task_work_pool}",
                 task_id=task.task_id,
                 task_title=task.title,
             )
 
             constraints = dict(task.constraints or {})
-            if constraints.get("lane") != context.mode:
-                constraints["lane"] = context.mode
+            desired_profile = str(context.mode or task_work_pool or "").strip()
+            if constraints.get("lane") != task_lane:
+                constraints["lane"] = task_lane
+            if constraints.get("work_pool") != desired_profile:
+                constraints["work_pool"] = desired_profile
+            if constraints.get("execution_profile") != desired_profile:
+                constraints["execution_profile"] = desired_profile
+            if constraints != dict(task.constraints or {}):
                 task.constraints = constraints
 
             storage.commit()
@@ -1599,13 +1607,13 @@ class BackgroundWorker:
                 self._notify,
                 self.enqueue,
                 progress_fn=lambda **payload: self._mark_lane_progress(
-                    lane or context.mode,
+                    task_lane,
                     task_id=task.task_id,
                     task_title=task.title,
                     **payload,
                 ),
             )
-            
+
             # Determine execution context details for metrics
             run_mode = getattr(context, "run_mode", "normal") if hasattr(context, "run_mode") else "normal"
             if getattr(context, "evaluation_run", False):

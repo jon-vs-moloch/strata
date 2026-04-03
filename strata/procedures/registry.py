@@ -11,7 +11,7 @@ import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from strata.core.lanes import canonical_session_id_for_lane, normalize_lane
+from strata.core.lanes import canonical_session_id_for_lane, default_work_pool_for_lane, normalize_lane, normalize_work_pool
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
 from strata.storage.models import TaskModel, TaskState, TaskType
 from strata.system_capabilities import (
@@ -339,6 +339,14 @@ def _normalize_procedure(definition: Dict[str, Any]) -> Dict[str, Any]:
     normalized["variant_of"] = str(normalized.get("variant_of") or "").strip() or None
     normalized["mutable"] = bool(normalized.get("mutable", True))
     normalized["target_lane"] = normalize_lane(normalized.get("target_lane")) or DEFAULT_PROCEDURE_LANE
+    normalized["target_work_pool"] = (
+        normalize_work_pool(normalized.get("target_work_pool"))
+        or default_work_pool_for_lane(normalized["target_lane"])
+    )
+    normalized["target_execution_profile"] = (
+        normalize_work_pool(normalized.get("target_execution_profile"))
+        or normalized["target_work_pool"]
+    )
     normalized["task_type"] = str(normalized.get("task_type") or "RESEARCH").strip().upper()
     normalized["instructions"] = str(normalized.get("instructions") or "").strip()
     normalized["checklist"] = [
@@ -400,6 +408,8 @@ def build_procedure_task_constraints(
             "procedure_checklist": list(procedure.get("checklist") or []),
             "procedure_repeatable": bool(procedure.get("repeatable", True)),
             "verification_required": True,
+            "work_pool": normalize_work_pool(constraints.get("work_pool")) or procedure.get("target_work_pool"),
+            "execution_profile": normalize_work_pool(constraints.get("execution_profile")) or procedure.get("target_execution_profile"),
         }
     )
     return constraints
@@ -471,6 +481,8 @@ def ensure_draft_procedure_for_task(storage, task: TaskModel, *, checklist: Opti
             "variant_of": None,
             "mutable": True,
             "target_lane": normalize_lane(root_constraints.get("lane") or constraints.get("lane")) or DEFAULT_PROCEDURE_LANE,
+            "target_work_pool": normalize_work_pool(root_constraints.get("work_pool") or constraints.get("work_pool")),
+            "target_execution_profile": normalize_work_pool(root_constraints.get("execution_profile") or constraints.get("execution_profile")),
             "task_type": str(getattr(task, "type", TaskType.RESEARCH).value if getattr(task, "type", None) else "RESEARCH"),
             "instructions": (
                 "This is a draft Procedure discovered from live execution. Treat it as provisional working memory for the workflow "
@@ -517,9 +529,11 @@ def record_procedure_run(storage, procedure_id: str, *, outcome: str, source_tas
     return save_procedure(storage, updated)
 
 
-def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[str] = None, lane: Optional[str] = None):
+def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[str] = None, lane: Optional[str] = None, work_pool: Optional[str] = None, execution_profile: Optional[str] = None):
     procedure = get_procedure(storage, procedure_id)
     target_lane = normalize_lane(lane) or procedure.get("target_lane") or DEFAULT_PROCEDURE_LANE
+    target_work_pool = normalize_work_pool(work_pool) or procedure.get("target_work_pool") or default_work_pool_for_lane(target_lane)
+    target_execution_profile = normalize_work_pool(execution_profile) or normalize_work_pool(work_pool) or procedure.get("target_execution_profile") or target_work_pool
     resolved_session_id = canonical_session_id_for_lane(target_lane, session_id or "default")
     checklist = list(procedure.get("checklist") or [])
     checklist_lines = "\n".join(
@@ -541,6 +555,8 @@ def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[
             procedure["procedure_id"],
             base={
                 "lane": target_lane,
+                "work_pool": target_work_pool,
+                "execution_profile": target_execution_profile,
             },
         ),
         success_criteria=procedure.get("success_criteria") or {},
@@ -573,6 +589,7 @@ def queue_procedure(storage, worker, *, procedure_id: str, session_id: Optional[
                     "procedure_id": procedure["procedure_id"],
                     "task_id": task.task_id,
                     "lane": target_lane,
+                    "work_pool": target_work_pool,
                 },
             )
     return task
