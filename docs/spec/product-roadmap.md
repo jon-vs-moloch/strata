@@ -170,22 +170,25 @@ Near-term product backlog:
 
 Chat should feel responsive even when the real work is multi-step or long-running.
 
+Current implementation note:
+
+- remove the current `instant` vs thinking selection from product surfaces and runtime policy for now; LM Studio does not provide a reliable enough control surface for that distinction, so the feature should stay shelved until Strata owns enough of the inference stack to enforce it honestly
+
 Near-term product backlog:
 
 - emit a fast conversational acknowledgement before long-running work begins, so the user immediately knows the system accepted the request and what it is about to do
-- treat non-thinking responses as `instant` responses throughout the system vocabulary and UI
-- add an explicit fast routing decision for `instant` vs thinking responses, with the option to skip the router entirely when a flow is already known to be safely `instant`
-- move `instant`/thinking selection out of the chat composer; chat should route automatically unless a future debugging/control surface explicitly says otherwise
-- treat `instant`/thinking as a workbench/runtime configuration control for bounded processes, so operators can deliberately short-circuit reasoning on procedures or flows where non-thinking execution is sufficient
-- build a first-class "decide to think or not" routing module and treat explicit `instant` overrides as policy inputs to that module rather than as chat-global UI state
+- revisit a true `instant` / low-thinking mode only in phase 2 of inference ownership, when Strata can actually control runtime behavior rather than merely requesting it
+- if/when the underlying runtime can enforce it, add an explicit fast routing decision for low-thinking vs normal reasoning responses, with the option to skip the router entirely when a flow is already known to be safely low-thinking
+- do not reintroduce a chat-composer or workbench toggle until the underlying runtime can reliably honor it
+- build a first-class "decide to think or not" routing module only after the inference stack can make that decision real rather than cosmetic
 - narrate tool use conversationally in user-facing chat when the model is performing a lookup, inspection, or other multi-step process
 - emit periodic progress updates for longer chat work so silence is never confused with idleness
 - push long-running or backgroundable chat work onto the background worker instead of holding the foreground request open unnecessarily
-- let latency policy apply outside chat too, so internal routing, verification, review, and other system flows can choose `instant` vs thinking behavior deliberately rather than implicitly
+- let latency policy apply outside chat too once runtime ownership is strong enough that "faster mode" means something operationally real
 - add first-class voice I/O so the same communication layer can accept microphone input, route speech-to-text into sessions, and optionally deliver spoken output without inventing a second interaction model
 - treat voice as an operator/debugging surface too: support push-to-talk, transcript provenance, and eventually ambient-audio-aware comfort loops where fan noise or room noise can inform local throttle posture when the user has explicitly enabled that sensing
 - diagnose and improve "chatty presence": Strata should proactively emit user-facing progress and state messages often enough that long-running work feels alive rather than mute
-- do not surface an `instant` option in the UI unless the underlying runtime can reliably produce near-instant behavior; fake low-latency promises are worse than honest slower behavior
+- do not surface an `instant`-style option in the UI unless the underlying runtime can reliably produce near-instant behavior; fake low-latency promises are worse than honest slower behavior
 
 ## Cross-Cutting Observability and Self-Evaluation Follow-Up
 

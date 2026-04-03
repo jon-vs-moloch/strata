@@ -506,9 +506,6 @@ def register_chat_task_routes(
         preferred_tier = str(payload.get("preferred_tier") or "trainer").strip().lower()
         if preferred_tier not in {"trainer", "agent"}:
             preferred_tier = "trainer"
-        response_mode = str(payload.get("response_mode") or "thinking").strip().lower()
-        if response_mode not in {"thinking", "instant"}:
-            response_mode = "thinking"
         session_id = canonical_session_id_for_lane(preferred_tier, payload.get("session_id", "default"))
         content = payload.get("content", "")
         ensure_session_metadata(
@@ -551,7 +548,6 @@ def register_chat_task_routes(
             session_id=session_id,
             content=content,
             preferred_tier=preferred_tier,
-            response_mode=response_mode,
         )
         try:
             await ensure_generated_session_title(storage, session_id=session_id, model_adapter=model_adapter)

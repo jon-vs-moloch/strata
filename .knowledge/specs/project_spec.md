@@ -78,7 +78,7 @@ Operational guidance:
 - long-running work, deterministic or non-deterministic, should emit explicit progress telemetry so the operator can distinguish healthy forward motion from true idleness or wedged execution
 - runtime surfaces should expose live attempt-step state in real time so the operator can see whether a lane is routing, generating, executing a tool, validating, reviewing, or truly idle
 - user-facing chat should acknowledge long-running work immediately in conversational language before the slow work starts, so latency never looks like silence or dropped input
-- the durable term for non-thinking responses is `instant`; latency-sensitive routing should explicitly choose between `instant` and thinking responses instead of treating all replies as the same kind of completion
+- do not expose a user-facing `instant` / low-thinking mode unless the underlying inference runtime can reliably honor it; until Strata owns enough of the inference stack to make that distinction real, latency-sensitive routing should stay internal and honest rather than pretending a cosmetic toggle is meaningful
 - when chat work requires multiple tools or longer processing, the system should narrate what it is doing and periodically report progress rather than going dark
 - long-running chat work should prefer the background worker when that preserves responsiveness without losing correctness
 - runtime surfaces should not hide spawned work; verification, audits, reviews, and other child processes are part of the visible task tree and should remain operator-visible by default

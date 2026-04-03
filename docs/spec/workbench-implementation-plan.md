@@ -16,7 +16,7 @@ The Workbench today ([NonChatContent.jsx](file:///Users/jon/Projects/strata/stra
 - ✅ Target metadata display (raw JSON dump)
 - ✅ Cross-linking buttons (Open Task / Open Procedure / Open Session)
 - ✅ Action prompt composer (Explain / Verify / Audit / Fix)
-- ✅ Response mode toggle (Thinking / Instant), though this is currently misplaced and should become a scoped workbench configuration control rather than remain an inline chat-style selector
+- ✅ Workbench step preview and dry-run surfaces
 - ✅ Send to Chat (routes prompt through the linked session or current lane)
 - ✅ Recent session messages panel for session-linked targets
 
@@ -29,7 +29,7 @@ What it does **not** do yet:
 - ❌ Branching (modify context/model/tool selection, compare outcomes)
 - ❌ Verification/audit drilldown as first-class subflows
 - ❌ Deep reflection into Strata's own source, Procedures, Knowledge, or UI
-- ❌ Scoped runtime controls for the target being inspected, such as per-lane throttle posture or explicit `instant` overrides for bounded workbench-driven executions
+- ❌ Scoped runtime controls for the target being inspected, such as per-lane throttle posture or future inference/runtime debugging controls once Strata can enforce them honestly
 
 ---
 
@@ -47,11 +47,11 @@ Before adding richer inspectors, remove the controls that are currently teaching
 
 - move throttle posture off the top-level global strip and attach it to the relevant agent/lane card or tab
 - remove the `Thinking` / `Instant` selector from normal chat composition
-- re-home `instant` selection as a workbench/process configuration control for executions where the operator is deliberately choosing to short-circuit reasoning
-- preserve room for a future routing module that automatically decides whether to think, with explicit workbench overrides treated as exceptions rather than the default interaction pattern
+- do not re-home an `instant` selector into Workbench until Strata owns enough of the inference stack to enforce that mode honestly
+- preserve room for a future routing module that automatically decides whether to use low-thinking or normal reasoning, with any explicit debugging overrides treated as exceptions rather than the default interaction pattern
 - trim or collapse heavy operational telemetry in the task pane so the pane can focus on active work rather than a dense metrics block
 
-**Exit criteria**: The main chat surface no longer exposes a `Thinking` / `Instant` toggle, throttle is no longer presented as a global setting, and the task-pane telemetry footprint is clearly reduced or demoted behind inspection affordances.
+**Exit criteria**: The main chat surface no longer exposes a fake reasoning-mode toggle, throttle is no longer presented as a global setting, and the task-pane telemetry footprint is clearly reduced or demoted behind inspection affordances.
 
 ### Task 1.1 — Structured Task Target Card
 

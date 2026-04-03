@@ -1210,7 +1210,6 @@ function App() {
   const [laneDrafts, setLaneDrafts]   = useState({ trainer: [], agent: [] });
   const [isSending, setIsSending]     = useState(false);
   const [sendError, setSendError]     = useState('');
-  const [responseMode, setResponseMode] = useState('thinking');
   const [reactionBusyKey, setReactionBusyKey] = useState('');
   const [openReactionMenuId, setOpenReactionMenuId] = useState('');
   const [replyTarget, setReplyTarget] = useState(null);
@@ -2208,7 +2207,6 @@ function App() {
         content: outboundText,
         session_id: targetSessionId,
         preferred_tier: effectiveLane,
-        response_mode: responseMode,
         attachments: outboundAttachments,
       });
       if (isDraftSession) {
@@ -2403,13 +2401,12 @@ function App() {
         content: `Feedback on message "${preview}": ${normalized}`,
         session_id: sessionId,
         preferred_tier: effectiveLane,
-        response_mode: responseMode,
       });
       await fetchData(true);
     } catch (err) {
       console.error('Failed to send typed response.', err);
     }
-  }, [API, effectiveLane, fetchData, responseMode, sessionId]);
+  }, [API, effectiveLane, fetchData, sessionId]);
 
   const handleReplyToMessage = useCallback((message) => {
     setOpenReactionMenuId('');
@@ -3603,7 +3600,7 @@ function App() {
                     // fall back to normal send logic if needed, but workbench has its own
                   }
                 },
-                onSendWorkbenchPrompt: async ({ prompt, responseMode: requestedResponseMode, target, task, procedure }) => {
+                onSendWorkbenchPrompt: async ({ prompt, target, task, procedure }) => {
                   const linkedSessionId = String(target?.sessionId || '').trim();
                   const lane = normalizeLaneKey(target?.lane) || effectiveLane;
                   const targetSessionId = linkedSessionId || sessionId || defaultSessionIdForLane(lane);
@@ -3612,7 +3609,6 @@ function App() {
                     content: prompt,
                     session_id: targetSessionId,
                     preferred_tier: lane,
-                    response_mode: requestedResponseMode || responseMode,
                   });
                   setScopeSessionIds((prev) => ({ ...prev, [lane]: targetSessionId }));
                   if (task?.id) {
@@ -3836,44 +3832,6 @@ function App() {
                 </div>
               </div>
             )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-              <span style={{ fontSize: '11px', color: '#8f94a7', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                Mode
-              </span>
-              <div style={{ display: 'inline-flex', borderRadius: '999px', padding: '3px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-                {[
-                  ['thinking', 'Thinking'],
-                  ['instant', 'Instant'],
-                ].map(([modeId, label]) => {
-                  const active = responseMode === modeId;
-                  return (
-                    <button
-                      key={modeId}
-                      type="button"
-                      onClick={() => setResponseMode(modeId)}
-                      style={{
-                        background: active
-                          ? (modeId === 'instant' ? 'rgba(214,173,113,0.22)' : 'rgba(130,87,229,0.22)')
-                          : 'transparent',
-                        color: active
-                          ? (modeId === 'instant' ? '#f3ddbf' : '#dccfff')
-                          : '#8f94a7',
-                        border: 'none',
-                        borderRadius: '999px',
-                        padding: '6px 10px',
-                        fontSize: '11px',
-                        fontWeight: 800,
-                        cursor: 'pointer',
-                        letterSpacing: '0.04em',
-                        textTransform: 'uppercase',
-                      }}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
             <input
               ref={inputRef}
               type="text"

@@ -2594,7 +2594,6 @@ const WorkbenchView = ({
     try {
       await onSendWorkbenchPrompt({
         prompt: normalized,
-        responseMode: 'thinking',
         target: overrides.target || target,
         task: overrides.task || taskMatch,
         procedure: overrides.procedure || procedureMatch,
