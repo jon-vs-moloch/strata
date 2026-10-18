@@ -1481,7 +1481,9 @@ class BackgroundWorker:
         details["recent_steps"] = list(self._lane_step_history[status_key][-6:])
         ticker_items = []
         for item in self._lane_step_history[status_key][-8:]:
-            rendered = f"{item.get('label')}{f': {item.get('detail')}' if item.get('detail') else ''}"
+            # Not a nested f-string: reusing the outer quote inside one needs Python 3.12.
+            step_detail = item.get("detail")
+            rendered = f"{item.get('label')}: {step_detail}" if step_detail else f"{item.get('label')}"
             if not ticker_items or ticker_items[-1] != rendered:
                 ticker_items.append(rendered)
         details["ticker_items"] = ticker_items

@@ -50,7 +50,7 @@ Open <http://localhost:5173>. The workbench replays a recorded sample run: lanes
 
 ### Real mode: the full system
 
-Needs Python 3.10+ and Node 20.19+. Tested with Python 3.12 and Node 22.
+Needs Python 3.11+ (the pinned SQLAlchemy 2.1 requires it) and Node 20.19+. Tested with Python 3.11, 3.12 and 3.14 and Node 22.
 
 ```bash
 python3 -m venv venv
