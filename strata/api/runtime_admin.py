@@ -169,14 +169,14 @@ def register_runtime_admin_routes(
 
     @app.get("/admin/settings")
     async def get_settings(storage=Depends(get_storage)):
-        persisted_settings = storage.parameters.get_parameter(
-            key=settings_parameter_key,
-            default_value=dict(global_settings),
-            description=settings_parameter_description,
+        # Read-only: peek_parameter neither creates the row nor bumps usage
+        # counters. The API's startup (main.lifespan) creates the default row.
+        persisted_settings = storage.parameters.peek_parameter(
+            settings_parameter_key,
+            dict(global_settings),
         ) or {}
         merged_settings = normalized_settings(persisted_settings)
         global_settings.update(merged_settings)
-        storage.commit()
         return {"status": "ok", "settings": merged_settings}
 
     @app.post("/admin/settings")

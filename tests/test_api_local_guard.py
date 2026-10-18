@@ -7,6 +7,7 @@ the storage dependency is replaced with a tripwire so a regression fails the
 test instead of touching the database.
 """
 
+import asyncio
 import os
 import stat
 
@@ -256,3 +257,103 @@ def test_token_file_is_private_and_reads_safely(tmp_path):
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
     assert api_token.read_token_file(fifo) is None
+
+
+def _guard_only_app():
+    hits = []
+    app = FastAPI()
+    install_local_guard(app)
+
+    @app.post("/danger")
+    async def danger():
+        hits.append(1)
+        return {"ok": True}
+
+    return app, hits
+
+
+def _raw_status(app, method, path, headers):
+    """Drive the ASGI app with an exact header list, duplicates included (HTTP clients merge them)."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in headers],
+        "server": ("127.0.0.1", 8000),
+        "client": ("127.0.0.1", 50000),
+    }
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+
+def test_duplicate_host_origin_or_token_headers_are_refused():
+    app, hits = _guard_only_app()
+    host = ("Host", "127.0.0.1:8000")
+    origin = ("Origin", UI_ORIGIN)
+    token = ("X-Strata-Token", TOKEN)
+    # Positive control: one of each is accepted.
+    assert _raw_status(app, "POST", "/danger", [host, origin, token]) == 200
+    assert hits == [1]
+    # A header sent twice never matches, even when both copies are valid.
+    assert _raw_status(app, "POST", "/danger", [host, host, origin, token]) == 403
+    assert _raw_status(app, "POST", "/danger", [host, ("Host", "evil.example:8000"), origin, token]) == 403
+    assert _raw_status(app, "POST", "/danger", [host, origin, origin, token]) == 403
+    assert _raw_status(app, "POST", "/danger", [host, origin, ("Origin", EVIL_ORIGIN), token]) == 403
+    assert _raw_status(app, "POST", "/danger", [host, origin, token, token]) == 401
+    assert hits == [1]
+
+
+def test_same_site_request_without_origin_is_refused(client):
+    # A same-site page (another port on localhost) whose Origin was stripped.
+    response = client.post("/admin/reset", headers={"Sec-Fetch-Site": "same-site", "X-Strata-Token": TOKEN})
+    assert response.status_code == 403
+    assert response.json()["code"] == "strata_origin_rejected"
+    assert client.get("/admin/session-token", headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert client.tripwire_calls == []
+
+
+def test_ipv6_loopback_ui_origins_are_allowed(client):
+    for origin in ("http://[::1]:5173", "http://[::1]:4173", "http://[::1]:5174"):
+        assert origin in allowed_ui_origins(8000, [])
+    preflight = client.options(
+        "/models/select",
+        headers={
+            "Origin": "http://[::1]:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-strata-token",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "http://[::1]:5173"
+
+
+def test_cors_follows_the_served_port(monkeypatch):
+    # `uvicorn --port 8123` without STRATA_API_PORT: the API's own origin on 8123 gets a CORS grant.
+    monkeypatch.delenv("STRATA_API_PORT", raising=False)
+    app, _ = _guard_only_app()
+
+    @app.get("/ping")
+    async def ping():
+        return {"ok": True}
+
+    own = "http://127.0.0.1:8123"
+    response = TestClient(app, base_url=own).get("/ping", headers={"Origin": own})
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == own
+    # The default port's own origin is not granted on 8123.
+    response = TestClient(app, base_url=own).get("/ping", headers={"Origin": "http://127.0.0.1:8000"})
+    assert response.status_code == 403

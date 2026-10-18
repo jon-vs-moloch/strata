@@ -76,7 +76,7 @@ The API has no user accounts or passwords. It exposes admin endpoints (reset, mo
 Listening on `127.0.0.1` keeps other machines out. It does **not** keep out web pages open in your own browser, which can send requests to `127.0.0.1` too. So the API also checks every request (`strata/api/local_guard.py`):
 
 - **Host.** The `Host` header must be `127.0.0.1`, `localhost` or `[::1]` on the API's port. This blocks DNS rebinding, where an attacker's domain is pointed at your machine.
-- **Origin.** A request from a web page must come from the workbench itself. The allowed origins are the dev and demo server (`http://localhost:5173`, `http://127.0.0.1:5173`), `vite preview` (port 4173), the Tauri desktop shell, and the API's own address. Requests from any other site are refused, including plain form-style POSTs that CORS never checks. CORS allows only those origins, never `*`.
+- **Origin.** A request from a web page must come from the workbench itself. The allowed origins are the dev and demo server (port 5173 on `localhost`, `127.0.0.1` or `[::1]`), `vite preview` (port 4173), the Tauri dev frontend (port 5174), the Tauri desktop shell, and the API's own address on the port it is serving. Requests from any other site are refused, including plain form-style POSTs that CORS never checks. CORS allows only those origins, never `*`.
 - **Write token.** Every POST, PUT, PATCH and DELETE needs an `X-Strata-Token` header. The API makes a new random token each time it starts. The workbench fetches it from `/admin/session-token`, which only the workbench origins can read. Local scripts read it from `strata/runtime/api-token` (readable only by your account) or from `STRATA_API_TOKEN`.
 
 What this does **not** protect against:
@@ -96,7 +96,7 @@ Start the API once first (as in Real mode above); it creates the database tables
 ./venv/bin/python -m pytest tests
 ```
 
-At this snapshot, with the API started first: **268 passed, 15 failed** of 283. On a fresh clone where the API has never run, the result is 265 passed and 18 failed, because those tables don't exist yet. One more test, `test_context_load_can_buffer_before_flush`, depends on timing and occasionally fails on a busy machine. The 15 failures below predate the snapshot and were left as found:
+At this snapshot, with the API started first: **273 passed, 15 failed** of 288. On a fresh clone where the API has never run, the result is 270 passed and 18 failed, because those tables don't exist yet. One more test, `test_context_load_can_buffer_before_flush`, depends on timing and occasionally fails on a busy machine. The 15 failures below predate the snapshot and were left as found:
 
 <details>
 <summary>Known failing tests</summary>

@@ -48,16 +48,20 @@ _DUPLICATE = "\x00duplicate"  # a header sent more than once never matches anyth
 
 logger = logging.getLogger(__name__)
 
-# The workbench's own origins. Vite's dev/demo server (5173), `vite preview`
-# (4173), the Tauri dev frontend (scripts/desktop_dev_frontend.sh, 5174) and the
-# Tauri desktop webview. Add more with STRATA_UI_ORIGINS (comma-separated).
+# The workbench's own origins: Vite's dev/demo server (5173), `vite preview`
+# (4173) and the Tauri dev frontend (scripts/desktop_dev_frontend.sh, 5174),
+# each on localhost, 127.0.0.1 or [::1]; and the Tauri desktop webview. Add
+# more with STRATA_UI_ORIGINS (comma-separated).
 DEFAULT_UI_ORIGINS: Tuple[str, ...] = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://[::1]:5173",
     "http://localhost:4173",
     "http://127.0.0.1:4173",
+    "http://[::1]:4173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
+    "http://[::1]:5174",
     "tauri://localhost",
     "http://tauri.localhost",
     "https://tauri.localhost",
@@ -185,6 +189,38 @@ class LocalRequestGuard:
         return await self.app(scope, receive, send)
 
 
+class PortAwareCORS:
+    """CORS with the same per-port allowlist as LocalRequestGuard.
+
+    The API's own origins depend on the port actually served (the ASGI server
+    port), not on STRATA_API_PORT, so `uvicorn --port N` works without also
+    setting STRATA_API_PORT. One CORSMiddleware is built per served port.
+    """
+
+    def __init__(self, app, extra_origins: Optional[Iterable[str]] = None):
+        self.app = app
+        self._extra = list(extra_origins) if extra_origins is not None else None
+        self._cors_by_port: dict = {}
+
+    def _cors(self, port: int) -> CORSMiddleware:
+        cors = self._cors_by_port.get(port)
+        if cors is None:
+            cors = CORSMiddleware(
+                self.app,
+                allow_origins=allowed_ui_origins(port, self._extra),
+                allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                allow_headers=["Content-Type", TOKEN_HEADER],
+                allow_credentials=False,
+            )
+            self._cors_by_port[port] = cors
+        return cors
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        return await self._cors(_serving_port(scope))(scope, receive, send)
+
+
 class ApiTokenGuard:
     """Inside CORS, so an allowed origin can read the 401 and fetch a fresh token."""
 
@@ -207,17 +243,9 @@ class ApiTokenGuard:
 
 def install_local_guard(app: FastAPI, extra_origins: Optional[Iterable[str]] = None) -> None:
     """Install the guard layers and the token bootstrap route. Call once, before serving."""
-    port = _default_port()
-    origins = allowed_ui_origins(port, extra_origins)
     # add_middleware wraps outward: the last one added runs first.
     app.add_middleware(ApiTokenGuard)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", TOKEN_HEADER],
-        allow_credentials=False,
-    )
+    app.add_middleware(PortAwareCORS, extra_origins=extra_origins)
     app.add_middleware(LocalRequestGuard, extra_origins=extra_origins)
 
     @app.get(SESSION_TOKEN_PATH, include_in_schema=False)

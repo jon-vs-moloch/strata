@@ -238,6 +238,8 @@ async def lifespan(app: FastAPI):
         GenericOpenAICompatibleProvider.set_runtime_policy(
             GLOBAL_SETTINGS.get("inference_throttle_policy") or {}
         )
+        # Persist the default settings row now, so GET /admin/settings can stay read-only.
+        storage.commit()
         try:
             run_retention_maintenance(storage)
         except OperationalError as exc:
