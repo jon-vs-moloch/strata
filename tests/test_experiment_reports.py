@@ -1,0 +1,415 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from strata.api import main as api_main
+from strata.api import experiment_runtime as experiment_runtime
+from strata.experimental.calibration import JUDGE_TRUST_KEY
+from strata.experimental.experiment_runner import (
+    ExperimentRunner,
+    emit_eval_attention_signal,
+    normalize_experiment_report,
+    report_has_weak_gain,
+)
+from strata.experimental.diagnostics import build_eval_trace_summary
+
+
+class FakeQuery:
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self._limit = None
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, limit):
+        self._limit = limit
+        return self
+
+    def all(self):
+        rows = self._rows
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        return rows
+
+    def filter_by(self, **kwargs):
+        key = kwargs.get("key")
+        rows = [row for row in self._rows if getattr(row, "key", None) == key]
+        return FakeQuery(rows)
+
+    def first(self):
+        rows = self.all()
+        return rows[0] if rows else None
+
+
+class FakeSession:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def query(self, _model):
+        return FakeQuery(self._rows)
+
+
+class FakeParameters:
+    def __init__(self, values):
+        self._values = dict(values)
+
+    def peek_parameter(self, key, default_value=None):
+        return self._values.get(key, default_value)
+
+    def set_parameter(self, key, value, description=""):
+        self._values[key] = value
+
+
+class FakeStorage:
+    def __init__(self, rows, parameter_values):
+        self.session = FakeSession(rows)
+        self.parameters = FakeParameters(parameter_values)
+
+
+def make_row(key, value):
+    return SimpleNamespace(key=key, value=value, updated_at=1)
+
+
+def make_report(
+    candidate_change_id,
+    *,
+    proposer_tier="agent",
+    recommendation="promote",
+    benchmark_delta=0.0,
+    structured_delta=0.0,
+):
+    return {
+        "candidate_change_id": candidate_change_id,
+        "evaluation_kind": "full_eval",
+        "recommendation": recommendation,
+        "recorded_at": "2026-03-26T00:00:00+00:00",
+        "proposal_metadata": {"proposer_tier": proposer_tier},
+        "promotion_readiness": {"ready_for_promotion": recommendation == "promote"},
+        "diagnostic_review": {
+            "status": "ok",
+            "primary_failure_mode": "tool_avoidance",
+            "recommended_fix": "Require a repo inspection step before declaring missing context.",
+            "summary": "The weak model is not inspecting the repo before giving up.",
+        },
+        "prediction_record": {
+            "predicted_outcome": "improve",
+            "confidence": 0.78,
+            "domains_affected": ["eval", "bootstrap"],
+        },
+        "prediction_outcome": {
+            "actual_delta": {
+                "benchmark_harness_score": benchmark_delta,
+                "structured_eval_harness_accuracy": structured_delta,
+            },
+            "promotion_result": recommendation,
+        },
+        "calibration_record": {
+            "actual_outcome": "improve" if benchmark_delta > 0 or structured_delta > 0 else "neutral",
+            "direction_correct": 1.0 if benchmark_delta > 0 or structured_delta > 0 else 0.0,
+            "calibration_score": 0.91 if benchmark_delta > 0 or structured_delta > 0 else 0.4,
+        },
+        "variant_assignment": {
+            "family": "eval_harness",
+            "baseline_variant_id": "eval_harness_bundle_baseline",
+            "candidate_variant_id": f"eval_harness_bundle_{candidate_change_id}",
+        },
+        "variant_rating_snapshot": {
+            "domain": "eval_harness_full_eval:bootstrap_mcq_v1",
+            "left": {"variant_id": f"eval_harness_bundle_{candidate_change_id}", "rating": 1512.0},
+            "right": {"variant_id": "eval_harness_bundle_baseline", "rating": 1488.0},
+        },
+        "deltas": {
+            "benchmark_harness_score": benchmark_delta,
+            "structured_eval_harness_accuracy": structured_delta,
+        },
+    }
+
+
+def test_normalize_experiment_report_accepts_raw_and_wrapped_payloads():
+    raw = make_report("raw_candidate")
+    wrapped = {"current": make_report("wrapped_candidate"), "history": []}
+
+    assert normalize_experiment_report(raw)["candidate_change_id"] == "raw_candidate"
+    assert normalize_experiment_report(wrapped)["candidate_change_id"] == "wrapped_candidate"
+    assert normalize_experiment_report({"history": []}) == {}
+    assert normalize_experiment_report("not-a-dict") == {}
+
+
+def test_get_persisted_experiment_report_handles_raw_and_wrapped_rows():
+    rows = [
+        make_row("experiment_report:raw_candidate", make_report("raw_candidate")),
+        make_row(
+            "experiment_report:wrapped_candidate",
+            {"current": make_report("wrapped_candidate"), "history": []},
+        ),
+    ]
+    storage = FakeStorage(rows, {})
+    runner = ExperimentRunner(storage, model_adapter=None)
+
+    assert runner.get_persisted_experiment_report("raw_candidate")["candidate_change_id"] == "raw_candidate"
+    assert runner.get_persisted_experiment_report("wrapped_candidate")["candidate_change_id"] == "wrapped_candidate"
+    assert runner.get_persisted_experiment_report("missing_candidate") is None
+
+
+def test_build_dashboard_snapshot_counts_promotions_and_detects_ignition(monkeypatch):
+    weak_report = make_report("weak_candidate", proposer_tier="agent", benchmark_delta=1.0)
+    strong_report = make_report("strong_candidate", proposer_tier="trainer", benchmark_delta=0.5)
+    rows = [
+        make_row("experiment_report:weak_candidate", {"current": weak_report, "history": []}),
+        make_row("experiment_report:strong_candidate", strong_report),
+    ]
+    storage = FakeStorage(
+        rows,
+        {
+            "promoted_eval_candidates": {
+                "current": "strong_candidate",
+                "history": [
+                    {"candidate_change_id": "weak_candidate"},
+                    {"candidate_change_id": "strong_candidate"},
+                ],
+            }
+        },
+    )
+
+    monkeypatch.setattr(
+        api_main,
+        "build_telemetry_snapshot",
+        lambda _storage, limit=10: {
+            "generated_at": "2026-03-26T00:00:00",
+            "overview": {"weak_eval_runs": 2, "unique_experiments": 2},
+            "recent_metrics": [
+                {"metric_name": "task_failure", "task_type": "RESEARCH"},
+                {"metric_name": "task_failure", "task_type": "RESEARCH"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        api_main,
+        "get_provider_telemetry_snapshot",
+        lambda: {"weak-provider": {"request_count": 1}},
+    )
+    monkeypatch.setattr(
+        experiment_runtime,
+        "list_spec_proposals",
+        lambda _storage, limit=5: [
+            {
+                "proposal_id": "spec_1",
+                "scope": "project",
+                "status": "pending_review",
+                "summary": "measure outcomes",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        api_main,
+        "get_context_load_telemetry",
+        lambda _storage: {
+            "warnings": [{"warning": "context_load_large_artifact"}],
+            "recent": [{"artifact_type": "spec"}],
+            "stats": {"artifacts": {"spec:project_spec": {"artifact_type": "spec", "identifier": "project_spec", "load_count": 3, "total_estimated_tokens": 200, "max_estimated_tokens": 72}}},
+            "file_scan": {"largest_files": [{"path": "strata/specs/bootstrap.py"}]},
+        },
+    )
+
+    snapshot = api_main._build_dashboard_snapshot(storage, limit=10)
+
+    assert snapshot["promotion_counts"]["agent"] == 1
+    assert snapshot["promotion_counts"]["trainer"] == 1
+    assert snapshot["ignition"]["detected"] is True
+    assert snapshot["ignition"]["candidate_change_id"] == "weak_candidate"
+    assert snapshot["reports"][0]["candidate_change_id"] == "weak_candidate"
+    assert snapshot["context_pressure"]["warning_count"] == 1
+    assert snapshot["spec_governance"]["pending_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("current_candidate", "report_rows", "expected_detected"),
+    [
+        (None, [], False),
+        ("missing_report", [], False),
+        ("weak_candidate", [make_row("experiment_report:weak_candidate", make_report("weak_candidate", benchmark_delta=0.0))], False),
+        ("weak_candidate", [make_row("experiment_report:weak_candidate", make_report("weak_candidate", benchmark_delta=1.0))], True),
+    ],
+)
+def test_secondary_ignition_status_is_stable(current_candidate, report_rows, expected_detected):
+    storage = FakeStorage(
+        report_rows,
+        {
+            "promoted_eval_candidates": {
+                "current": current_candidate,
+                "history": [],
+            }
+        },
+    )
+
+    result = asyncio.run(api_main.get_secondary_ignition_status(storage=storage))
+    assert result["detected"] is expected_detected
+    assert "reason" in result
+
+
+def test_experiment_history_returns_real_candidate_ids():
+    rows = [
+        make_row("experiment_report:raw_candidate", make_report("raw_candidate", proposer_tier="agent")),
+        make_row(
+            "experiment_report:wrapped_candidate",
+            {"current": make_report("wrapped_candidate", proposer_tier="trainer"), "history": []},
+        ),
+    ]
+    storage = FakeStorage(
+        rows,
+        {"promoted_eval_candidates": {"current": "wrapped_candidate", "history": []}},
+    )
+
+    result = asyncio.run(api_main.get_experiment_history(limit=10, storage=storage))
+    candidate_ids = [report["candidate_change_id"] for report in result["reports"]]
+    assert candidate_ids == ["raw_candidate", "wrapped_candidate"]
+    assert result["reports"][0]["promotion_readiness"]["ready_for_promotion"] is True
+    assert result["reports"][0]["diagnostic_review"]["primary_failure_mode"] == "tool_avoidance"
+    assert result["reports"][0]["prediction_record"]["predicted_outcome"] == "improve"
+    assert result["reports"][0]["calibration_record"]["calibration_score"] == 0.4
+    assert result["reports"][0]["variant_assignment"]["family"] == "eval_harness"
+    assert result["reports"][0]["variant_rating_snapshot"]["left"]["rating"] == 1512.0
+    assert result["current_promoted_candidate"] == "wrapped_candidate"
+
+
+def test_report_has_weak_gain_handles_missing_and_positive_deltas():
+    assert report_has_weak_gain({}) is False
+    assert report_has_weak_gain({"deltas": {"benchmark_harness_score": 0.1}}) is True
+
+
+def test_build_eval_trace_summary_preserves_sample_evidence():
+    summary = build_eval_trace_summary(
+        candidate_change_id="candidate_a",
+        baseline_change_id="baseline",
+        benchmark_reports=[
+            {
+                "run_label": "bench-1",
+                "baseline_wins": 1,
+                "harness_wins": 2,
+                "ties": 0,
+                "average_baseline_score": 5.0,
+                "average_harness_score": 7.0,
+                "samples": [
+                    {
+                        "prompt_id": "repo_orientation",
+                        "winner": "baseline",
+                        "baseline_score": 7,
+                        "harness_score": 4,
+                        "baseline_latency_s": 1.0,
+                        "harness_latency_s": 2.0,
+                        "rationale": "Harness refused instead of inspecting the repo.",
+                        "baseline_response": "Direct answer",
+                        "harness_response": "I need the codebase first",
+                    }
+                ],
+            }
+        ],
+        structured_reports=[
+            {
+                "run_label": "struct-1",
+                "suite_name": "bootstrap_mcq_v1",
+                "baseline_accuracy": 0.5,
+                "harness_accuracy": 0.75,
+                "baseline_avg_latency_s": 1.1,
+                "harness_avg_latency_s": 2.2,
+                "samples": [
+                    {
+                        "case_id": "secondary_ignition_condition",
+                        "baseline_correct": False,
+                        "harness_correct": True,
+                        "baseline_latency_s": 1.0,
+                        "harness_latency_s": 2.0,
+                        "baseline_response": "Wrong",
+                        "harness_response": "Right",
+                    }
+                ],
+            }
+        ],
+        suite_name="bootstrap_mcq_v1",
+    )
+
+    assert summary["candidate_change_id"] == "candidate_a"
+    assert summary["benchmark_samples"][0]["winner"] == "baseline"
+    assert "inspect" in summary["benchmark_samples"][0]["rationale"].lower()
+    assert summary["structured_samples"][0]["case_id"] == "secondary_ignition_condition"
+
+
+def test_prediction_history_and_calibration_endpoints_surface_persisted_records():
+    rows = [
+        make_row("experiment_report:raw_candidate", make_report("raw_candidate", benchmark_delta=1.0)),
+        make_row(
+            "experiment_report:wrapped_candidate",
+            {"current": make_report("wrapped_candidate", benchmark_delta=0.0), "history": []},
+        ),
+    ]
+    storage = FakeStorage(
+        rows,
+        {
+            "promoted_eval_candidates": {"current": "raw_candidate", "history": []},
+            JUDGE_TRUST_KEY: {
+                "by_tier": {"trainer": {"trust": 0.88, "count": 3}},
+                "by_domain": {"trainer:eval": {"trust": 0.82, "count": 2}},
+                "by_failure_family": {},
+            },
+        },
+    )
+
+    history = asyncio.run(api_main.get_prediction_history(limit=10, storage=storage))
+    calibration = asyncio.run(api_main.get_prediction_calibration(limit=10, storage=storage))
+    trust = asyncio.run(api_main.get_prediction_trust(storage=storage))
+
+    assert history["history"][0]["prediction_record"]["predicted_outcome"] == "improve"
+    assert calibration["average_calibration_score"] > 0.0
+    assert trust["trust"]["by_tier"]["trainer"]["trust"] == 0.88
+
+
+def test_emit_eval_attention_signal_marks_unexpected_failure_as_urgent():
+    storage = FakeStorage([], {})
+    signal = emit_eval_attention_signal(
+        storage,
+        candidate_change_id="candidate_x",
+        evaluation_kind="full_eval:bootstrap_mcq_v1",
+        prediction_record={
+            "predicted_outcome": "improve",
+            "rationale": "Expected prompt tightening to help.",
+            "failure_family": "overfit",
+            "confidence": 0.82,
+        },
+        calibration_record={
+            "actual_outcome": "regress",
+            "calibration_score": 0.11,
+        },
+        recommendation="reject",
+        deltas={"structured_eval_harness_accuracy": -0.2},
+    )
+    assert signal["signal_kind"] == "unexpected_failure"
+    assert signal["prioritization"]["priority"] == "urgent"
+    assert storage.parameters.peek_parameter("feedback_signal:index", default_value=[])[0]["signal_id"] == signal["signal_id"]
+
+
+def test_emit_eval_attention_signal_marks_unexpected_success_as_urgent():
+    storage = FakeStorage([], {})
+    signal = emit_eval_attention_signal(
+        storage,
+        candidate_change_id="candidate_y",
+        evaluation_kind="benchmark",
+        prediction_record={
+            "predicted_outcome": "regress",
+            "rationale": "Expected this to be too verbose.",
+            "failure_family": "verbosity",
+            "confidence": 0.73,
+        },
+        calibration_record={
+            "actual_outcome": "improve",
+            "calibration_score": 0.93,
+        },
+        recommendation="promote",
+        deltas={"benchmark_score_delta": 1.2},
+    )
+    assert signal["signal_kind"] == "unexpected_success"
+    assert signal["prioritization"]["reason_family"] == "expectation_violation"

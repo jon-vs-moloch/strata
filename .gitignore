@@ -1,0 +1,27 @@
+node_modules/
+venv/
+*.db
+*.sqlite
+*.sqlite3
+*.pyc
+__pycache__/
+.DS_Store
+strata_ui/node_modules/
+*.log
+strata/runtime/
+memory/vector_db/
+strata/experimental/candidates/
+strata/attic/
+.venv/
+.env.local
+src-tauri/target/
+
+# Generated research dumps are noisy and task-specific.
+# Keep durable knowledge surfaces trackable.
+.knowledge/*
+!.knowledge/specs/
+!.knowledge/specs/*.md
+!.knowledge/provenance_index.json
+
+# Dynamic tools written by the tool-cycle experiments at runtime.
+strata/tools/

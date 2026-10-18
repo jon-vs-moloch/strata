@@ -1,0 +1,8 @@
+# Versions verified with Python 3.12 for the public snapshot (2026-10).
+fastapi==0.143.3
+uvicorn==0.54.0
+sqlalchemy==2.1.5
+pydantic==2.14.1
+httpx==0.28.1
+chromadb==1.5.9
+pytest==9.1.1

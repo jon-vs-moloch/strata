@@ -1,0 +1,421 @@
+/* Base styles, app shell and shared chrome. Colours come from styles/tokens.css. */
+
+/* Legacy aliases still referenced by older components. */
+:root {
+  --bg-deep: var(--bg);
+  --bg-surface: var(--surface-1);
+  --bg-elevated: var(--surface-2);
+  --text-main: var(--text-1);
+  --text-muted: var(--text-3);
+  --accent-primary: var(--accent);
+  --accent-secondary: var(--info);
+  --success: var(--ok);
+  --failure: var(--danger);
+  --warning: var(--warn);
+  --glass: color-mix(in oklab, var(--ink) 3%, transparent);
+  --border: var(--line);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-lg);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  background-color: var(--bg);
+  color: var(--text-1);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  font-feature-settings: 'cv11', 'ss01';
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button, input, textarea, select { font-family: inherit; }
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+::selection { background: color-mix(in oklab, var(--accent) 30%, transparent); }
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ── App shell ─────────────────────────────────────────── */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  background: var(--bg);
+}
+
+.app-topbar {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.app-topbar-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  flex-shrink: 0;
+  color: inherit;
+}
+
+.app-brand-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-1);
+  line-height: 1.1;
+}
+
+.app-brand-sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-4);
+  letter-spacing: 0.02em;
+}
+
+.app-lanes {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.app-topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.app-body { display: flex; flex: 1; min-height: 0; }
+
+.app-nav {
+  width: 64px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 0;
+  gap: 6px;
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.app-sessions {
+  width: 240px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+  flex-shrink: 0;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+  min-width: 0;
+}
+
+.app-taskpane {
+  width: 400px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+/* ── Chrome: mode switch, theme toggle, toast, banner ─── */
+.chrome-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.chrome-mode-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-4); }
+.chrome-mode.is-live .chrome-mode-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 22%, transparent); }
+.chrome-mode.is-down .chrome-mode-dot { background: var(--danger); }
+.chrome-mode.is-demo {
+  border-color: color-mix(in oklab, var(--warn) 45%, transparent);
+  background: color-mix(in oklab, var(--warn) 10%, var(--surface-1));
+  color: var(--warn-soft);
+}
+.chrome-mode.is-demo .chrome-mode-dot { background: var(--warn); }
+
+.chrome-mode-switch {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chrome-mode-switch:hover { color: var(--text-1); border-color: var(--line-strong); }
+
+.chrome-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.chrome-icon-btn:hover { color: var(--text-1); border-color: var(--line-strong); }
+
+.chrome-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 20000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 10px 10px 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid color-mix(in oklab, var(--warn) 40%, transparent);
+  background: color-mix(in oklab, var(--warn) 8%, var(--surface-1));
+  color: var(--text-1);
+  font-size: var(--fs-small);
+  box-shadow: 0 16px 40px color-mix(in oklab, var(--shadow) calc(35% * var(--shadow-k)), transparent);
+}
+
+.chrome-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
+  background: color-mix(in oklab, var(--warn) 9%, var(--surface-1));
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  flex-shrink: 0;
+}
+
+.chrome-banner strong { color: var(--text-1); }
+.chrome-banner code { font-family: var(--font-mono); font-size: var(--fs-caption); }
+.chrome-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+.chrome-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chrome-btn.is-primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-fill);
+}
+
+/* ── Legacy component styles still in use ─────────────── */
+.task-card {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  padding: 24px;
+  border-radius: var(--r-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: transform var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  position: relative;
+  overflow: hidden;
+}
+
+.task-card:hover { border-color: var(--accent); }
+
+/* Scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: var(--r-pill); }
+
+@keyframes strata-toggle-pulse {
+  0%, 100% { box-shadow: 0 0 0 color-mix(in oklab, var(--accent) 0%, transparent); }
+  50% { box-shadow: 0 0 14px color-mix(in oklab, var(--accent) 40%, transparent); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Markdown in chat and knowledge pages */
+.markdown-body { font-size: var(--fs-body); line-height: 1.65; }
+.markdown-body p { margin-bottom: 12px; }
+.markdown-body p:last-child { margin-bottom: 0; }
+.markdown-body ul, .markdown-body ol { margin-left: 20px; margin-bottom: 12px; padding-left: 6px; }
+.markdown-body ul:last-child, .markdown-body ol:last-child { margin-bottom: 0; }
+.markdown-body li { margin-bottom: 6px; }
+.markdown-body li p { margin-bottom: 6px; }
+.markdown-body strong { font-weight: 650; color: var(--text-1); }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+  margin-top: 20px;
+  margin-bottom: 12px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-1);
+  letter-spacing: -0.01em;
+}
+.markdown-body h1 { font-size: var(--fs-h2); border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.markdown-body h2 { font-size: var(--fs-title); }
+.markdown-body h3 { font-size: var(--fs-lead); }
+.markdown-body code {
+  background: color-mix(in oklab, var(--ink) 7%, transparent);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+.markdown-body pre {
+  background: var(--bg-sunken);
+  padding: 14px;
+  border-radius: var(--r-md);
+  overflow-x: auto;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+}
+.markdown-body pre code { background: transparent; padding: 0; }
+.markdown-body a { color: var(--accent); }
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in oklab, var(--shadow) calc(60% * var(--shadow-k)), transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(8px);
+}
+
+.modal-content.glass {
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  padding: 32px;
+  border-radius: var(--r-xl);
+  max-width: 480px;
+  text-align: center;
+  box-shadow: 0 20px 50px color-mix(in oklab, var(--shadow) calc(40% * var(--shadow-k)), transparent);
+}
+
+.modal-content h2 { font-family: var(--font-display); font-size: var(--fs-h2); font-weight: 600; margin-bottom: 8px; }
+.modal-content p { color: var(--text-2); }
+.modal-actions { display: flex; gap: 12px; margin-top: 24px; justify-content: center; }
+.modal-actions button { padding: 10px 20px; border-radius: var(--r-md); cursor: pointer; font-weight: 600; }
+.modal-actions .primary { background: var(--accent); color: var(--on-fill); border: none; }
+.modal-actions .secondary { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--line-strong); }
+
+/* ── Responsive shell ──────────────────────────────────── */
+@media (max-width: 1280px) {
+  .app-taskpane { width: 340px; }
+}
+
+@media (max-width: 1100px) {
+  .app-sessions, .app-taskpane { display: none !important; }
+}
+
+@media (max-width: 760px) {
+  .app-topbar { padding: 8px 12px; }
+  .app-topbar-row { flex-wrap: wrap; gap: 8px; }
+  .app-brand-sub { display: none; }
+  .app-topbar-tools { margin-left: auto; }
+  .app-lanes {
+    order: 3;
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    padding-bottom: 2px;
+  }
+  .app-lanes > * { flex: 0 0 72% !important; scroll-snap-align: start; }
+  .app-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 58px;
+    flex-direction: row;
+    justify-content: space-around;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-top: 1px solid var(--line);
+    z-index: 50;
+    overflow-x: auto;
+  }
+  .app-main { border-right: 0; padding-bottom: 58px; }
+  .app-nav > button { width: 38px !important; height: 40px !important; }
+  .chrome-banner { flex-direction: column; align-items: flex-start; }
+  .chrome-toast { bottom: 72px; }
+}
+
+@media (max-width: 1360px) {
+  .app-throttle { display: none !important; }
+}

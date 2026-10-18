@@ -1,0 +1,292 @@
+import React from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ChevronDown, ChevronRight, Terminal } from 'lucide-react';
+import TaskCard from '../components/TaskCard';
+
+const MotionDiv = motion.div;
+
+const TelemetryCell = ({ value, label }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+    <div style={{ fontSize: 'var(--fs-lead)', fontWeight: 800, color: 'var(--text-1)', fontFamily: 'var(--font-mono)' }}>{value}</div>
+    <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-4)', fontWeight: 700, letterSpacing: '0.1em' }}>{label}</div>
+  </div>
+);
+
+const findActivePathIds = (nodes, targetId) => {
+  const normalizedTarget = String(targetId || '').trim();
+  if (!normalizedTarget) return new Set();
+  const visit = (items) => {
+    for (const item of items || []) {
+      if (!item) continue;
+      if (String(item.id || '') === normalizedTarget) return [String(item.id)];
+      const childPath = visit(item.children || []);
+      if (childPath.length) return [String(item.id), ...childPath];
+    }
+    return [];
+  };
+  return new Set(visit(nodes));
+};
+
+export default function TaskPaneContent({
+  activeNav,
+  laneFinishedTasks,
+  laneQueuedTasks,
+  showFinishedTasks,
+  setShowFinishedTasks,
+  focusedTaskPaneTree,
+  handleArchiveTask,
+  activityNowMs,
+  scopeHasAnyTasks,
+  scopeOperationalMetrics,
+  scopeAttemptMetrics,
+  currentScope,
+  workerStatus,
+  laneStatuses,
+  laneDetails,
+  laneCurrentTaskTitles,
+  providerTelemetry,
+  onOpenProcedure,
+  onOpenTask,
+  onOpenWorkbench,
+  showStartupActions = false,
+  hasPersistedSessions = false,
+  onLoadPreviousSession,
+  onStartNewSession,
+}) {
+  const scopeLaneDetail = currentScope === 'home' ? null : (laneDetails?.[currentScope] || null);
+  const scopeModeLabel = currentScope === 'home'
+    ? `trainer ${String(laneDetails?.trainer?.activity_label || 'Idle').toLowerCase()} · agent ${String(laneDetails?.agent?.activity_label || 'Idle').toLowerCase()}`
+    : (scopeLaneDetail?.activity_label || laneStatuses?.[currentScope] || 'IDLE');
+  const scopeHeartbeatLabel = currentScope === 'home'
+    ? 'shared runtime'
+    : scopeLaneDetail?.heartbeat_age_s == null
+    ? (scopeLaneDetail?.activity_mode === 'GENERATING' ? 'starting' : 'no heartbeat')
+    : `${scopeLaneDetail?.heartbeat_state || 'unknown'} · ${Math.round(Number(scopeLaneDetail?.heartbeat_age_s || 0))}s ago`;
+  const scopeCurrentTaskLabel = currentScope === 'home'
+    ? `${laneCurrentTaskTitles?.agent || laneCurrentTaskTitles?.trainer || 'no active task'}`
+    : (laneCurrentTaskTitles?.[currentScope] || 'no active task');
+  const scopeStepLabel = currentScope === 'home'
+    ? [
+        laneDetails?.trainer?.step_label ? `trainer ${String(laneDetails.trainer.step_label).toLowerCase()}` : '',
+        laneDetails?.agent?.step_label ? `agent ${String(laneDetails.agent.step_label).toLowerCase()}` : '',
+      ].filter(Boolean).join(' · ') || 'no active step'
+    : (scopeLaneDetail?.step_label || 'no active step');
+  const scopeStepDetail = currentScope === 'home'
+    ? ''
+    : [scopeLaneDetail?.step_detail, scopeLaneDetail?.progress_label].filter(Boolean).join(' · ');
+  const presentTaskRoots = Array.isArray(focusedTaskPaneTree)
+    ? focusedTaskPaneTree.filter((task) => task.status !== 'pending')
+    : [];
+  const queuedTaskRoots = Array.isArray(laneQueuedTasks) ? laneQueuedTasks : [];
+  const focusedTaskId = currentScope === 'home'
+    ? (laneDetails?.agent?.current_task_id || laneDetails?.trainer?.current_task_id || '')
+    : (scopeLaneDetail?.current_task_id || '');
+  const activePathIds = React.useMemo(
+    () => findActivePathIds(focusedTaskPaneTree, focusedTaskId),
+    [focusedTaskPaneTree, focusedTaskId]
+  );
+  return (
+    <>
+      {activeNav !== 'dashboard' && laneFinishedTasks.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <button
+            onClick={() => setShowFinishedTasks(!showFinishedTasks)}
+            style={{
+              background: 'color-mix(in oklab, var(--ink) 3%, transparent)',
+              border: '1px solid color-mix(in oklab, var(--ink) 5%, transparent)',
+              color: 'var(--text-3)',
+              borderRadius: 'var(--r-md)',
+              padding: '10px 12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              cursor: 'pointer',
+              fontSize: 'var(--fs-caption)',
+              fontWeight: 800,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase'
+            }}
+          >
+            <span>Recently Completed · {laneFinishedTasks.length}</span>
+            {showFinishedTasks ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+          <AnimatePresence>
+            {showFinishedTasks && (
+              <MotionDiv
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '10px' }}
+              >
+                {laneFinishedTasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onArchive={() => handleArchiveTask(task.id)}
+                    nowMs={activityNowMs}
+                    laneDetail={laneDetails?.[task.lane] || null}
+                    detailLevel="compact"
+                    onOpenProcedure={onOpenProcedure}
+                    onOpenTask={onOpenTask}
+                    onOpenWorkbench={onOpenWorkbench}
+                    activePathIds={activePathIds}
+                  />
+                ))}
+              </MotionDiv>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
+      {presentTaskRoots.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-4)', fontWeight: 800, letterSpacing: '0.12em' }}>
+            PRESENT TASKS
+          </div>
+          <AnimatePresence>
+            {presentTaskRoots.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                onArchive={() => handleArchiveTask(task.id)}
+                nowMs={activityNowMs}
+                laneDetail={laneDetails?.[task.lane] || null}
+                detailLevel="compact"
+                onOpenProcedure={onOpenProcedure}
+                onOpenTask={onOpenTask}
+                onOpenWorkbench={onOpenWorkbench}
+                activePathIds={activePathIds}
+              />
+            ))}
+          </AnimatePresence>
+        </div>
+      )}
+
+      {queuedTaskRoots.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-4)', fontWeight: 800, letterSpacing: '0.12em' }}>
+            QUEUED / PENDING
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {queuedTaskRoots.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                onArchive={() => handleArchiveTask(task.id)}
+                nowMs={activityNowMs}
+                laneDetail={laneDetails?.[task.lane] || null}
+                detailLevel="compact"
+                onOpenProcedure={onOpenProcedure}
+                onOpenTask={onOpenTask}
+                onOpenWorkbench={onOpenWorkbench}
+                activePathIds={activePathIds}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {presentTaskRoots.length === 0 && queuedTaskRoots.length === 0 && (
+        <div style={{ textAlign: 'center', color: 'var(--text-4)', padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+          <Terminal size={28} color="var(--text-4)" />
+          <div style={{ fontSize: 'var(--fs-body)', color: 'var(--text-4)' }}>
+            {laneFinishedTasks.length > 0 || scopeHasAnyTasks ? 'No current tasks' : 'No tasks yet'}
+          </div>
+          {showStartupActions && (
+            <div style={{ display: 'flex', gap: '10px', marginTop: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+              {hasPersistedSessions ? (
+                <button
+                  type="button"
+                  onClick={onLoadPreviousSession}
+                  style={{
+                    borderRadius: 'var(--r-pill)',
+                    border: '1px solid color-mix(in oklab, var(--ink) 8%, transparent)',
+                    background: 'color-mix(in oklab, var(--ink) 4%, transparent)',
+                    color: 'var(--text-1)',
+                    padding: '10px 16px',
+                    fontSize: 'var(--fs-small)',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Load Previous Session
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={onStartNewSession}
+                style={{
+                  borderRadius: 'var(--r-pill)',
+                  border: '1px solid color-mix(in oklab, var(--accent) 28%, transparent)',
+                  background: 'color-mix(in oklab, var(--accent) 14%, transparent)',
+                  color: 'var(--accent-soft)',
+                  padding: '10px 16px',
+                  fontSize: 'var(--fs-small)',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Start New
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ padding: '16px 20px', borderTop: '1px solid color-mix(in oklab, var(--ink) 5%, transparent)', background: 'var(--bg)', flexShrink: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+          <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-4)', fontWeight: 800, letterSpacing: '0.12em' }}>OPERATIONAL TELEMETRY</span>
+          <Terminal size={12} style={{ color: 'var(--text-4)' }} />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '12px' }}>
+          <TelemetryCell value={scopeOperationalMetrics.working || '—'} label="TASKS RUNNING NOW" />
+          <TelemetryCell value={scopeOperationalMetrics.queued || '—'} label="TASKS QUEUED NEXT" />
+          <TelemetryCell value={scopeOperationalMetrics.blocked || '—'} label="TASKS BLOCKED" />
+          <TelemetryCell value={scopeOperationalMetrics.needsYou || '—'} label="TASKS WAITING ON YOU" />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginBottom: '12px' }}>
+          <TelemetryCell value={scopeAttemptMetrics.success10 || '—'} label="SUCCEEDED OF LAST 10 ATTEMPTS" />
+          <TelemetryCell value={scopeAttemptMetrics.success50 || '—'} label="SUCCEEDED OF LAST 50 ATTEMPTS" />
+          <TelemetryCell value={scopeAttemptMetrics.averageDurationLabel || '—'} label="AVERAGE TIME PER ATTEMPT" />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: 'var(--fs-caption)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: 'var(--text-3)' }}>context</span>
+            <span style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>{scopeOperationalMetrics.loadedContextCount} files · {scopeOperationalMetrics.loadedContextBudget} tok</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: 'var(--text-3)' }}>lane mode</span>
+            <span style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>
+              {scopeModeLabel}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: 'var(--text-3)' }}>heartbeat</span>
+            <span style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>
+              {scopeHeartbeatLabel}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: 'var(--text-3)' }}>current task</span>
+            <span style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)', textAlign: 'right' }}>
+              {scopeCurrentTaskLabel}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+            <span style={{ color: 'var(--text-3)' }}>live step</span>
+            <span style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)', textAlign: 'right' }}>
+              {scopeStepLabel}
+            </span>
+          </div>
+          {scopeStepDetail && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+              <span style={{ color: 'var(--text-3)' }}>step detail</span>
+              <span style={{ color: 'var(--info-soft)', fontFamily: 'var(--font-mono)', textAlign: 'right' }}>
+                {scopeStepDetail}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}

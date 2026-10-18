@@ -1,0 +1,20 @@
+{
+  "subsystem": "core",
+  "purpose": "Generate, synthesize, evaluate, and promote task resolutions.",
+  "key_modules": [
+    "strata/orchestrator/skeleton.py",
+    "strata/orchestrator/decomposition.py",
+    "strata/orchestrator/judge.py",
+    "strata/orchestrator/synthesis.py",
+    "strata/orchestrator/promotion.py"
+  ],
+  "common_failure_modes": [
+    "LLM returning malformed JSON",
+    "dependency resolution gridlocks",
+    "worktree cleanup failures"
+  ],
+  "key_metrics": [
+    "Tasks completed properly",
+    "Pass@N validation"
+  ]
+}

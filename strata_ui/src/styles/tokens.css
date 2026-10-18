@@ -1,0 +1,131 @@
+/*
+ * Strata design tokens.
+ *
+ * One palette, two themes. Neutrals are warm "sediment" greys; each hue family
+ * has a base (fills, marks, icons) and a -soft variant (text on tinted
+ * surfaces). Components never use raw colour literals: they use these tokens,
+ * or color-mix() of them, so both themes stay consistent.
+ *
+ * Lane identity: trainer = copper, agent = teal. System accent = indigo. These
+ * three were checked for lightness band, chroma and colour-vision separation
+ * against each theme's surface; re-check if you change them.
+ *
+ * The theme is chosen by data-theme on <html>, set before first paint by the
+ * inline script in index.html (system preference unless the viewer picks one).
+ */
+
+:root {
+  /* Type */
+  --font-sans: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: 'Space Grotesk Variable', 'Space Grotesk', var(--font-sans);
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+  /* Type scale: 1.125 ratio around a 13.5px body, tuned for dense operator views. */
+  --fs-micro: 10.5px;
+  --fs-caption: 11.5px;
+  --fs-small: 12.5px;
+  --fs-body: 13.5px;
+  --fs-lead: 15px;
+  --fs-title: 17px;
+  --fs-h2: 21px;
+  --fs-h1: 27px;
+  --fs-display: 38px;
+
+  /* Spacing: 4px base. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* Radii */
+  --r-xs: 4px;
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+}
+
+/* Light ("limestone") */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-sunken: #ebe8e1;
+  --bg: #f4f2ed;
+  --surface-1: #fdfcfa;
+  --surface-2: #f8f6f2;
+  --surface-3: #efece6;
+  --ink: #1d1b17;
+  --text-1: #1d1b17;
+  --text-2: #45423b;
+  --text-3: #6d6960;
+  --text-4: #99958a;
+  --line: color-mix(in oklab, var(--ink) 9%, transparent);
+  --line-strong: color-mix(in oklab, var(--ink) 16%, transparent);
+  --shadow: #2b261d;
+  --shadow-k: 0.45;
+
+  --accent: #5847d0;
+  --accent-soft: #3b2ea0;
+  --trainer: #b2582a;
+  --trainer-soft: #853f18;
+  --agent: #008a72;
+  --agent-soft: #0b5547;
+  --info: #2160bf;
+  --info-soft: #174690;
+  --ok: #18804b;
+  --ok-soft: #0f5c36;
+  --warn: #a7660b;
+  --warn-soft: #774805;
+  --danger: #c23b3b;
+  --danger-soft: #8f2424;
+
+  --on-fill: #ffffff;
+  --focus: color-mix(in oklab, var(--accent) 55%, transparent);
+}
+
+/* Dark ("basalt") */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-sunken: #0b0c0d;
+  --bg: #101113;
+  --surface-1: #16171a;
+  --surface-2: #1b1d20;
+  --surface-3: #24262a;
+  --ink: #f3f0ea;
+  --text-1: #eeebe5;
+  --text-2: #bdb9b0;
+  --text-3: #8d8a82;
+  --text-4: #625f59;
+  --line: color-mix(in oklab, var(--ink) 8%, transparent);
+  --line-strong: color-mix(in oklab, var(--ink) 14%, transparent);
+  --shadow: #000000;
+  --shadow-k: 1;
+
+  --accent: #8577ef;
+  --accent-soft: #d3cbff;
+  --trainer: #cf7a45;
+  --trainer-soft: #f6d2b8;
+  --agent: #2aa98f;
+  --agent-soft: #b8ede1;
+  --info: #66a9ff;
+  --info-soft: #c6deff;
+  --ok: #4fd28c;
+  --ok-soft: #bdf1d3;
+  --warn: #efb54e;
+  --warn-soft: #f8e0b2;
+  --danger: #f06b6b;
+  --danger-soft: #ffc7c7;
+
+  --on-fill: #101113;
+  --focus: color-mix(in oklab, var(--accent) 60%, transparent);
+}

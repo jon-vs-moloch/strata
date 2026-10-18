@@ -1,0 +1,23 @@
+{
+  "name": "strata",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev --prefix strata_ui",
+    "build": "npm run build --prefix strata_ui",
+    "lint": "npm run lint --prefix strata_ui",
+    "preview": "npm run preview --prefix strata_ui",
+    "desktop:dev": "tauri dev --config src-tauri/tauri.conf.json",
+    "desktop:build": "tauri build --config src-tauri/tauri.conf.json",
+    "desktop:install": "bash ./scripts/install_desktop_safe.sh",
+    "demo": "npm run demo --prefix strata_ui"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.5"
+  },
+  "license": "Apache-2.0"
+}

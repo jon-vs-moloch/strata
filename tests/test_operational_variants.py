@@ -1,0 +1,346 @@
+import asyncio
+from types import SimpleNamespace
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from strata.experimental.variants import (
+    build_stage_scope,
+    build_variant_execution_plan,
+    classify_pool_pruning,
+    ensure_variant,
+    get_variant_rating_snapshot,
+    list_variants_for_scope,
+)
+from strata.orchestrator.implementation import ImplementationModule
+from strata.orchestrator.judge import JudgeModule
+from strata.orchestrator.research import TaskBoundaryViolationError
+from strata.orchestrator.synthesis import SynthesisModule
+from strata.storage.models import Base, CandidateModel, TaskType
+from strata.storage.services.main import StorageManager
+
+
+def make_storage():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+    return StorageManager(session=session)
+
+
+class FakeResearchModule:
+    async def conduct_research(self, *args, **kwargs):
+        return SimpleNamespace(context_gathered="local context", key_constraints_discovered=["constraint"])
+
+
+class FakeImplementationModel:
+    def __init__(self):
+        self.calls = []
+        self.responses = [
+            {"content": "```python\nprint('candidate_a')\n```", "provider": "test", "model": "model-a"},
+            {"content": "```python\nprint('candidate_b')\n```", "provider": "test", "model": "model-b"},
+        ]
+
+    async def chat(self, messages, tools=None):
+        self.calls.append(messages)
+        return self.responses[len(self.calls) - 1]
+
+
+class FakeSynthesisModel:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, messages):
+        self.calls += 1
+        if self.calls == 1:
+            return {"content": "merged output a"}
+        if self.calls == 2:
+            return {"content": "merged output b"}
+        return {"content": "unparseable preference"}
+
+
+class FakeToolCallingImplementationModel:
+    async def chat(self, messages, tools=None):
+        return {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tool-1",
+                    "function": {"name": "list_active_tools", "arguments": "{}"},
+                }
+            ],
+            "provider": "test",
+            "model": "tool-model",
+        }
+
+
+def test_scope_resolution_prefers_exact_then_generic():
+    storage = make_storage()
+    exact_scope = build_stage_scope(component="synthesis", process="subtasks", step="default")
+    ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "generic"},
+        family="synthesis_prompt",
+        label="generic",
+        metadata={"stage_scope": "synthesis.generic.default"},
+    )
+    ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "exact"},
+        family="synthesis_prompt",
+        label="exact",
+        metadata={"stage_scope": exact_scope},
+    )
+
+    variants = list_variants_for_scope(
+        storage,
+        family="synthesis_prompt",
+        stage_scope=exact_scope,
+        domain=f"ops:{exact_scope}",
+    )
+
+    assert variants[0]["scope_match"] == "exact"
+    assert variants[1]["scope_match"] == "generic"
+
+
+def test_pool_pruning_waits_for_larger_pass_pool():
+    storage = make_storage()
+    storage.parameters.set_parameter(
+        "variant_registry_operational_policy",
+        {
+            "min_pool_size_for_pruning": 5,
+            "drop_bottom_count": 1,
+            "keep_top_k": 3,
+        },
+    )
+
+    assert classify_pool_pruning(storage, pool_size=3)["drop_count"] == 0
+    assert classify_pool_pruning(storage, pool_size=5)["drop_count"] == 1
+
+
+def test_execution_plan_prefers_validated_default_and_builds_lanes():
+    storage = make_storage()
+    stage_scope = build_stage_scope(component="implementation", process="impl", step="default")
+    strong = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "trainer"},
+        family="implementation_prompt",
+        label="trainer",
+        metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "validated"},
+    )
+    challenger = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "challenger"},
+        family="implementation_prompt",
+        label="challenger",
+        metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "validated"},
+    )
+    newcomer = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "newcomer"},
+        family="implementation_prompt",
+        label="newcomer",
+        metadata={"stage_scope": stage_scope, "status": "experimental"},
+    )
+    storage.parameters.set_parameter(
+        "variant_registry_ratings",
+        {
+            "by_domain": {
+                f"ops:{stage_scope}": {
+                    strong["variant_id"]: {"rating": 1540.0, "matches": 8},
+                    challenger["variant_id"]: {"rating": 1520.0, "matches": 5},
+                    newcomer["variant_id"]: {"rating": 1495.0, "matches": 0},
+                }
+            }
+        },
+    )
+
+    plan = build_variant_execution_plan(
+        storage,
+        family="implementation_prompt",
+        stage_scope=stage_scope,
+        domain=f"ops:{stage_scope}",
+        safe_mode=False,
+    )
+
+    assert plan["default"]["variant_id"] == strong["variant_id"]
+    assert challenger["variant_id"] in {item["variant_id"] for item in plan["exploit_pool"]}
+    assert len(plan["explore_pair"]) == 2
+    assert newcomer["variant_id"] in {item["variant_id"] for item in plan["selected_variants"]}
+
+
+def test_safe_mode_returns_only_validated_default():
+    storage = make_storage()
+    stage_scope = build_stage_scope(component="implementation", process="impl", step="default")
+    validated = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "validated"},
+        family="implementation_prompt",
+        label="validated",
+        metadata={"stage_scope": stage_scope, "downstream_validated": True, "status": "default"},
+    )
+    ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "experimental"},
+        family="implementation_prompt",
+        label="experimental",
+        metadata={"stage_scope": stage_scope, "status": "experimental"},
+    )
+
+    plan = build_variant_execution_plan(
+        storage,
+        family="implementation_prompt",
+        stage_scope=stage_scope,
+        domain=f"ops:{stage_scope}",
+        safe_mode=True,
+    )
+
+    assert plan["mode"] == "safe"
+    assert [item["variant_id"] for item in plan["selected_variants"]] == [validated["variant_id"]]
+
+
+def test_implementation_module_generates_candidates_for_scoped_variants():
+    storage = make_storage()
+    stage_scope = build_stage_scope(component="implementation", process="impl", step="default")
+    variant_a = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "favor minimal edits"},
+        family="implementation_prompt",
+        label="variant-a",
+        metadata={"stage_scope": stage_scope},
+    )
+    variant_b = ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "favor explicit comments"},
+        family="implementation_prompt",
+        label="variant-b",
+        metadata={"stage_scope": stage_scope},
+    )
+    task = storage.tasks.create(
+        title="Implement feature",
+        description="Do the thing.",
+        constraints={"pass_at": 2, "target_files": ["example.py"]},
+    )
+    task.type = TaskType.IMPL
+    storage.commit()
+
+    model = FakeImplementationModel()
+    module = ImplementationModule(model_adapter=model, storage_manager=storage, research_module=FakeResearchModule())
+    candidate_ids = asyncio.run(module.implement_task(task.task_id))
+
+    assert len(candidate_ids) == 2
+    candidates = [storage.session.get(CandidateModel, candidate_id) for candidate_id in candidate_ids]
+    assert {candidate.prompt_version for candidate in candidates} == {variant_a["variant_id"], variant_b["variant_id"]}
+    refreshed = storage.tasks.get_by_id(task.task_id)
+    assert refreshed.constraints["candidate_generation"]["generated_count"] == 2
+
+
+def test_implementation_tool_turn_raises_task_boundary_violation():
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Implement feature",
+        description="Do the thing.",
+        constraints={"target_files": ["example.py"]},
+    )
+    task.type = TaskType.IMPL
+    storage.commit()
+
+    model = FakeToolCallingImplementationModel()
+    module = ImplementationModule(model_adapter=model, storage_manager=storage, research_module=FakeResearchModule())
+
+    try:
+        asyncio.run(module.implement_task(task.task_id))
+        assert False, "expected TaskBoundaryViolationError"
+    except TaskBoundaryViolationError as exc:
+        assert exc.failure_kind == "task_boundary_violation"
+        assert exc.autopsy["tool_call"]["name"] == "list_active_tools"
+
+
+def test_judge_records_ranked_variant_matchups_for_normal_ops(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(title="Judge task", description="Rank candidates.")
+    task.type = TaskType.IMPL
+    storage.commit()
+    candidate_a = CandidateModel(
+        candidate_id="cand-a",
+        task_id=task.task_id,
+        stage="impl",
+        prompt_version="implementation_prompt.variant_a",
+        model="test/model",
+        artifact_type="python_file",
+        content_path="tests/fixtures/cand_a.py",
+        summary="a",
+        proposed_files=[],
+    )
+    candidate_b = CandidateModel(
+        candidate_id="cand-b",
+        task_id=task.task_id,
+        stage="impl",
+        prompt_version="implementation_prompt.variant_b",
+        model="test/model",
+        artifact_type="python_file",
+        content_path="tests/fixtures/cand_b.py",
+        summary="b",
+        proposed_files=[],
+    )
+    storage.session.add(candidate_a)
+    storage.session.add(candidate_b)
+    storage.commit()
+
+    judge = JudgeModule(model_adapter=None, storage_manager=storage)
+
+    async def fake_eval(_task, candidate):
+        score = 9.0 if candidate.candidate_id == "cand-a" else 7.0
+        return SimpleNamespace(
+            score=score,
+            valid=True,
+            reasoning="ok",
+            checks_passed=["pass"],
+            checks_failed=[],
+            diff_summary="diff",
+        )
+
+    monkeypatch.setattr(judge.evaluator, "evaluate_candidate", fake_eval)
+    rankings = asyncio.run(judge.judge_candidates(task.task_id, ["cand-a", "cand-b"]))
+
+    assert rankings[0]["candidate_id"] == "cand-a"
+    refreshed = storage.tasks.get_by_id(task.task_id)
+    assert refreshed.constraints["candidate_ranking"]["matchup_count"] == 1
+    snapshot = get_variant_rating_snapshot(storage)
+    assert snapshot["recent_matchups"][-1]["domain"] == "ops:implementation:impl"
+
+
+def test_synthesis_variants_are_ranked_and_recorded():
+    storage = make_storage()
+    stage_scope = build_stage_scope(component="synthesis", process="subtasks", step="default")
+    ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "optimize for minimal conflicts"},
+        family="synthesis_prompt",
+        label="variant-a",
+        metadata={"stage_scope": stage_scope},
+    )
+    ensure_variant(
+        storage,
+        kind="prompt_bundle",
+        payload={"instruction_suffix": "optimize for readability"},
+        family="synthesis_prompt",
+        label="variant-b",
+        metadata={"stage_scope": stage_scope},
+    )
+
+    module = SynthesisModule(model_adapter=FakeSynthesisModel(), storage_manager=storage)
+    result = asyncio.run(module.synthesize_subtasks("parent-task", {"child-a": "patch a", "child-b": "patch b"}))
+
+    assert result == "merged output a"
+    snapshot = get_variant_rating_snapshot(storage)
+    assert snapshot["recent_matchups"][-1]["domain"] == f"ops:{stage_scope}"

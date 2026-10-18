@@ -1,0 +1,1796 @@
+"""
+@module orchestrator.worker.attempt_runner
+@purpose Dispatches task execution based on task type.
+"""
+
+import logging
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from strata.communication.primitives import build_communication_decision, deliver_communication_decision
+from strata.core.lanes import infer_lane_from_task
+from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
+from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
+from strata.procedures.registry import (
+    STARTUP_SMOKE_PROCEDURE_ID,
+    build_procedure_task_constraints,
+    ensure_draft_procedure_for_task,
+    record_procedure_run,
+)
+from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
+from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
+from strata.orchestrator.research import ResearchModule, _normalize_research_context_hints
+from strata.orchestrator.decomposition import DecompositionModule
+from strata.orchestrator.implementation import ImplementationModule
+from strata.eval.job_runner import run_eval_job_task
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_CONTINUATION_DEPTH = 6
+DEFAULT_CONTINUATION_AUDIT_INTERVAL = 3
+DEFAULT_MAX_DECOMPOSITION_DEPTH = 3
+
+
+def _process_provenance_record(
+    *,
+    source_kind: str,
+    source_actor: str,
+    authority_kind: str,
+    authority_ref: str,
+    derived_from: Optional[List[str]] = None,
+    note: str = "",
+) -> Dict[str, Any]:
+    return {
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "source_kind": str(source_kind or "").strip(),
+        "source_actor": str(source_actor or "").strip() or "system",
+        "authority_kind": str(authority_kind or "").strip() or "unspecified",
+        "authority_ref": str(authority_ref or "").strip(),
+        "derived_from": [str(item).strip() for item in list(derived_from or []) if str(item).strip()],
+        "governing_spec_refs": [],
+        "note": str(note or "").strip(),
+    }
+
+
+async def _enqueue_task(enqueue_fn, task_id: str, *, front: bool = False) -> None:
+    try:
+        await enqueue_fn(task_id, front=front)
+    except TypeError:
+        await enqueue_fn(task_id)
+
+
+def _lineage_task_id(task: TaskModel) -> str:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    return str(constraints.get("lineage_root_task_id") or getattr(task, "task_id", "") or "").strip()
+
+
+def _ensure_canonical_procedure_scaffold(storage, task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    if list(constraints.get("procedure_checklist") or []):
+        return False
+
+    procedure_id = str(constraints.get("procedure_id") or "").strip()
+    bind_capability_name = ""
+    bind_capability_kind = ""
+
+    if not procedure_id:
+        tooling_target = str(
+            constraints.get("tool_modification_target")
+            or constraints.get("degraded_process")
+            or ""
+        ).strip()
+        if tooling_target:
+            procedure_id = str(canonical_system_procedure_id(process_name=tooling_target) or "").strip()
+            bind_capability_name = tooling_target
+            bind_capability_kind = "process"
+        elif getattr(task, "type", None) == TaskType.DECOMP:
+            procedure_id = str(canonical_system_procedure_id(task_type="DECOMP") or "").strip()
+            bind_capability_name = "decomposition"
+            bind_capability_kind = "procedure"
+
+    if not procedure_id:
+        return False
+
+    updated_constraints: Dict[str, Any] = dict(constraints)
+    if bind_capability_name:
+        updated_constraints = bind_system_procedure(
+            updated_constraints,
+            procedure_id=procedure_id,
+            capability_kind=bind_capability_kind,
+            capability_name=bind_capability_name,
+        )
+    updated_constraints = build_procedure_task_constraints(
+        storage,
+        procedure_id,
+        base=updated_constraints,
+    )
+    if updated_constraints == constraints:
+        return False
+    task.constraints = updated_constraints
+    return True
+
+
+def _upsert_decomposition_history_task(
+    storage,
+    *,
+    task: TaskModel,
+    attempt_id: Optional[str],
+    phase_id: str,
+    title: str,
+    description: str,
+    summary: Optional[Dict[str, Any]] = None,
+) -> TaskModel:
+    normalized_attempt_id = str(attempt_id or "").strip()
+    normalized_phase_id = str(phase_id or "").strip()
+    existing = None
+    for row in storage.session.query(TaskModel).filter(TaskModel.parent_task_id == task.task_id).all():
+        constraints = dict(getattr(row, "constraints", {}) or {})
+        if str(constraints.get("inline_process_kind") or "").strip().lower() != "decomposition_phase":
+            continue
+        if str(constraints.get("decomposition_attempt_id") or "").strip() != normalized_attempt_id:
+            continue
+        if str(constraints.get("decomposition_phase_id") or "").strip() != normalized_phase_id:
+            continue
+        existing = row
+        break
+
+    constraints = bind_system_procedure(
+        {
+            "lane": infer_lane_from_task(task),
+            "source_task_id": task.task_id,
+            "inline_process_kind": "decomposition_phase",
+            "decomposition_attempt_id": normalized_attempt_id,
+            "decomposition_phase_id": normalized_phase_id,
+            "decomposition_summary": dict(summary or {}),
+            "provenance": _process_provenance_record(
+                source_kind="decomposition_phase",
+                source_actor="decomposition_runtime",
+                authority_kind="spec_policy",
+                authority_ref="project_decomposition_visible_history",
+                derived_from=[f"task:{task.task_id}"] + ([f"attempt:{normalized_attempt_id}"] if normalized_attempt_id else []),
+                note=f"Projected decomposition phase [{normalized_phase_id}] into canonical task history.",
+            ),
+        },
+        procedure_id=canonical_system_procedure_id(task_type="DECOMP"),
+        capability_kind="procedure",
+        capability_name="decomposition",
+    )
+
+    if existing is not None:
+        existing.title = title
+        existing.description = description
+        existing.state = TaskState.COMPLETE
+        existing.type = TaskType.DECOMP
+        existing.constraints = constraints
+        return existing
+
+    created = storage.tasks.create(
+        title=title,
+        description=description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.COMPLETE,
+        type=TaskType.DECOMP,
+        depth=int(getattr(task, "depth", 0) or 0) + 1,
+        priority=float(getattr(task, "priority", 0.0) or 0.0),
+        constraints=constraints,
+        flush=False,
+    )
+    return created
+
+
+def _count_ancestor_tasks(storage, task: TaskModel, *, task_types: Optional[set[TaskType]] = None) -> int:
+    if storage is None or not hasattr(storage, "tasks"):
+        return 0
+    total = 0
+    seen = set()
+    current = task
+    while current is not None:
+        parent_task_id = getattr(current, "parent_task_id", None)
+        if not parent_task_id or parent_task_id in seen:
+            break
+        seen.add(parent_task_id)
+        parent = storage.tasks.get_by_id(parent_task_id)
+        if parent is None:
+            break
+        if not task_types or getattr(parent, "type", None) in task_types:
+            total += 1
+        current = parent
+    return total
+
+
+def _lineage_root_task(storage, task: TaskModel) -> TaskModel:
+    current = task
+    seen = set()
+    while current is not None and getattr(current, "parent_task_id", None):
+        parent_task_id = getattr(current, "parent_task_id", None)
+        if not parent_task_id or parent_task_id in seen:
+            break
+        seen.add(parent_task_id)
+        parent = storage.tasks.get_by_id(parent_task_id) if storage is not None and hasattr(storage, "tasks") else None
+        if parent is None:
+            break
+        current = parent
+    return current
+
+
+def _summarize_task_node(node: TaskModel) -> Dict[str, Any]:
+    return {
+        "task_id": str(getattr(node, "task_id", "") or ""),
+        "title": str(getattr(node, "title", "") or ""),
+        "type": str(getattr(getattr(node, "type", None), "value", getattr(node, "type", "")) or ""),
+        "state": str(getattr(getattr(node, "state", None), "value", getattr(node, "state", "")) or ""),
+        "depth": int(getattr(node, "depth", 0) or 0),
+    }
+
+
+def _build_task_trajectory(storage, task: TaskModel, *, max_nodes: int = 24, max_recent_path: int = 8) -> Dict[str, Any]:
+    root = _lineage_root_task(storage, task)
+    recent_path: List[Dict[str, Any]] = []
+    lineage_cursor = task
+    seen = set()
+    while lineage_cursor is not None and getattr(lineage_cursor, "task_id", None) and lineage_cursor.task_id not in seen:
+        seen.add(lineage_cursor.task_id)
+        recent_path.append(_summarize_task_node(lineage_cursor))
+        parent_task_id = getattr(lineage_cursor, "parent_task_id", None)
+        lineage_cursor = storage.tasks.get_by_id(parent_task_id) if parent_task_id and storage is not None and hasattr(storage, "tasks") else None
+    recent_path.reverse()
+    recent_path = recent_path[-max_recent_path:]
+
+    graph_nodes: List[Dict[str, Any]] = []
+    if storage is not None and hasattr(storage, "session") and getattr(root, "session_id", None):
+        session_rows = (
+            storage.session.query(TaskModel)
+            .filter(TaskModel.session_id == root.session_id)
+            .all()
+        )
+        by_parent: Dict[str, List[TaskModel]] = {}
+        for row in session_rows:
+            parent_key = str(getattr(row, "parent_task_id", "") or "")
+            by_parent.setdefault(parent_key, []).append(row)
+        queue: List[TaskModel] = [root]
+        visited: set[str] = set()
+        while queue and len(graph_nodes) < max_nodes:
+            node = queue.pop(0)
+            node_id = str(getattr(node, "task_id", "") or "")
+            if not node_id or node_id in visited:
+                continue
+            visited.add(node_id)
+            children = by_parent.get(node_id, [])
+            graph_nodes.append(
+                {
+                    **_summarize_task_node(node),
+                    "parent_task_id": str(getattr(node, "parent_task_id", "") or ""),
+                    "child_count": len(children),
+                }
+            )
+            queue.extend(sorted(children, key=lambda item: int(getattr(item, "depth", 0) or 0)))
+
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    handoff_context = dict(constraints.get("handoff_context") or {})
+    return {
+        "lineage_root": _summarize_task_node(root),
+        "current_task": _summarize_task_node(task),
+        "recent_path": recent_path,
+        "graph_nodes": graph_nodes,
+        "handoff_summary": {
+            "tool_name": str(((handoff_context.get("tool_call") or {}).get("name")) or "").strip(),
+            "next_step_hint": str(handoff_context.get("next_step_hint") or "").strip(),
+            "tool_result_preview": str(handoff_context.get("tool_result_preview") or "").strip()[:400],
+        },
+    }
+
+
+async def _queue_trace_review_guardrail(
+    storage,
+    task: TaskModel,
+    enqueue_fn,
+    *,
+    title: str,
+    description: str,
+    trigger: str,
+    note: str,
+    associated_task_ids: Optional[List[str]] = None,
+) -> TaskModel:
+    payload = {
+        "trace_kind": "task_trace",
+        "task_id": task.task_id,
+        "associated_task_ids": [str(item).strip() for item in list(associated_task_ids or []) if str(item).strip()],
+        "reviewer_tier": "trainer",
+        "emit_followups": True,
+        "persist_to_task": True,
+        "spec_scope": "project",
+        "audit_mode": "internal",
+        "source_task_id": task.task_id,
+        "trigger": trigger,
+        "guardrail_note": note,
+        "provenance": {
+            "source_kind": "task_guardrail",
+            "source_actor": "attempt_runner",
+            "authority_kind": "spec_policy",
+            "authority_ref": trigger,
+            "derived_from": [f"task:{task.task_id}", f"lineage:{_lineage_task_id(task) or task.task_id}"],
+            "governing_spec_refs": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/step-runtime-flow.md",
+            ],
+            "note": note,
+        },
+    }
+    judge = storage.tasks.create(
+        title=title,
+        description=description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.PENDING,
+        flush=False,
+        constraints=bind_system_procedure({
+            "lane": "trainer",
+            "provenance": dict(payload.get("provenance") or {}),
+            "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
+            "system_job": {
+                "kind": "trace_review",
+                "payload": payload,
+            },
+        },
+        procedure_id=canonical_system_procedure_id(system_job_kind="trace_review"),
+        capability_kind="process",
+        capability_name="audit"),
+    )
+    judge.type = TaskType.JUDGE
+    judge.depth = int(getattr(task, "depth", 0) or 0) + 1
+    task.active_child_ids = list(dict.fromkeys([*(list(getattr(task, "active_child_ids", []) or [])), judge.task_id]))
+    task.state = TaskState.PUSHED
+    storage.commit()
+    await _enqueue_task(enqueue_fn, judge.task_id, front=True)
+    return judge
+
+
+async def _resume_parent_repair_task_if_supported(storage, task: TaskModel, enqueue_fn) -> bool:
+    title = str(getattr(task, "title", "") or "").strip().lower()
+    if not title.startswith("recovery plan for "):
+        return False
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if not parent_task_id or storage is None or not hasattr(storage, "tasks"):
+        return False
+    parent = storage.tasks.get_by_id(parent_task_id)
+    if parent is None or getattr(parent, "type", None) not in {TaskType.BUG_FIX, TaskType.REFACTOR, TaskType.IMPL}:
+        return False
+    parent_constraints = dict(getattr(parent, "constraints", {}) or {})
+    if parent_constraints.get("procedure_checklist") or parent_constraints.get("procedure_checklist_item"):
+        return False
+    parent.active_child_ids = [task_id for task_id in list(getattr(parent, "active_child_ids", []) or []) if task_id != task.task_id]
+    if not parent.active_child_ids:
+        parent.active_child_ids = []
+    parent.state = TaskState.PENDING
+    parent_constraints["recovered_from_stale_decomposition"] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source_task_id": str(task.task_id),
+        "reason": "Parent repair task is now executable directly; collapsing stale recovery-plan shell.",
+    }
+    parent.constraints = parent_constraints
+    task.state = TaskState.COMPLETE
+    task.active_child_ids = []
+    storage.commit()
+    await _enqueue_task(enqueue_fn, parent.task_id, front=True)
+    return True
+
+
+def _is_root_procedure_task(task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    checklist = list(constraints.get("procedure_checklist") or [])
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    return bool(checklist) and not checklist_item
+
+
+def _procedure_checklist_item_source_hints(item_id: str) -> Dict[str, Any]:
+    normalized = str(item_id or "").strip().lower()
+    hints = {
+        "spec_presence": {
+            "preferred_paths": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/system-substrates.md",
+            ],
+            "guidance": "Verify the canonical spec files directly from their durable locations.",
+        },
+        "runtime_wiring": {
+            "preferred_paths": [
+                "scripts/start_api.sh",
+                "scripts/worker_daemon.py",
+                "strata/api/main.py",
+                "strata/orchestrator/worker/runtime_ipc.py",
+            ],
+            "guidance": "Inspect the split API/worker launch and runtime IPC surfaces directly.",
+        },
+        "operator_runtime_surface": {
+            "preferred_paths": [
+                "src-tauri/src/main.rs",
+                "strata_ui/src/App.jsx",
+                "strata_ui/src/views/SettingsView.jsx",
+                "docs/spec/desktop-distribution.md",
+            ],
+            "guidance": "Inspect the operator-visible runtime status and task-inspection surfaces directly rather than scanning the repo root.",
+        },
+        "procedure_workbench_surface": {
+            "preferred_paths": [
+                "strata_ui/src/App.jsx",
+                "strata_ui/src/views/NonChatContent.jsx",
+                "docs/spec/workbench-implementation-plan.md",
+            ],
+            "guidance": "Inspect the Procedure and Workbench/debugging surfaces directly; verify they are product-visible rather than backend-only.",
+        },
+        "agent_name": {
+            "preferred_paths": [
+                ".knowledge/user-profile.md",
+                ".knowledge/specs/project_spec.md",
+                "strata/api/chat_task_admin.py",
+                "strata/api/chat_runtime.py",
+            ],
+            "guidance": "Look for durable naming/profile metadata before inspecting broader runtime surfaces.",
+        },
+        "identity_language": {
+            "preferred_paths": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/system-substrates.md",
+                "strata/procedures/registry.py",
+            ],
+            "guidance": "Inspect the durable specs and Procedure definitions that describe naming, role language, and collaboration style for operator, agent, trainer, and system.",
+        },
+        "verification_posture": {
+            "preferred_paths": [
+                ".knowledge/specs/constitution.md",
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/task-attempt-ontology.md",
+                "docs/spec/project-philosophy.md",
+                "strata/experimental/verifier.py",
+                "strata/orchestrator/worker/resolution_policy.py",
+            ],
+            "guidance": "Inspect permissions, autonomy, verification policy, and trust-annealing guidance, not the repo root.",
+        },
+        "runtime_posture": {
+            "preferred_paths": [
+                ".knowledge/specs/project_spec.md",
+                "docs/spec/project-philosophy.md",
+                "strata/api/main.py",
+                "strata/models/providers.py",
+                "strata/observability/host.py",
+            ],
+            "guidance": "Inspect runtime settings, scope posture, and comfort-throttle codepaths before asking for clarification.",
+        },
+        "open_questions": {
+            "preferred_paths": [
+                ".knowledge/specs/investigation-patterns.md",
+                "strata/orchestrator/user_questions.py",
+                "strata/experimental/trace_review.py",
+                "strata/orchestrator/background.py",
+            ],
+            "guidance": "Inspect question, attention, and review surfaces directly instead of broadly surveying the repository.",
+        },
+    }
+    selected = dict(hints.get(normalized) or {})
+    selected.setdefault("preferred_paths", [])
+    selected.setdefault("guidance", "")
+    return selected
+
+
+def _default_carry_forward_policy() -> Dict[str, Any]:
+    return {
+        "tool_call": "summary",
+        "tool_result_preview": "summary",
+        "tool_result_full": "small_only",
+        "next_step_hint": "summary",
+        "failure_autopsy": "summary",
+    }
+
+
+def _task_type_from_name(raw: Any, *, default: TaskType) -> TaskType:
+    if isinstance(raw, TaskType):
+        return raw
+    normalized = str(raw or "").strip().upper()
+    return getattr(TaskType, normalized, default)
+
+
+def _terminal_tool_handoff(outcome: TerminalToolCallOutcome, *, task: TaskModel, attempt_id: str) -> Dict[str, Any]:
+    return {
+        "from_task_id": str(getattr(task, "task_id", "") or ""),
+        "from_task_title": str(getattr(task, "title", "") or ""),
+        "from_attempt_id": str(attempt_id or ""),
+        "tool_call": {
+            "name": str(outcome.tool_name or "").strip(),
+            "arguments": dict(outcome.tool_arguments or {}),
+        },
+        "tool_result_preview": str(outcome.tool_result_preview or "").strip(),
+        "tool_result_full": str(outcome.tool_result_full or "").strip(),
+        "next_step_hint": str(outcome.next_step_hint or "").strip(),
+        "source_module": str(outcome.source_module or "").strip(),
+        "avoid_repeating_first_tool": {
+            "name": str(outcome.tool_name or "").strip(),
+            "reason": "This tool call already ran in the prior explicit step; consume its result before deciding whether to repeat it.",
+        },
+    }
+
+
+def _tool_branch_matches(branch: Dict[str, Any], outcome: TerminalToolCallOutcome) -> bool:
+    expected_tool = str(branch.get("tool_name") or "").strip()
+    if expected_tool and expected_tool != str(outcome.tool_name or "").strip():
+        return False
+    preview = str(outcome.tool_result_preview or "")
+    full_result = str(outcome.tool_result_full or "")
+    result_contains = str(branch.get("result_contains") or "").strip()
+    if result_contains and result_contains not in preview and result_contains not in full_result:
+        return False
+    return True
+
+
+async def _enqueue_terminal_tool_followup(storage, task: TaskModel, attempt, outcome: TerminalToolCallOutcome, enqueue_fn) -> Optional[TaskModel]:
+    parent_constraints = dict(getattr(task, "constraints", {}) or {})
+    continuation_depth = int(parent_constraints.get("continuation_depth") or getattr(task, "depth", 0) or 0)
+    next_continuation_depth = continuation_depth + 1
+    max_continuation_depth = max(1, int(parent_constraints.get("max_continuation_depth") or DEFAULT_MAX_CONTINUATION_DEPTH))
+    continuation_audit_interval = max(1, int(parent_constraints.get("continuation_audit_interval") or DEFAULT_CONTINUATION_AUDIT_INTERVAL))
+    branches = list(parent_constraints.get("tool_result_branches") or [])
+    selected_branch = next((dict(item or {}) for item in branches if _tool_branch_matches(dict(item or {}), outcome)), None)
+    if selected_branch and bool(selected_branch.get("stop_after_tool_step")):
+        task.active_child_ids = []
+        task.state = TaskState.COMPLETE
+        return None
+    if next_continuation_depth > max_continuation_depth:
+        await _queue_trace_review_guardrail(
+            storage,
+            task,
+            enqueue_fn,
+            title=f"Audit Deep Continuation: {str(getattr(task, 'title', '') or task.task_id)[:84]}",
+            description=(
+                "A continuation chain exceeded the allowed recursion depth. "
+                "Review whether the task is already sufficiently decomposed or should cash out instead of continuing."
+            ),
+            trigger="deep_continuation_guardrail",
+            note=(
+                f"Continuation depth {next_continuation_depth} exceeded max {max_continuation_depth} "
+                f"after terminal tool step `{str(outcome.tool_name or 'tool')}`."
+            ),
+            associated_task_ids=[str(getattr(task, "parent_task_id", "") or "").strip()],
+        )
+        return None
+
+    child_title = str(
+        (selected_branch or {}).get("next_title")
+        or outcome.continuation_title
+        or f"Continue after {str(outcome.tool_name or 'tool')}"
+    ).strip()
+    child_description = str(
+        (selected_branch or {}).get("next_description")
+        or outcome.continuation_description
+        or (
+            f"Continue the task after the previous step executed `{str(outcome.tool_name or 'tool')}`. "
+            "Consume the inherited tool result before deciding on any new model move."
+        )
+    ).strip()
+    child_type = _task_type_from_name(
+        (selected_branch or {}).get("task_type") or outcome.continuation_task_type,
+        default=getattr(task, "type", TaskType.RESEARCH),
+    )
+    handoff = _terminal_tool_handoff(outcome, task=task, attempt_id=str(getattr(attempt, "attempt_id", "") or ""))
+    child_constraints = dict(parent_constraints)
+    child_constraints.update(dict(outcome.continuation_constraints or {}))
+    child_constraints.update(dict((selected_branch or {}).get("constraints") or {}))
+    child_constraints["handoff_context"] = handoff
+    child_constraints["execution_mode"] = "serial"
+    child_constraints["continuation_depth"] = next_continuation_depth
+    child_constraints["max_continuation_depth"] = max_continuation_depth
+    child_constraints["continuation_audit_interval"] = continuation_audit_interval
+    child_constraints["lineage_root_task_id"] = _lineage_task_id(task) or str(task.task_id)
+    child_constraints["terminal_tool_origin"] = {
+        "tool_name": str(outcome.tool_name or "").strip(),
+        "source_module": str(outcome.source_module or "").strip(),
+    }
+    if str(child_constraints.get("knowledge_operation") or "").strip().lower() == "knowledge_refresh":
+        child_constraints = bind_system_procedure(
+            child_constraints,
+            procedure_id=canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH"),
+            capability_kind="procedure",
+            capability_name="knowledge_refresh",
+        )
+
+    child = storage.tasks.create(
+        title=child_title,
+        description=child_description,
+        session_id=task.session_id,
+        parent_task_id=task.task_id,
+        state=TaskState.PENDING,
+        constraints=child_constraints,
+        flush=False,
+    )
+    child.type = child_type
+    child.depth = int(getattr(task, "depth", 0) or 0) + 1
+    child.repo_path = str(getattr(task, "repo_path", ".") or ".")
+    task.active_child_ids = [child.task_id]
+    task.state = TaskState.PUSHED
+    storage.commit()
+    await _enqueue_task(enqueue_fn, child.task_id, front=True)
+    if next_continuation_depth % continuation_audit_interval == 0:
+        audit_task = await _queue_trace_review_guardrail(
+            storage,
+            task,
+            enqueue_fn,
+            title=f"Audit Recursive Continuation: {str(getattr(task, 'title', '') or task.task_id)[:80]}",
+            description=(
+                "A continuation branch reached the configured audit interval. "
+                "Verify that the branch remains well-framed and is not recursing unnecessarily."
+            ),
+            trigger="continuation_interval_audit",
+            note=(
+                f"Continuation depth reached {next_continuation_depth}; "
+                f"tool `{str(outcome.tool_name or 'tool')}` completed and follow-up `{child.title}` was queued."
+            ),
+            associated_task_ids=[child.task_id, str(getattr(task, "parent_task_id", "") or "").strip()],
+        )
+        task.active_child_ids = list(dict.fromkeys([child.task_id, audit_task.task_id]))
+        task.state = TaskState.PUSHED
+        storage.commit()
+    return child
+
+
+def _terminal_handoff_payload(task: TaskModel, attempt) -> Dict[str, Any]:
+    artifacts = dict(getattr(attempt, "artifacts", {}) or {})
+    evidence = dict(getattr(attempt, "evidence", {}) or {})
+    autopsy = dict(evidence.get("autopsy") or {}) if isinstance(evidence.get("autopsy"), dict) else {}
+    terminal_tool = dict(artifacts.get("terminal_tool_call") or {})
+    tool_call = dict(terminal_tool.get("tool_call") or autopsy.get("tool_call") or {})
+    return {
+        "task_id": str(getattr(task, "task_id", "") or ""),
+        "title": str(getattr(task, "title", "") or ""),
+        "attempt_id": str(getattr(attempt, "attempt_id", "") or ""),
+        "outcome": str(getattr(getattr(attempt, "outcome", None), "value", getattr(attempt, "outcome", "")) or ""),
+        "reason": str(getattr(attempt, "reason", "") or ""),
+        "tool_call": tool_call,
+        "tool_result_preview": str(terminal_tool.get("tool_result_preview") or autopsy.get("tool_result_preview") or ""),
+        "tool_result_full": str(terminal_tool.get("tool_result_full") or autopsy.get("tool_result_full") or ""),
+        "next_step_hint": str(terminal_tool.get("next_step_hint") or autopsy.get("next_step_hint") or ""),
+        "avoid_repeating_first_tool": dict(terminal_tool.get("avoid_repeating_first_tool") or autopsy.get("avoid_repeating_first_tool") or {}),
+        "failure_kind": str(evidence.get("failure_kind") or autopsy.get("failure_kind") or ""),
+        "step_history": list(artifacts.get("step_history") or []),
+        "duration_s": artifacts.get("duration_s"),
+    }
+
+
+def _update_parent_branch_state(storage, task: TaskModel, attempt) -> None:
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if not parent_task_id:
+        return
+    parent = storage.tasks.get_by_id(parent_task_id)
+    if parent is None:
+        return
+    parent_constraints = dict(getattr(parent, "constraints", {}) or {})
+    branch_state = dict(parent_constraints.get("child_branch_state") or {})
+    children = dict(branch_state.get("children") or {})
+    payload = _terminal_handoff_payload(task, attempt)
+    children[str(task.task_id)] = payload
+    branch_state["children"] = children
+    branch_state["last_completed_child_id"] = str(task.task_id)
+    branch_state["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+    branch_state["open_child_ids"] = list(getattr(parent, "active_child_ids", []) or [])
+    parent_constraints["child_branch_state"] = branch_state
+    parent.constraints = parent_constraints
+
+
+def _inherit_dependency_handoff(storage, task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    execution_mode = str(constraints.get("execution_mode") or "").strip().lower()
+    if execution_mode and execution_mode != "serial":
+        return False
+    completed_dependencies = [dep for dep in list(getattr(task, "dependencies", []) or []) if dep.state == TaskState.COMPLETE]
+    if not completed_dependencies:
+        return False
+    dependency = sorted(
+        completed_dependencies,
+        key=lambda dep: getattr(dep, "updated_at", None) or getattr(dep, "created_at", None) or datetime.min,
+    )[-1]
+    attempts = list(storage.attempts.get_by_task_id(dependency.task_id) or [])
+    successful = [attempt for attempt in attempts if attempt.outcome == AttemptOutcome.SUCCEEDED]
+    if not successful:
+        return False
+    latest_attempt = sorted(
+        successful,
+        key=lambda attempt: getattr(attempt, "ended_at", None) or getattr(attempt, "started_at", None) or datetime.min,
+    )[-1]
+    payload = _terminal_handoff_payload(dependency, latest_attempt)
+    handoff_context = dict(constraints.get("handoff_context") or {})
+    handoff_context.update(
+        {
+            "upstream_task_id": payload.get("task_id"),
+            "upstream_title": payload.get("title"),
+            "upstream_attempt_id": payload.get("attempt_id"),
+            "tool_call": payload.get("tool_call") or {},
+            "tool_result_preview": payload.get("tool_result_preview") or "",
+            "tool_result_full": payload.get("tool_result_full") or "",
+            "next_step_hint": payload.get("next_step_hint") or "",
+            "avoid_repeating_first_tool": payload.get("avoid_repeating_first_tool") or {},
+        }
+    )
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if parent_task_id:
+        parent = storage.tasks.get_by_id(parent_task_id)
+        if parent is not None:
+            handoff_context["parent_branch_state"] = dict((getattr(parent, "constraints", {}) or {}).get("child_branch_state") or {})
+    constraints["handoff_context"] = handoff_context
+    task.constraints = constraints
+    return True
+
+
+def _latest_attempt_handoff(storage, task: TaskModel) -> Dict[str, Any]:
+    attempts = list(storage.attempts.get_by_task_id(task.task_id) or [])
+    if not attempts:
+        return {}
+    attempt = attempts[0]
+    evidence = dict(getattr(attempt, "evidence", {}) or {})
+    autopsy = dict(evidence.get("autopsy") or {}) if isinstance(evidence.get("autopsy"), dict) else {}
+    tool_call = dict(autopsy.get("tool_call") or {}) if isinstance(autopsy.get("tool_call"), dict) else {}
+    handoff: Dict[str, Any] = {
+        "from_task_id": str(task.task_id or ""),
+        "from_task_title": str(getattr(task, "title", "") or ""),
+        "from_attempt_id": str(getattr(attempt, "attempt_id", "") or ""),
+        "failure_kind": str(evidence.get("failure_kind") or autopsy.get("failure_kind") or "").strip(),
+        "next_step_hint": str(autopsy.get("next_step_hint") or "").strip(),
+        "tool_result_preview": str(autopsy.get("tool_result_preview") or "").strip(),
+        "tool_call": {
+            "name": str(tool_call.get("name") or "").strip(),
+            "arguments": str(tool_call.get("arguments") or "").strip(),
+        },
+    }
+    tool_name = str(((handoff.get("tool_call") or {}).get("name")) or "").strip()
+    if tool_name:
+        handoff["avoid_repeating_first_tool"] = {
+            "name": tool_name,
+            "reason": "This tool call already ran in the parent step; only repeat it if the inherited result was insufficient.",
+        }
+    if handoff.get("tool_call", {}).get("name") == "":
+        handoff.pop("tool_call", None)
+    if not handoff.get("tool_result_preview"):
+        handoff.pop("tool_result_preview", None)
+    if not handoff.get("next_step_hint"):
+        handoff.pop("next_step_hint", None)
+    if not handoff.get("failure_kind"):
+        handoff.pop("failure_kind", None)
+    if not handoff.get("avoid_repeating_first_tool"):
+        handoff.pop("avoid_repeating_first_tool", None)
+    return {k: v for k, v in handoff.items() if v not in ("", None, {}, [])}
+
+
+def _ensure_procedure_item_source_hints(task: TaskModel) -> bool:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    item_id = str(checklist_item.get("id") or "").strip()
+    if not item_id:
+        return False
+    source_hints = dict(constraints.get("source_hints") or {})
+    if source_hints:
+        return False
+    inferred = _procedure_checklist_item_source_hints(item_id)
+    if not inferred:
+        return False
+    constraints["source_hints"] = inferred
+    task.constraints = constraints
+    return True
+
+
+def _emit_task_communication(storage, task, *, content: str, source_kind: str) -> None:
+    task_type = str(getattr(task.type, "value", "") or "").lower()
+    summary = str(getattr(task, "title", "") or "").strip() or str(getattr(task, "description", "") or "").strip()[:160]
+    decision = build_communication_decision(
+        role="assistant",
+        content=content,
+        lane=infer_lane_from_task(task) or "trainer",
+        channel="existing_session_message",
+        session_id=task.session_id or "default",
+        audience="user",
+        source_kind=source_kind,
+        source_actor="task_runner",
+        opened_reason="task_progress",
+        tags=["task", task_type, "autonomous"],
+        topic_summary=summary[:180],
+        session_title=summary[:80],
+        communicative_act="notification",
+        urgency="normal",
+    )
+    deliver_communication_decision(storage, decision)
+
+
+def _is_non_actionable_recovery_subtask(proto) -> bool:
+    title = str(getattr(proto, "title", "") or "").strip().lower()
+    description = str(getattr(proto, "description", "") or "").strip().lower()
+    target_files = list(getattr(proto, "target_files", []) or [])
+    generic_markers = [
+        title == "error recover",
+        "research manually" in description,
+        "initial decomposition failed" in description,
+        "manual recovery" in description,
+        "generic recovery" in description,
+    ]
+    if any(generic_markers):
+        return True
+    if not target_files and (title.startswith("recovery") or "recover" in title) and "clarif" not in description:
+        return True
+    return False
+
+
+def _recoverable_focus_task(storage, task):
+    focus_task_id = str((getattr(task, "constraints", {}) or {}).get("recovery_focus_task_id") or "").strip()
+    if focus_task_id and hasattr(storage, "tasks"):
+        focus = storage.tasks.get_by_id(focus_task_id)
+        if focus is not None:
+            return focus
+    parent_task_id = getattr(task, "parent_task_id", None)
+    if parent_task_id and hasattr(storage, "tasks"):
+        focus = storage.tasks.get_by_id(parent_task_id)
+        if focus is not None:
+            return focus
+    return task
+
+
+def _procedure_checklist_subtasks(storage, task):
+    focus = _recoverable_focus_task(storage, task)
+    constraints = dict(getattr(focus, "constraints", {}) or {})
+    checklist = list(constraints.get("procedure_checklist") or [])
+    if not checklist:
+        return []
+    procedure = ensure_draft_procedure_for_task(storage, focus, checklist=checklist)
+    constraints["procedure_id"] = procedure["procedure_id"]
+    constraints["procedure_title"] = procedure["title"]
+    constraints["procedure_lifecycle_state"] = procedure["lifecycle_state"]
+    constraints["procedure_lineage_id"] = procedure["lineage_id"]
+    focus.constraints = constraints
+    procedure_title = str(constraints.get("procedure_title") or getattr(focus, "title", "") or "Procedure").strip()
+    created = []
+    for item in checklist:
+        item_id = str(item.get("id") or "").strip()
+        item_title = str(item.get("title") or "").strip()
+        verification = str(item.get("verification") or "").strip()
+        if not item_title:
+            continue
+        source_hints = _procedure_checklist_item_source_hints(item_id)
+        created.append(
+            {
+                "title": f"Procedure Step: {item_title}",
+                "description": (
+                    f"Advance exactly one checklist item for the Procedure '{procedure_title}'. "
+                    f"Focus only on [{item_id}] {item_title}. "
+                    f"Verification target: {verification}. "
+                    "If the item cannot be completed directly, convert the missing information into an explicit pending question "
+                    "or durable attention item instead of broadening scope."
+                ).strip(),
+                "task_type": TaskType.RESEARCH,
+                "constraints": {
+                    "lane": dict(getattr(task, "constraints", {}) or {}).get("lane"),
+                    "procedure_id": constraints.get("procedure_id"),
+                    "procedure_title": procedure_title,
+                    "procedure_lifecycle_state": constraints.get("procedure_lifecycle_state"),
+                    "procedure_lineage_id": constraints.get("procedure_lineage_id"),
+                    "procedure_parent_task_id": getattr(focus, "task_id", None),
+                    "execution_mode": "parallel",
+                    "source_hints": source_hints,
+                    "carry_forward": _default_carry_forward_policy(),
+                    "procedure_checklist_item": {
+                        "id": item_id,
+                        "title": item_title,
+                        "verification": verification,
+                    },
+                    "recovered_from_decomposition_failure": True,
+                },
+            }
+        )
+    return created
+
+
+def _procedure_item_recovery_subtasks(storage, task):
+    focus = _recoverable_focus_task(storage, task)
+    constraints = dict(getattr(focus, "constraints", {}) or {})
+    procedure = ensure_draft_procedure_for_task(storage, focus)
+    constraints["procedure_id"] = procedure["procedure_id"]
+    constraints["procedure_title"] = procedure["title"]
+    constraints["procedure_lifecycle_state"] = procedure["lifecycle_state"]
+    constraints["procedure_lineage_id"] = procedure["lineage_id"]
+    focus.constraints = constraints
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    item_id = str(checklist_item.get("id") or "").strip()
+    item_title = str(checklist_item.get("title") or getattr(focus, "title", "") or "Procedure item").strip()
+    verification = str(checklist_item.get("verification") or "").strip()
+    if not item_id or not item_title:
+        return []
+    source_hints = dict(constraints.get("source_hints") or _procedure_checklist_item_source_hints(item_id))
+    handoff_context = _latest_attempt_handoff(storage, focus)
+    preferred_paths = list(source_hints.get("preferred_paths") or [])
+    guidance = str(source_hints.get("guidance") or "").strip()
+    base_constraints = {
+        "lane": constraints.get("lane") or dict(getattr(task, "constraints", {}) or {}).get("lane"),
+        "procedure_id": constraints.get("procedure_id"),
+        "procedure_title": constraints.get("procedure_title"),
+        "procedure_parent_task_id": constraints.get("procedure_parent_task_id") or getattr(focus, "parent_task_id", None),
+        "procedure_checklist_item": checklist_item,
+        "source_hints": source_hints,
+        "carry_forward": _default_carry_forward_policy(),
+        "handoff_context": handoff_context,
+        "execution_mode": "serial",
+        "recovered_from_decomposition_failure": True,
+    }
+    subtasks = []
+    inspect_dependencies = []
+    inspect_targets = preferred_paths or [f"[{item_id}] {item_title}"]
+    for index, path in enumerate(inspect_targets, start=1):
+        normalized_path = str(path).strip()
+        proto_id = f"inspect_{index}"
+        inspect_dependencies.append(proto_id)
+        subtasks.append(
+            {
+                "proto_id": proto_id,
+                "title": f"Inspect {normalized_path} for {item_title}",
+                "description": (
+                    f"Inspect exactly one source for checklist item [{item_id}] {item_title}. "
+                    f"Focus only on '{normalized_path}'. "
+                    f"Verification target: {verification}. "
+                    f"{guidance}".strip()
+                ),
+                "task_type": TaskType.RESEARCH,
+                "constraints": {
+                    **base_constraints,
+                    "target_files": [normalized_path],
+                    "preferred_start_paths": [normalized_path],
+                    "disallow_broad_repo_scan": True,
+                    "recovery_phase": "inspect",
+                    "inspect_target_path": normalized_path,
+                },
+                "dependencies": [],
+            }
+        )
+
+    subtasks.extend([
+        {
+            "proto_id": "decide_status",
+            "title": f"Decide status for {item_title}",
+            "description": (
+                f"Use the inspected evidence for [{item_id}] {item_title} to decide one of two outcomes only: "
+                "either the checklist item is satisfied from current evidence, or it still needs clarification/attention. "
+                "Do not broaden scope."
+            ),
+            "task_type": TaskType.RESEARCH,
+            "constraints": {
+                **base_constraints,
+                "target_files": preferred_paths,
+                "preferred_start_paths": preferred_paths,
+                "disallow_broad_repo_scan": True,
+                "recovery_phase": "decide",
+            },
+            "dependencies": inspect_dependencies,
+        },
+        {
+            "proto_id": "cash_out",
+            "title": f"Cash out {item_title}",
+            "description": (
+                f"Take the status decision for [{item_id}] {item_title} and cash it out into durable progress: "
+                "persist the confirmed setting/knowledge if satisfied, or create an explicit pending question or durable attention item if unresolved."
+            ),
+            "task_type": TaskType.RESEARCH,
+            "constraints": {
+                **base_constraints,
+                "target_files": preferred_paths,
+                "preferred_start_paths": preferred_paths,
+                "disallow_broad_repo_scan": True,
+                "recovery_phase": "cash_out",
+            },
+            "dependencies": ["decide_status"],
+        },
+    ])
+    return subtasks
+
+
+def _read_text_if_available(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _startup_smoke_repo_root() -> Path:
+    cwd = Path.cwd()
+    if (cwd / "strata").is_dir() and (cwd / "strata_ui").is_dir():
+        return cwd
+    for candidate in [cwd, *cwd.parents]:
+        if (candidate / "strata").is_dir() and (candidate / "strata_ui").is_dir():
+            return candidate
+    return cwd
+
+
+def _run_startup_smoke_check(task: TaskModel) -> Dict[str, Any] | None:
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    if str(constraints.get("procedure_id") or "").strip() != STARTUP_SMOKE_PROCEDURE_ID:
+        return None
+    checklist_item = dict(constraints.get("procedure_checklist_item") or {})
+    item_id = str(checklist_item.get("id") or "").strip()
+    if not item_id:
+        return None
+
+    root_dir = _startup_smoke_repo_root()
+    source_hints = dict(constraints.get("source_hints") or _procedure_checklist_item_source_hints(item_id))
+    preferred_paths = [str(path).strip() for path in list(source_hints.get("preferred_paths") or []) if str(path).strip()]
+    existing_paths = []
+    missing_paths = []
+    unreadable_paths = []
+    path_checks = []
+
+    for rel_path in preferred_paths:
+        abs_path = root_dir / rel_path
+        exists = abs_path.exists()
+        readable = abs_path.is_file() and bool(_read_text_if_available(abs_path))
+        if exists:
+            existing_paths.append(rel_path)
+        else:
+            missing_paths.append(rel_path)
+        if exists and abs_path.is_file() and not readable:
+            unreadable_paths.append(rel_path)
+        path_checks.append(
+            {
+                "path": rel_path,
+                "exists": exists,
+                "readable": readable if abs_path.is_file() else exists,
+            }
+        )
+
+    if item_id == "spec_presence":
+        satisfied = not missing_paths and not unreadable_paths
+        summary = (
+            "Verified canonical spec files are present and readable."
+            if satisfied
+            else "Canonical spec files are missing or unreadable."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "missing_paths": missing_paths,
+                "unreadable_paths": unreadable_paths,
+            },
+        }
+
+    if item_id == "runtime_wiring":
+        runtime_ipc_text = _read_text_if_available(root_dir / "strata/orchestrator/worker/runtime_ipc.py")
+        api_main_text = _read_text_if_available(root_dir / "strata/api/main.py")
+        wiring_markers = {
+            "runtime_ipc_present": bool(runtime_ipc_text),
+            "api_external_worker_mode": "STRATA_API_EMBED_WORKER" in api_main_text or "external-worker mode" in api_main_text,
+        }
+        satisfied = not missing_paths and wiring_markers["runtime_ipc_present"] and wiring_markers["api_external_worker_mode"]
+        summary = (
+            "Verified separate API and worker runtime wiring surfaces are present."
+            if satisfied
+            else "Split API/worker runtime wiring could not be verified deterministically."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "markers": wiring_markers,
+                "missing_paths": missing_paths,
+            },
+        }
+
+    if item_id == "operator_runtime_surface":
+        app_text = _read_text_if_available(root_dir / "strata_ui/src/App.jsx")
+        settings_text = _read_text_if_available(root_dir / "strata_ui/src/views/SettingsView.jsx")
+        desktop_text = _read_text_if_available(root_dir / "src-tauri/src/main.rs")
+        surface_markers = {
+            "settings_has_updater_surface": "desktop_update_status" in settings_text,
+            "desktop_has_update_command": "desktop_update_status" in desktop_text,
+            "app_has_lane_status_surface": "TopModeTab" in app_text and "laneDetails" in app_text,
+            "app_has_task_inspection_surface": "Open in Workbench" in app_text or "FOCUS TASK" in app_text,
+        }
+        satisfied = not missing_paths and all(surface_markers.values())
+        summary = (
+            "Verified operator runtime inspection surfaces are present."
+            if satisfied
+            else "Operator runtime inspection surfaces could not be verified deterministically."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "markers": surface_markers,
+                "missing_paths": missing_paths,
+            },
+        }
+
+    if item_id == "procedure_workbench_surface":
+        nonchat_text = _read_text_if_available(root_dir / "strata_ui/src/views/NonChatContent.jsx")
+        app_text = _read_text_if_available(root_dir / "strata_ui/src/App.jsx")
+        workbench_markers = {
+            "workbench_view_present": "WorkbenchView" in nonchat_text,
+            "procedure_target_card_present": "ProcedureTargetCard" in nonchat_text,
+            "task_open_in_workbench_present": "OPEN IN WORKBENCH" in nonchat_text or "Open in Workbench" in app_text,
+            "procedure_nav_present": "'workbench'" in app_text and "'procedures'" in app_text,
+        }
+        satisfied = not missing_paths and all(workbench_markers.values())
+        summary = (
+            "Verified Procedure and Workbench inspection surfaces are present."
+            if satisfied
+            else "Procedure and Workbench inspection surfaces could not be verified deterministically."
+        )
+        return {
+            "satisfied": satisfied,
+            "summary": summary,
+            "evidence": {
+                "kind": "deterministic_startup_smoke_check",
+                "item_id": item_id,
+                "path_checks": path_checks,
+                "markers": workbench_markers,
+                "missing_paths": missing_paths,
+            },
+        }
+
+    return None
+
+
+async def _expand_root_procedure_task(task, storage, enqueue_fn, *, progress_fn=None, attempt_id=None):
+    procedure_children = _procedure_checklist_subtasks(storage, task)
+    if not procedure_children:
+        raise RuntimeError("Root Procedure expansion produced no checklist children.")
+    spawned_ids = []
+    for item in procedure_children:
+        sub = storage.tasks.create(
+            title=item["title"],
+            description=item["description"],
+            session_id=task.session_id,
+            parent_task_id=task.task_id,
+            state=TaskState.PENDING,
+            constraints=item["constraints"],
+            flush=False,
+        )
+        sub.type = item["task_type"]
+        sub.depth = task.depth + 1
+        spawned_ids.append(sub.task_id)
+    task.active_child_ids = list(dict.fromkeys(spawned_ids))
+    task.state = TaskState.PUSHED
+    storage.commit()
+    if progress_fn:
+        progress_fn(
+            step="decompose",
+            label="Expanding procedure",
+            detail=f"Spawned {len(spawned_ids)} checklist children",
+            progress_label="children in progress",
+            attempt_id=attempt_id,
+        )
+    for task_id in spawned_ids:
+        await _enqueue_task(enqueue_fn, task_id, front=True)
+    return spawned_ids
+
+async def run_attempt(task: TaskModel, storage, model_adapter, notify_fn, enqueue_fn, progress_fn=None):
+    """
+    @summary Execute a single task attempt.
+    """
+    for prior_attempt in storage.attempts.get_by_task_id(task.task_id):
+        if prior_attempt.outcome is None and prior_attempt.ended_at is None:
+            storage.attempts.update_outcome(
+                prior_attempt.attempt_id,
+                AttemptOutcome.CANCELLED,
+                reason="Superseded by a newer attempt.",
+            )
+
+    dependency_handoff_updated = _inherit_dependency_handoff(storage, task)
+    # Start a new Attempt
+    attempt = storage.attempts.create(task_id=task.task_id)
+    attempt.artifacts = dict(getattr(attempt, "artifacts", {}) or {})
+    attempt.evidence = dict(getattr(attempt, "evidence", {}) or {})
+    constraints_updated = _ensure_procedure_item_source_hints(task)
+    procedure_scaffold_updated = _ensure_canonical_procedure_scaffold(storage, task)
+    if task.state != TaskState.WORKING:
+        task.state = TaskState.WORKING
+    storage.commit()
+    if dependency_handoff_updated or constraints_updated or procedure_scaffold_updated or task.state == TaskState.WORKING:
+        await notify_fn(task.task_id, task.state.value)
+    started_at = time.perf_counter()
+    step_history = []
+
+    def _record_progress(*, step: str, label: str, detail: str = "", progress_label: str | None = None, attempt_id: str | None = None):
+        event = {
+            "step": str(step or "").strip().lower() or "unknown",
+            "label": str(label or "").strip() or "Working",
+            "detail": str(detail or "").strip(),
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        step_history.append(event)
+        if progress_fn:
+            progress_fn(
+                step=event["step"],
+                label=event["label"],
+                detail=event["detail"],
+                progress_label=progress_label,
+                attempt_id=attempt_id or attempt.attempt_id,
+            )
+    
+    logger.info(f"Running task {task.task_id} ({task.type.value}), Attempt {attempt.attempt_id}")
+    _record_progress(
+        step="attempt",
+        label="Attempt running",
+        detail=f"{task.type.value.lower()} attempt started",
+        progress_label="attempt active",
+        attempt_id=attempt.attempt_id,
+    )
+
+    try:
+        execution_result = None
+        if _is_root_procedure_task(task) and task.type != TaskType.DECOMP:
+            await _expand_root_procedure_task(
+                task,
+                storage,
+                enqueue_fn,
+                progress_fn=_record_progress,
+                attempt_id=attempt.attempt_id,
+            )
+            storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
+            attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+            attempt.artifacts["step_history"] = list(step_history)
+            attempt.artifacts["procedure_expansion"] = {
+                "mode": "deterministic_root_checklist_expansion",
+                "active_child_ids": list(getattr(task, "active_child_ids", []) or []),
+            }
+            storage.commit()
+            await notify_fn(task.task_id, task.state.value)
+            return True, None, attempt
+        startup_smoke_check = _run_startup_smoke_check(task) if task.type == TaskType.RESEARCH else None
+        if startup_smoke_check is not None:
+            _record_progress(
+                step="deterministic_check",
+                label="Running deterministic check",
+                detail=startup_smoke_check.get("summary", ""),
+                progress_label="deterministic check",
+                attempt_id=attempt.attempt_id,
+            )
+            if not startup_smoke_check.get("satisfied"):
+                raise RuntimeError(startup_smoke_check.get("summary") or "Deterministic startup smoke check did not satisfy its verification target.")
+            storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
+            deterministic_evidence = dict(startup_smoke_check.get("evidence") or {})
+            attempt.artifacts = {
+                **dict(getattr(attempt, "artifacts", {}) or {}),
+                "duration_s": round(time.perf_counter() - started_at, 4),
+                "step_history": list(step_history),
+                "deterministic_check": deterministic_evidence,
+            }
+            attempt.evidence = {
+                **dict(getattr(attempt, "evidence", {}) or {}),
+                "deterministic_check": deterministic_evidence,
+            }
+            _update_parent_branch_state(storage, task, attempt)
+            task.state = TaskState.COMPLETE
+            procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+            if procedure_id:
+                record_procedure_run(storage, procedure_id, outcome="succeeded", source_task_id=task.task_id)
+            storage.commit()
+            await notify_fn(task.task_id, task.state.value)
+            return True, None, attempt
+        if task.type == TaskType.RESEARCH:
+            execution_result = await _run_research(task, storage, model_adapter, enqueue_fn, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
+        elif task.type == TaskType.DECOMP:
+            execution_result = await _run_decomposition(task, storage, model_adapter, enqueue_fn, attempt_id=attempt.attempt_id)
+        elif task.type in {TaskType.IMPL, TaskType.BUG_FIX, TaskType.REFACTOR}:
+            execution_result = await _run_implementation(task, storage, model_adapter, progress_fn=_record_progress, attempt_id=attempt.attempt_id)
+        elif task.type == TaskType.JUDGE:
+            execution_result = await _run_judge(task, storage, model_adapter)
+        else:
+            raise NotImplementedError(f"Unsupported task type {task.type}")
+
+        if isinstance(execution_result, TerminalToolCallOutcome):
+            terminal_payload = {
+                "tool_call": {
+                    "name": str(execution_result.tool_name or "").strip(),
+                    "arguments": dict(execution_result.tool_arguments or {}),
+                },
+                "tool_result_preview": str(execution_result.tool_result_preview or "").strip(),
+                "tool_result_full": str(execution_result.tool_result_full or "").strip(),
+                "next_step_hint": str(execution_result.next_step_hint or "").strip(),
+                "avoid_repeating_first_tool": {
+                    "name": str(execution_result.tool_name or "").strip(),
+                    "reason": "This tool already ran in the prior step; consume its result explicitly before deciding whether to repeat it.",
+                },
+                "source_module": str(execution_result.source_module or "").strip(),
+                "metadata": dict(execution_result.metadata or {}),
+            }
+            attempt.artifacts["terminal_tool_call"] = terminal_payload
+            should_flush = enqueue_attempt_observability_artifact(
+                {
+                    "task_id": task.task_id,
+                    "attempt_id": attempt.attempt_id,
+                    "session_id": task.session_id,
+                    "artifact_kind": "terminal_tool_call",
+                    "payload": terminal_payload,
+                }
+            )
+            if should_flush:
+                flush_observability_writes()
+            spawned_followup = await _enqueue_terminal_tool_followup(storage, task, attempt, execution_result, enqueue_fn)
+            if spawned_followup is not None:
+                _emit_task_communication(
+                    storage,
+                    task,
+                    content=(
+                        f"Tool step complete: `{execution_result.tool_name}` executed. "
+                        f"Queued explicit follow-up step '{spawned_followup.title}'."
+                    ),
+                    source_kind="task_tool_step_handoff",
+                )
+            else:
+                _emit_task_communication(
+                    storage,
+                    task,
+                    content=f"Tool step complete: `{execution_result.tool_name}` executed with no follow-up step queued.",
+                    source_kind="task_tool_step_handoff",
+                )
+
+        # If we got here without exception, it succeeded
+        storage.attempts.update_outcome(attempt.attempt_id, AttemptOutcome.SUCCEEDED)
+        
+        # Populate operational artifacts for the attempt
+        if hasattr(model_adapter, 'last_response') and model_adapter.last_response:
+            attempt.artifacts["model"] = model_adapter.last_response.model
+            attempt.artifacts["provider"] = model_adapter.last_response.provider
+            attempt.artifacts["usage"] = model_adapter.last_response.usage or {}
+        attempt.artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+        attempt.artifacts["step_history"] = list(step_history)
+        _update_parent_branch_state(storage, task, attempt)
+
+        if task.state != TaskState.PUSHED:
+            task.state = TaskState.COMPLETE
+            procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+            if procedure_id:
+                record_procedure_run(storage, procedure_id, outcome="succeeded", source_task_id=task.task_id)
+        storage.commit()
+        await notify_fn(task.task_id, task.state.value)
+        return True, None, attempt
+
+    except Exception as e:
+        artifacts: Dict[str, Any] = {}
+        evidence: Dict[str, Any] = {}
+        if hasattr(model_adapter, 'last_response') and model_adapter.last_response:
+            artifacts["model"] = model_adapter.last_response.model
+            artifacts["provider"] = model_adapter.last_response.provider
+            artifacts["usage"] = model_adapter.last_response.usage or {}
+        artifacts["duration_s"] = round(time.perf_counter() - started_at, 4)
+        artifacts["step_history"] = list(step_history)
+        failure_kind = str(getattr(e, "failure_kind", "") or "").strip()
+        if failure_kind:
+            evidence["failure_kind"] = failure_kind
+        autopsy = getattr(e, "autopsy", None)
+        if isinstance(autopsy, dict) and autopsy:
+            evidence["autopsy"] = autopsy
+        storage.rollback()
+        failed_attempt = storage.attempts.get_by_id(attempt.attempt_id) if getattr(attempt, "attempt_id", None) else None
+        if failed_attempt:
+            failed_attempt.artifacts = {**dict(failed_attempt.artifacts or {}), **artifacts}
+            failed_attempt.evidence = {**dict(failed_attempt.evidence or {}), **evidence}
+            storage.attempts.update_outcome(failed_attempt.attempt_id, AttemptOutcome.FAILED, reason=str(e))
+            _update_parent_branch_state(storage, task, failed_attempt)
+            storage.commit()
+            if evidence:
+                should_flush = enqueue_attempt_observability_artifact(
+                    {
+                        "task_id": task.task_id,
+                        "attempt_id": failed_attempt.attempt_id,
+                        "session_id": task.session_id,
+                        "artifact_kind": "failure_autopsy",
+                        "payload": {
+                            "reason": str(e),
+                            "evidence": dict(evidence),
+                            "artifacts": dict(failed_attempt.artifacts or {}),
+                        },
+                    }
+                )
+                if should_flush:
+                    flush_observability_writes()
+            procedure_id = str(dict(getattr(task, "constraints", {}) or {}).get("procedure_id") or "").strip()
+            if procedure_id:
+                record_procedure_run(storage, procedure_id, outcome="failed", source_task_id=task.task_id)
+            attempt = failed_attempt
+        else:
+            attempt.artifacts = {**dict(getattr(attempt, "artifacts", {}) or {}), **artifacts}
+            attempt.evidence = {**dict(getattr(attempt, "evidence", {}) or {}), **evidence}
+        return False, e, attempt
+
+async def _run_research(task, storage, model_adapter, enqueue_fn, *, progress_fn=None, attempt_id=None):
+    existing_constraints = dict(getattr(task, "constraints", {}) or {})
+    normalized_constraints = _normalize_research_context_hints(existing_constraints)
+    if (
+        str(normalized_constraints.get("knowledge_operation") or "").strip().lower() == "knowledge_refresh"
+        and str(normalized_constraints.get("procedure_id") or "").strip().lower() != canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH")
+    ):
+        normalized_constraints = bind_system_procedure(
+            normalized_constraints,
+            procedure_id=canonical_system_procedure_id(task_type="KNOWLEDGE_REFRESH"),
+            capability_kind="procedure",
+            capability_name="knowledge_refresh",
+        )
+    if normalized_constraints != existing_constraints:
+        task.constraints = normalized_constraints
+        storage.commit()
+    research = ResearchModule(model_adapter, storage, enqueue_task=enqueue_fn)
+    task_trajectory = _build_task_trajectory(storage, task)
+    context_hints = dict(task.constraints or {})
+    context_hints["task_trajectory"] = task_trajectory
+    report = await research.conduct_research(
+        task_description=task.description,
+        repo_path=task.repo_path,
+        progress_fn=progress_fn,
+        attempt_id=attempt_id,
+        context_hints=context_hints,
+        task_context={
+            "task_id": task.task_id,
+            "parent_task_id": task.parent_task_id,
+            "title": task.title,
+            "type": getattr(task.type, "value", str(task.type)),
+            "state": getattr(task.state, "value", str(task.state)),
+            "session_id": task.session_id,
+            "task_trajectory": task_trajectory,
+        },
+    )
+    if isinstance(report, TerminalToolCallOutcome):
+        return report
+    # Formatter would go here, simplified for brevity
+    _emit_task_communication(
+        storage,
+        task,
+        content=f"🔬 **Research Complete**\n{report.suggested_approach}",
+        source_kind="task_research_complete",
+    )
+    task.state = TaskState.WORKING
+    storage.commit()
+    return report
+
+async def _run_decomposition(task, storage, model_adapter, enqueue_fn, *, attempt_id=None):
+    if await _resume_parent_repair_task_if_supported(storage, task, enqueue_fn):
+        return
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    max_decomposition_depth = max(1, int(constraints.get("max_decomposition_depth") or DEFAULT_MAX_DECOMPOSITION_DEPTH))
+    decomposition_depth = _count_ancestor_tasks(storage, task, task_types={TaskType.DECOMP})
+    if decomposition_depth >= max_decomposition_depth:
+        _upsert_decomposition_history_task(
+            storage,
+            task=task,
+            attempt_id=attempt_id,
+            phase_id="guardrail_depth",
+            title="Decomposition Issue: Recursive depth guardrail",
+            description=(
+                f"Decomposition ancestry depth {decomposition_depth} met or exceeded the configured max {max_decomposition_depth}. "
+                "Escalated to audit instead of generating another decomposition layer."
+            ),
+            summary={
+                "kind": "guardrail",
+                "guardrail": "max_decomposition_depth",
+                "decomposition_depth": decomposition_depth,
+                "max_decomposition_depth": max_decomposition_depth,
+            },
+        )
+        await _queue_trace_review_guardrail(
+            storage,
+            task,
+            enqueue_fn,
+            title=f"Audit Recursive Decomposition: {str(getattr(task, 'title', '') or task.task_id)[:78]}",
+            description=(
+                "This task has already been decomposed multiple times. "
+                "Audit whether the task is already sufficiently decomposed or whether the decomposition procedure is misbehaving."
+            ),
+            trigger="deep_decomposition_guardrail",
+            note=(
+                f"Decomposition ancestry depth {decomposition_depth} met/exceeded max {max_decomposition_depth}. "
+                "Escalating to audit instead of generating another decomposition layer."
+            ),
+            associated_task_ids=[str(getattr(task, "parent_task_id", "") or "").strip()],
+        )
+        return
+    decomp_mod = DecompositionModule(model_adapter, storage)
+    decomp = await decomp_mod.decompose_task(task.title, task.description)
+    framing = getattr(decomp, "framing", None)
+    _upsert_decomposition_history_task(
+        storage,
+        task=task,
+        attempt_id=attempt_id,
+        phase_id="frame_task",
+        title="Decomposition Step: Frame task",
+        description=(
+            "Captured the task framing and success criteria used for this decomposition run. "
+            f"Problem statement: {str(getattr(framing, 'problem_statement', '') or task.description).strip()}"
+        ),
+        summary={
+            "repository_context": str(getattr(framing, "repository_context", "") or "").strip(),
+            "problem_statement": str(getattr(framing, "problem_statement", "") or task.description).strip(),
+            "constraints": list(getattr(framing, "constraints", []) or []),
+            "success_criteria": list(getattr(framing, "success_criteria", []) or []),
+        },
+    )
+    actionable = []
+    rejected = []
+    for tid, proto in (decomp.subtasks or {}).items():
+        if _is_non_actionable_recovery_subtask(proto):
+            logger.warning(
+                "Rejected non-actionable recovery subtask from decomposition for task %s: %s",
+                task.task_id,
+                getattr(proto, "title", tid),
+            )
+            rejected.append(
+                {
+                    "id": str(tid),
+                    "title": str(getattr(proto, "title", tid) or tid).strip(),
+                    "reason": "non_actionable_recovery_placeholder",
+                }
+            )
+            continue
+        actionable.append((tid, proto))
+    _upsert_decomposition_history_task(
+        storage,
+        task=task,
+        attempt_id=attempt_id,
+        phase_id="emit_leaf_tasks",
+        title="Decomposition Step: Emit leaf tasks",
+        description=(
+            f"Decomposition proposed {len(list((decomp.subtasks or {}).keys()))} subtasks, "
+            f"with {len(actionable)} actionable leaves retained and {len(rejected)} rejected as non-actionable."
+        ),
+        summary={
+            "raw_subtask_count": len(list((decomp.subtasks or {}).keys())),
+            "actionable_subtask_count": len(actionable),
+            "rejected_subtasks": rejected,
+            "retained_subtasks": [
+                {
+                    "id": str(tid),
+                    "title": str(getattr(proto, "title", "") or "").strip(),
+                    "dependencies": list(getattr(proto, "dependencies", []) or []),
+                    "target_files": list(getattr(proto, "target_files", []) or []),
+                }
+                for tid, proto in actionable
+            ],
+        },
+    )
+    if not actionable:
+        item_fallback = _procedure_item_recovery_subtasks(storage, task)
+        if item_fallback:
+            _upsert_decomposition_history_task(
+                storage,
+                task=task,
+                attempt_id=attempt_id,
+                phase_id="preserve_workflow",
+                title="Decomposition Step: Preserve workflow",
+                description=(
+                    "Decomposition emitted no actionable leaves, so the runtime recovered by expanding the current "
+                    "procedure checklist item into a bounded inspect/decide/cash-out chain."
+                ),
+                summary={
+                    "preservation_mode": "procedure_item_recovery_chain",
+                    "spawned_recovery_subtasks": [str(item.get("title") or "").strip() for item in item_fallback],
+                },
+            )
+            spawned_by_proto_id = {}
+            spawned_ids = []
+            for item in item_fallback:
+                sub = storage.tasks.create(
+                    title=item["title"],
+                    description=item["description"],
+                    session_id=task.session_id,
+                    parent_task_id=task.task_id,
+                    state=TaskState.PENDING,
+                    constraints=item["constraints"],
+                    flush=False,
+                )
+                sub.type = item["task_type"]
+                sub.depth = task.depth + 1
+                spawned_ids.append(sub.task_id)
+                spawned_by_proto_id[str(item["proto_id"])] = sub
+            for item in item_fallback:
+                sub = spawned_by_proto_id.get(str(item["proto_id"]))
+                if sub is None:
+                    continue
+                for dep_tid in list(item.get("dependencies") or []):
+                    dep_task = spawned_by_proto_id.get(str(dep_tid))
+                    if dep_task is None or dep_task.task_id == sub.task_id:
+                        continue
+                    if dep_task not in sub.dependencies:
+                        sub.dependencies.append(dep_task)
+            task.active_child_ids = list(dict.fromkeys(spawned_ids))
+            task.state = TaskState.PUSHED
+            storage.commit()
+            for task_id in spawned_ids:
+                await _enqueue_task(enqueue_fn, task_id, front=True)
+            return
+        procedure_fallback = _procedure_checklist_subtasks(storage, task)
+        if procedure_fallback:
+            _upsert_decomposition_history_task(
+                storage,
+                task=task,
+                attempt_id=attempt_id,
+                phase_id="preserve_workflow",
+                title="Decomposition Step: Preserve workflow",
+                description=(
+                    "Decomposition emitted no actionable leaves, so the runtime recovered by expanding the canonical "
+                    "procedure checklist into explicit child steps."
+                ),
+                summary={
+                    "preservation_mode": "procedure_checklist_expansion",
+                    "spawned_recovery_subtasks": [str(item.get("title") or "").strip() for item in procedure_fallback],
+                },
+            )
+            spawned_ids = []
+            for item in procedure_fallback:
+                sub = storage.tasks.create(
+                    title=item["title"],
+                    description=item["description"],
+                    session_id=task.session_id,
+                    parent_task_id=task.task_id,
+                    state=TaskState.PENDING,
+                    constraints=item["constraints"],
+                    flush=False,
+                )
+                sub.type = item["task_type"]
+                sub.depth = task.depth + 1
+                spawned_ids.append(sub.task_id)
+            task.active_child_ids = list(dict.fromkeys(spawned_ids))
+            task.state = TaskState.PUSHED
+            storage.commit()
+            for task_id in spawned_ids:
+                await _enqueue_task(enqueue_fn, task_id, front=True)
+            return
+        _upsert_decomposition_history_task(
+            storage,
+            task=task,
+            attempt_id=attempt_id,
+            phase_id="issue_no_actionable_output",
+            title="Decomposition Issue: No actionable output",
+            description=(
+                "This decomposition run produced no actionable subtasks and no bounded procedure fallback. "
+                "Treat this as a recoverable planning failure."
+            ),
+            summary={
+                "kind": "planning_failure",
+                "raw_subtask_count": len(list((decomp.subtasks or {}).keys())),
+                "actionable_subtask_count": 0,
+            },
+        )
+        raise RuntimeError(
+            "Decomposition produced no actionable subtasks. Treat this as a recoverable planning failure and generate a more concrete recovery plan instead of escalating by default."
+        )
+    draft_procedure = ensure_draft_procedure_for_task(
+        storage,
+        task,
+        checklist=[
+            {
+                "id": str(tid),
+                "title": str(getattr(proto, "title", "") or "").strip(),
+                "description": str(getattr(proto, "description", "") or "").strip(),
+                "verification": (
+                    f"Edit type: {str(getattr(proto, 'edit_type', '') or '').strip()} | "
+                    f"Validator: {str(getattr(proto, 'validator', '') or '').strip()} | "
+                    f"Targets: {', '.join(list(getattr(proto, 'target_files', []) or []))}"
+                ).strip(),
+            }
+            for tid, proto in actionable
+        ],
+    )
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    task.constraints = bind_system_procedure(
+        {
+            **constraints,
+            "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
+        },
+        procedure_id=str(draft_procedure.get("procedure_id") or canonical_system_procedure_id(task_type="DECOMP")).strip(),
+        capability_kind="procedure",
+        capability_name="decomposition",
+    )
+    _upsert_decomposition_history_task(
+        storage,
+        task=task,
+        attempt_id=attempt_id,
+        phase_id="preserve_workflow",
+        title="Decomposition Step: Preserve workflow",
+        description=(
+            f"Retained {len(actionable)} actionable leaves and recorded the decomposition lineage under Procedure "
+            f"'{str(draft_procedure.get('title') or draft_procedure.get('procedure_id') or 'Task Decomposition').strip()}'."
+        ),
+        summary={
+            "preservation_mode": "draft_procedure",
+            "procedure_id": str(draft_procedure.get("procedure_id") or "").strip(),
+            "procedure_title": str(draft_procedure.get("title") or "").strip(),
+            "checklist_count": len(list(draft_procedure.get("checklist") or [])),
+        },
+    )
+    spawned_ids = []
+    spawned_by_proto_id = {}
+    for tid, proto in actionable:
+        child_constraints = bind_system_procedure(
+            {
+                "target_files": proto.target_files,
+                "edit_type": proto.edit_type,
+                "validator": proto.validator,
+                "max_diff_size": proto.max_diff_size,
+                "lineage_root_task_id": _lineage_task_id(task) or str(task.task_id),
+            },
+            procedure_id=str(draft_procedure.get("procedure_id") or "").strip(),
+            capability_kind="procedure",
+            capability_name="decomposition",
+        )
+        sub = storage.tasks.create(
+            title=proto.title,
+            description=proto.description,
+            session_id=task.session_id,
+            parent_task_id=task.task_id,
+            state=TaskState.PENDING,
+            flush=False,
+            constraints=child_constraints,
+        )
+        sub.type = TaskType.IMPL
+        sub.depth = task.depth + 1
+        spawned_ids.append(sub.task_id)
+        spawned_by_proto_id[str(tid)] = sub
+    for tid, proto in actionable:
+        sub = spawned_by_proto_id.get(str(tid))
+        if sub is None:
+            continue
+        for dep_tid in list(getattr(proto, "dependencies", []) or []):
+            dep_task = spawned_by_proto_id.get(str(dep_tid))
+            if dep_task is None or dep_task.task_id == sub.task_id:
+                continue
+            if dep_task not in sub.dependencies:
+                sub.dependencies.append(dep_task)
+    task.active_child_ids = list(dict.fromkeys(spawned_ids))
+    task.state = TaskState.PUSHED
+    storage.commit()
+    for task_id in spawned_ids:
+        await _enqueue_task(enqueue_fn, task_id, front=True)
+
+async def _run_implementation(task, storage, model_adapter, *, progress_fn=None, attempt_id=None):
+    research_mod = ResearchModule(model_adapter, storage)
+    impl_mod = ImplementationModule(model_adapter, storage, research_mod)
+    candidate_ids = await impl_mod.implement_task(
+        task.task_id,
+        progress_fn=progress_fn,
+        attempt_id=attempt_id,
+        task_context={
+            "task_id": task.task_id,
+            "parent_task_id": task.parent_task_id,
+            "title": task.title,
+            "type": getattr(task.type, "value", str(task.type)),
+            "state": getattr(task.state, "value", str(task.state)),
+            "session_id": task.session_id,
+            "task_trajectory": _build_task_trajectory(storage, task),
+            "constraints": dict(task.constraints or {}),
+        },
+    )
+    if isinstance(candidate_ids, TerminalToolCallOutcome):
+        return candidate_ids
+    _emit_task_communication(
+        storage,
+        task,
+        content=f"🛠️ **Implementation Staged**\nI've generated {len(candidate_ids)} candidates.",
+        source_kind="task_implementation_staged",
+    )
+    task.state = TaskState.WORKING
+    storage.commit()
+    return candidate_ids
+
+
+async def _run_judge(task, storage, model_adapter):
+    payload = await run_eval_job_task(task, storage, model_adapter)
+    summary = payload.get("recommendation") or payload.get("suite_name") or payload.get("run_label") or "completed"
+    _emit_task_communication(
+        storage,
+        task,
+        content=f"📏 **Eval Job Complete**\n{task.title}: {summary}",
+        source_kind="task_eval_complete",
+    )
+    task.state = TaskState.WORKING
+    storage.commit()
