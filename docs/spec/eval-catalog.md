@@ -8,13 +8,21 @@ no-context comparisons between:
 - harness without tools/web
 - harness with optional tools/web profiles
 
-The current bundled suite is:
+The current bundled suites are:
 
 - `bootstrap_mcq_v1`
   Source: written for Strata (questions about its own operating model)
   Format: multiple choice
   Intended use: checks that a model or harness understands Strata's bootstrap
   loop, quiet mode, secondary ignition and promotion rules
+- `refinery_mixed_v1`
+  Source: written for Strata (20 items, each with a `category` field)
+  Format: multiple choice and exact-match short answers
+  Intended use: raw vs harness comparisons. Six `strata_native` items are
+  answerable from the harness context. Fourteen items cover general
+  small-model failure modes: `instruction_following`, `arithmetic` and
+  `format_compliance`. `scripts/bench_refinery.py` reports accuracy per
+  category; results are in `docs/results.md`.
 
 This snapshot bundles no items from external benchmark datasets. To add a
 suite, drop a JSONL file into `strata/eval/suites/` with one case per line

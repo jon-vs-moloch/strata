@@ -33,6 +33,23 @@ The usual move is "use a bigger model." Strata moves the intelligence out of the
 - **Silence is a valid answer.** System-originated messages go through a routing layer that decides whether to speak, where, and in which thread, tracked through seen, delivered and read.
 - **It has a constitution.** Durable rules live in a reviewable spec rather than buried in prompts. One of them sums up the project: *"Strata is a manual, not an automatic."* You can steer and inspect every part of it; you just shouldn't have to.
 
+## What has been measured
+
+Measured October 19, 2026, using the README's default agent model (a 4B Qwen3.5 reasoning distill, Q4_K_M) on a 4-core ARM CPU with no GPU. Each item was run twice, through the eval harness and as a raw prompt; grading is deterministic (exact match or multiple choice, no LLM judge).
+
+| Suite | Raw model | Harness |
+|---|---|---|
+| 20 mixed items (6 about Strata, 14 general) | 75% | 100% |
+| 5 items about Strata's operating model | 60% | 100% |
+
+The gap is real, but narrower than it looks:
+
+- The raw model got every general item right, and so did the harness: instruction following, multi-step arithmetic and format compliance.
+- Six of the seven raw misses named the correct letter but wrapped it in an explanation, which the multiple-choice grader misreads.
+- Only one miss was a fact the model could not know without the project context.
+
+So what is measured here is that the scaffold makes a small model's answers usable and supplies missing project knowledge. The full refinery (decomposition, verification, retries) and self-improvement are not measured yet. Details, conditions and every answer: [docs/results.md](docs/results.md).
+
 ## Quickstart
 
 ### Demo mode: no backend, no model (about a minute)
@@ -111,6 +128,18 @@ At this snapshot, with the API started first: **273 passed, 15 failed** of 288. 
 
 </details>
 
+### Re-running the benchmark
+
+With a local model server running (LM Studio, Ollama or llama.cpp's `llama-server`, any OpenAI-compatible endpoint):
+
+```bash
+PYTHONPATH=. ./venv/bin/python scripts/bench_refinery.py \
+  --endpoint-url http://127.0.0.1:1234/v1/chat/completions --reps 2 \
+  --conditions "model, quantisation, hardware"
+```
+
+It runs the bundled suites raw and through the harness on the local agent tier only (no cloud calls), then rewrites the generated block of `docs/results.md` and `docs/results/refinery-bench.json`. At about 8 tokens per second, two reps take about 1.5 hours.
+
 ### Regenerating the demo data
 
 ```bash
@@ -148,7 +177,7 @@ flowchart LR
 | `strata/api/` | App assembly (`main.py`) and route modules for chat, tasks, admin, evals, experiments, knowledge, specs |
 | `strata/orchestrator/` | Worker, lanes, decomposition, research, implementation, judging, attempt runner and resolution policy |
 | `strata/experimental/` | Experiment runner, promotion policy, variant ratings, calibration, trace review, annealing verifier |
-| `strata/eval/` | Benchmarks, structured evals, eval jobs and the small bundled eval suite |
+| `strata/eval/` | Benchmarks, structured evals, eval jobs and the bundled eval suites (`strata/eval/suites/`) |
 | `strata/observability/`, `strata/context/` | Context-load costing, host telemetry, pinned context files |
 | `strata/knowledge/`, `.knowledge/specs/` | Audience-scoped knowledge pages; the constitution and project spec |
 | `strata_ui/` | The workbench. `src/views/OverviewView.jsx` is the overview; `src/demo/` is demo mode |
