@@ -83,8 +83,8 @@ This section is written by hand. Re-running the script replaces only the generat
 **Where the gap comes from.** All 7 raw-model misses are multiple-choice items about Strata; the raw model got all 14 general items right, and so did the harness. Read by hand, the 7 misses break down as follows:
 
 - **6 of 7 name the expected letter as the final answer** (`sn_naming_convention`, `sn_manual_not_automatic`, `sn_constitution_location`, `sn_deterministic_preprocessing`, `quiet_mode_idle`, `bootstrap_goal`).
-  - The prompt says "Answer with only the letter", but the raw model wrote an explanation first, and the explanation contains the word "a".
-  - The `choice` grader uppercases the answer and takes the first standalone A to D, so it read that article as option A.
+  - The prompt says "Answer with only the letter", but the raw model wrote an explanation first.
+  - The `choice` grader uppercases the answer and takes the first standalone A to D. In five cases it read the article "a" as option A; in `sn_constitution_location` it read an "Option A" heading from the model's walk through the options.
   - The answer was right but broke the format, and the grader cannot tell those apart.
 - **1 of 7 is a real knowledge miss** (`sn_agent_primary_job`). Without the project spec, the raw model chose C, "supervise the trainer"; the spec says "help the user; improve yourself".
 - **The raw model has no way to know Strata.** One raw answer describes Strata as a home-automation system. When it got these right, it did so by reasoning from the option wording.
@@ -111,4 +111,4 @@ On instruction following, multi-step arithmetic and format compliance, this mode
 - It shows that, for a 4B local model, Strata's eval scaffold turns answers that were right but unusable into answers a program can consume, and fills in project knowledge the model lacks. It does both without hurting accuracy on general tasks.
 - It does not show that the full refinery (decomposition, verification, retries) beats the raw model on real work. That pipeline is not exercised here.
 - It does not show self-improvement either. No promotion cycle was run for this page.
-- The grader weakness above is a known issue: the `choice` grader should not read the article "a" as option A. It is left unchanged here so the published numbers come from the code as shipped.
+- The grader weakness above is a known issue: the `choice` grader should not read the article "a", or an option label in an explanation, as the answer. It is left unchanged here so the published numbers come from the code as shipped.
