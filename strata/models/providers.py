@@ -6,6 +6,7 @@
 
 import httpx
 import asyncio
+import os
 import json
 import re
 from typing import Any, Dict, Optional, List, Literal
@@ -627,7 +628,9 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
         if timeout_arg:
             timeout = httpx.Timeout(timeout_arg)
         else:
-            timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+            # A CPU-only host can need more than 5 minutes for one long prompt; let the operator raise the read timeout.
+            read_timeout_s = float(os.environ.get("STRATA_MODEL_READ_TIMEOUT_S") or 300.0)
+            timeout = httpx.Timeout(connect=10.0, read=read_timeout_s, write=30.0, pool=10.0)
 
         state = self._get_throttle_state(kwargs)
         telemetry = self._get_telemetry_state(kwargs)
