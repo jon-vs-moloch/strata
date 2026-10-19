@@ -44,7 +44,9 @@ Token counts include every model call made during the task's time window, as log
 - For `poker_hands` (fixed), that is 14 calls:
   - 7 research steps of the task and 1 implementation call;
   - 2 plan reviews and 2 verifier calls, all four abandoned by Strata at its timeouts;
-  - 2 research calls of the verifier-repair procedure the worker queued during the task. Wall times are on a shared host and are only a rough guide; raw calls took 9 to 20 minutes each.
+  - 2 research calls of the verifier-repair procedure the worker queued during the task.
+
+Wall times are on a shared host and are only a rough guide; raw calls took 9 to 20 minutes each.
 
 **Coverage is small, and why.** One task ran through the shipped pipeline and two through the fixed one. The host gave about 2 to 7 generated tokens per second. On that host one pipeline call took 2 to 22 minutes, and one task took an hour or more without finishing. Four raw tasks took 62 minutes. Larger coverage needs a faster host. Every run is in [`results/refinery-tasks-bench.json`](results/refinery-tasks-bench.json).
 
