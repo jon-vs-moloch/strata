@@ -23,6 +23,12 @@ The current bundled suites are:
   small-model failure modes: `instruction_following`, `arithmetic` and
   `format_compliance`. `scripts/bench_refinery.py` reports accuracy per
   category; results are in `docs/results.md`.
+- `refinery_tasks_v1/` (a directory, not a JSONL suite)
+  Source: written for Strata (16 Python coding tasks)
+  Format: a `tasks.jsonl` spec per task plus a pytest file; graded only by the tests
+  Intended use: raw model vs the real worker pipeline (IMPL tasks with a
+  declared `python_pytest` validator), driven by `scripts/refinery_tasks/`.
+  The catalog endpoint does not list it, because it is not a `.jsonl` suite.
 
 This snapshot bundles no items from external benchmark datasets. To add a
 suite, drop a JSONL file into `strata/eval/suites/` with one case per line

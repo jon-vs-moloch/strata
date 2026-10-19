@@ -1,0 +1,2752 @@
+{
+ "benchmark": "refinery_tasks_v1, raw model vs Strata's worker pipeline",
+ "date": "2026-10-19",
+ "model": "Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF Qwen3.5-4B.Q4_K_M.gguf (HF revision 9919dc4a, sha256 de8cf2454c46ec34e6b991dc11f5dd42d543926272d8a59d36ceb5a2eaf7962a)",
+ "server": "llama.cpp b11719 llama-server -c 49152 -t 4 --parallel 3 -n 2048 --reasoning-budget 0 (from 02:57:14Z; earlier settings in server_history)",
+ "host": "Oracle Cloud Ampere A1, 4 Neoverse-N1 cores, 23 GiB, CPU only, shared with other jobs",
+ "conditions": {
+  "raw": "scripts/refinery_tasks/raw_pilot.py, one call, temperature 0",
+  "shipped": "Strata 35bd2a32 plus the STRATA_MODEL_READ_TIMEOUT_S patch and the suite files; API+worker via scripts/start_system.sh; settings automatic_task_generation=false, pacing aggressive",
+  "fixed": "Strata 751d2d0b (validator-gate fix) plus the same patch and suite files; same settings; separate instance on :8010 with its model endpoint at the metering proxy :1235"
+ },
+ "raw": [
+  {
+   "id": "bowling",
+   "rep": 1,
+   "temperature": 0.0,
+   "passed": false,
+   "pytest": "5 failed, 1 passed in 0.05s",
+   "wall_s": 1183.6,
+   "usage": {
+    "completion_tokens": 1526,
+    "prompt_tokens": 1278,
+    "total_tokens": 2804,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "error": "",
+   "response": "```python\nimport re\n\ndef score(rolls: str) -> int:\n    # Validate empty input\n    if not rolls:\n        raise ValueError(\"Empty input\")\n    \n    # Split into frames\n    frames = rolls.split()\n    \n    # Must have exactly 10 frames\n    if len(frames) != 10:\n        raise ValueError(\"not exactly ten space-separated frames\")\n    \n    # Validate each frame\n    for i, frame in enumerate(frames):\n        # Check for invalid characters\n        if not re.match(r'^[0-9X/]-$', frame):\n            raise ValueError(\"invalid characters\")\n        \n        # Check for lone \"/\"\n        if frame == \"/\":\n            raise ValueError(\"lone '/'\")\n        \n        # Determine number of rolls in this frame\n        if frame == \"X\":\n            num_rolls = 1\n        elif frame == \"-\":\n            num_rolls = 2\n        elif frame == \"/\":\n            num_rolls = 2\n        else:\n            # Two-digit frame (open frame)\n            num_rolls = 2\n        \n        # Validate frame length\n        if len(frame) != num_rolls:\n            raise ValueError(\"wrong frame lengths\")\n        \n        # Check for open frame with > 10 pins\n        if frame != \"X\" and frame != \"-\":\n            pin_sum = int(frame[0]) + int(frame[1])\n            if pin_sum > 10:\n                raise ValueError(\"an open frame knocking over more than 10 pins\")\n    \n    # Calculate total score\n    total = 0\n    roll_index = 0\n    \n    for frame_num in range(10):\n        frame_str = frames[frame_num]\n        \n        if frame_str == \"X\":\n            # Strike: score is 10 + next 2 rolls\n            frame_score = 10\n            bonus_rolls = 2\n        elif frame_str == \"-\":\n            # Miss: score is 0\n            frame_score = 0\n            bonus_rolls = 0\n        elif frame_str == \"/\":\n            # Spare: score is 10 + next roll\n            frame_score = 10\n            bonus_rolls = 1\n        else:\n            # Open frame: score is sum of 2 rolls\n            frame_score = int(frame_str[0]) + int(frame_str[1])\n            bonus_rolls = 0\n        \n        total += frame_score\n        \n        # Add bonus rolls to total\n        for _ in range(bonus_rolls):\n            if roll_index >= len(frames):\n                break\n            bonus_roll = frames[roll_index]\n            if bonus_roll == \"X\":\n                bonus = 10\n            elif bonus_roll == \"-\":\n                bonus = 0\n            elif bonus_roll == \"/\":\n                bonus = 10 + next_roll_score(roll_index + 1)\n            else:\n                bonus = int(bonus_roll)\n            total += bonus\n            roll_index += 1\n        \n        # Move past this frame's rolls\n        if frame_str == \"X\":\n            roll_index += 1\n        else:\n            roll_index += 2\n    \n    return total\n\ndef next_roll_score(index: int) -> int:\n    \"\"\"Get the score of the next roll (for bonus calculation).\"\"\"\n    if index >= len(frames):\n        return 0\n    frame_str = frames[index]\n    if frame_str == \"X\":\n        return 10\n    elif frame_str == \"-\":\n        return 0\n    elif frame_str == \"/\":\n        return 10 + next_roll_score(index + 1)\n    else:\n        return int(frame_str)\n\n# Global frames for next_roll_score\nglobal frames\n\ndef _get_frames():\n    global frames\n    if frames is None:\n        frames = rolls.split()\n    return frames\n\ndef next_roll_score(index: int) -> int:\n    global frames\n    frames = _get_frames()\n    if index >= len(frames):\n        return 0\n    frame_str = frames[index]\n    if frame_str == \"X\":\n        return 10\n    elif frame_str == \"-\":\n        return 0\n    elif frame_str == \"/\":\n        return 10 + next_roll_score(index + 1)\n    else:\n        return int(frame_str)\n```",
+   "utc": "2026-10-19T03:19:14Z"
+  },
+  {
+   "id": "poker_hands",
+   "rep": 1,
+   "temperature": 0.0,
+   "passed": false,
+   "pytest": "1 error in 0.18s",
+   "wall_s": 530.0,
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 1455,
+    "total_tokens": 3503,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "error": "",
+   "response": "```python\nimport re\nfrom collections import Counter\n\n# Rank to integer mapping: 2=2, ..., T=10, J=11, Q=12, K=13, A=14\nRANK_MAP = {\n    '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,\n    'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14\n}\n\n# Rank order for sorting\nRANK_ORDER = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']\n\n# Suit order (not used for comparison, but for validation)\nSUIT_ORDER = ['C', 'D', 'H', 'S']\n\n# Category order (low to high)\nCATEGORY_ORDER = [\n    'high_card',\n    'one_pair',\n    'two_pair',\n    'three_of_a_kind',\n    'straight',\n    'flush',\n    'full_house',\n    'four_of_a_kind',\n    'straight_flush'\n]\n\ndef parse_card(card_str: str) -> tuple[int, str]:\n    \"\"\"Parse a card string into (rank_int, suit).\"\"\"\n    card_str = card_str.strip()\n    if len(card_str) != 2:\n        raise ValueError(f\"Invalid card format: {card_str}\")\n    \n    rank_char = card_str[0]\n    suit_char = card_str[1]\n    \n    if rank_char not in RANK_MAP:\n        raise ValueError(f\"Unknown rank: {rank_char}\")\n    if suit_char not in SUIT_ORDER:\n        raise ValueError(f\"Unknown suit: {suit_char}\")\n    \n    return RANK_MAP[rank_char], suit_char\n\ndef parse_hand(hand_str: str) -> tuple[list[tuple[int, str]], list[int]]:\n    \"\"\"Parse a hand string into list of (rank_int, suit) tuples and rank list.\"\"\"\n    cards = []\n    ranks = []\n    \n    # Split by single spaces\n    card_parts = hand_str.split(' ')\n    if len(card_parts) != 5:\n        raise ValueError(f\"Invalid card count: {len(card_parts)}\")\n    \n    for card in card_parts:\n        rank_int, suit = parse_card(card)\n        cards.append((rank_int, suit))\n        ranks.append(rank_int)\n    \n    return cards, ranks\n\ndef validate_hand(hand_str: str) -> None:\n    \"\"\"Validate that the hand has exactly 5 distinct valid cards.\"\"\"\n    cards, _ = parse_hand(hand_str)\n    \n    # Check for duplicates\n    rank_counts = Counter(r for r, _ in cards)\n    if any(count > 1 for count in rank_counts.values()):\n        raise ValueError(\"Duplicate card in hand\")\n    \n    # Check all ranks are distinct (already covered by Counter, but explicit)\n    if len(set(r for r, _ in cards)) != 5:\n        raise ValueError(\"Duplicate card in hand\")\n\ndef get_category(cards: list[tuple[int, str]], ranks: list[int]) -> tuple[str, list[int]]:\n    \"\"\"\n    Determine the category of the hand and return (category_name, tie_breaker_list).\n    Tie breaker list is sorted descending for comparison.\n    \"\"\"\n    rank_counts = Counter(ranks)\n    rank_list = sorted(ranks, reverse=True)\n    \n    # Check for flush\n    suits = [s for r, s in cards]\n    is_flush = len(set(suits)) == 1\n    \n    # Check for straight\n    # Sort ranks and check consecutive\n    sorted_ranks = sorted(ranks)\n    is_straight = False\n    \n    # Check normal straight\n    if sorted_ranks[-1] - sorted_ranks[0] == 4:\n        is_straight = True\n    # Check ace-low straight (A, 2, 3, 4, 5)\n    elif sorted_ranks == [2, 3, 4, 5, 14]:\n        is_straight = True\n    \n    # Check for straight flush\n    is_straight_flush = is_straight and is_flush\n    \n    # Determine category\n    if is_straight_flush:\n        return 'straight_flush', rank_list\n    \n    if is_flush:\n        return 'flush', rank_list\n    \n    if is_straight:\n        return 'straight', rank_list\n    \n    # Check for four of a kind\n    if 4 in rank_counts.values():\n        return 'four_of_a_kind', [rank_counts[rank] for rank in rank_list]\n    \n    # Check for full house\n    if 3 in rank_counts.values() and 2 in rank_counts.values():\n        return 'full_house', [rank_counts[rank] for rank in rank_list]\n    \n    # Check for three of a kind\n    if 3 in rank_counts.values():\n        return 'three_of_a_kind', [rank_counts[rank] for rank in rank_list]\n    \n    # Check for two pair\n    if 2 in rank_counts.values() and rank_counts.values().count(2) == 2:\n        return 'two_pair', [rank_counts[rank] for rank in rank_list]\n    \n    # Check for one pair\n    if 2 in rank_counts.values():\n        return 'one_pair', [rank_counts[rank] for rank in rank_list]\n    \n    return 'high_card', rank_list\n\ndef compare_hands(hand1: str, hand2: str) -> int:\n    \"\"\"\n    Compare two poker hands.\n    Returns 1 if hand1 wins, -1 if hand2 wins, 0 for tie.\n    \"\"\"\n    validate_hand(hand1)\n    validate_hand(hand2)\n    \n    cards1, ranks1 = parse_hand(hand1)\n    cards2, ranks2 = parse_hand(hand2)\n    \n    cat1, tie1 = get_category(cards1,",
+   "utc": "2026-10-19T03:28:04Z"
+  },
+  {
+   "id": "calc_expr",
+   "rep": 1,
+   "temperature": 0.0,
+   "passed": false,
+   "pytest": "6 failed, 1 passed in 0.10s",
+   "wall_s": 859.8,
+   "usage": {
+    "completion_tokens": 1087,
+    "prompt_tokens": 905,
+    "total_tokens": 1992,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "error": "",
+   "response": "```python\n\"\"\"\nInteger arithmetic evaluator.\nSupports integer literals, +, -, *, /, parentheses.\nUnary minus supported. Truncating division toward zero.\n\"\"\"\n\nfrom typing import List, Tuple, Union\n\nToken = Union[str, int]\nTokenType = str\n\nclass Tokenizer:\n    def __init__(self, expr: str):\n        self.expr = expr\n        self.pos = 0\n        self.tokens: List[Token] = []\n    \n    def tokenize(self) -> List[Token]:\n        while self.pos < len(self.expr):\n            self._skip_whitespace()\n            if self.pos >= len(self.expr):\n                break\n            \n            ch = self.expr[self.pos]\n            \n            if ch.isdigit():\n                self._read_number()\n            elif ch in '+-*/':\n                self.tokens.append(ch)\n                self.pos += 1\n            elif ch == '(':\n                self.tokens.append('(')\n                self.pos += 1\n            elif ch == ')':\n                self.tokens.append(')')\n                self.pos += 1\n            else:\n                raise ValueError(f\"Invalid character: {ch}\")\n        \n        self.tokens.append('EOF')\n        return self.tokens\n    \n    def _skip_whitespace(self):\n        while self.pos < len(self.expr) and self.expr[self.pos] in ' \\t\\n\\r':\n            self.pos += 1\n    \n    def _read_number(self):\n        start = self.pos\n        while self.pos < len(self.expr) and self.expr[self.pos].isdigit():\n            self.pos += 1\n        num_str = self.expr[start:self.pos]\n        if not num_str:\n            raise ValueError(\"Empty number\")\n        self.tokens.append(int(num_str))\n    \n    def peek(self) -> Token:\n        if self.pos < len(self.tokens):\n            return self.tokens[self.pos]\n        return 'EOF'\n    \n    def consume(self) -> Token:\n        token = self.peek()\n        self.pos += 1\n        return token\n\n\nclass Parser:\n    def __init__(self, tokens: List[Token]):\n        self.tokens = tokens\n        self.pos = 0\n    \n    def parse(self) -> int:\n        result = self._expr()\n        if self.pos < len(self.tokens) and self.tokens[self.pos] != 'EOF':\n            raise ValueError(\"Unexpected token after expression\")\n        return result\n    \n    def _expr(self) -> int:\n        result = self._term()\n        while self.peek() in ('+', '-'):\n            op = self.consume()\n            right = self._term()\n            if op == '+':\n                result += right\n            else:\n                result -= right\n        return result\n    \n    def _term(self) -> int:\n        result = self._factor()\n        while self.peek() in ('*', '/'):\n            op = self.consume()\n            right = self._factor()\n            if op == '*':\n                result *= right\n            else:\n                result //= right  # Truncating division toward zero\n        return result\n    \n    def _factor(self) -> int:\n        token = self.peek()\n        \n        if token == '(':\n            self.consume()\n            result = self._expr()\n            if self.consume() != ')':\n                raise ValueError(\"Missing closing parenthesis\")\n            return result\n        \n        elif token == '-':\n            self.consume()\n            return -self._factor()\n        \n        elif token == 'EOF':\n            raise ValueError(\"Unexpected end of input\")\n        \n        else:\n            num = self.consume()\n            if not isinstance(num, int):\n                raise ValueError(\"Expected number\")\n            return num\n\n\ndef evaluate(expr: str) -> int:\n    tokenizer = Tokenizer(expr)\n    parser = Parser(tokenizer.tokenize())\n    return parser.parse()\n```",
+   "utc": "2026-10-19T03:42:25Z"
+  },
+  {
+   "id": "glob_match",
+   "rep": 1,
+   "temperature": 0.0,
+   "passed": false,
+   "pytest": "no content",
+   "wall_s": 1144.8,
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 949,
+    "total_tokens": 2997,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "error": "",
+   "response": "",
+   "utc": "2026-10-19T04:01:30Z"
+  }
+ ],
+ "raw_reasoning_on_n2048": [
+  {
+   "id": "bowling",
+   "rep": 1,
+   "temperature": 0.0,
+   "passed": false,
+   "pytest": "no content",
+   "wall_s": 962.3,
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 1278,
+    "total_tokens": 3326,
+    "prompt_tokens_details": {
+     "cached_tokens": 1274
+    }
+   },
+   "finish_reason": "length",
+   "error": "",
+   "response": "",
+   "utc": "2026-10-19T02:56:10Z"
+  }
+ ],
+ "pipeline_shipped": [
+  {
+   "id": "bowling",
+   "rep": 1,
+   "root_task_id": "07ad80f2-5535-4357-9518-4431f41d187d",
+   "start": "2026-10-19T03:52:41Z",
+   "end": "2026-10-19T04:28:30Z",
+   "wall_s": 2149.4,
+   "settle": "operator_snapshot",
+   "note": "stopped by operator at 2026-10-19T04:28:30Z to give CPU to condition C; tree still open",
+   "final_passed": false,
+   "any_passed": false,
+   "n_candidates": 0,
+   "candidates": [],
+   "tasks": [
+    {
+     "task_id": "07ad80f2-5535-4357-9518-4431f41d187d",
+     "parent_task_id": null,
+     "title": "Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 03:52:41.448460",
+     "updated_at": "2026-10-19 04:21:15.420203"
+    },
+    {
+     "task_id": "9fc49f20-b425-4aa7-89d5-b8df78ad961a",
+     "parent_task_id": "07ad80f2-5535-4357-9518-4431f41d187d",
+     "title": "Continue research after list_directory",
+     "type": "RESEARCH",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 04:16:49.656599",
+     "updated_at": "2026-10-19 04:21:23.437714"
+    },
+    {
+     "task_id": "7722bed5-c1d9-4f82-9994-3af2e9883719",
+     "parent_task_id": "9fc49f20-b425-4aa7-89d5-b8df78ad961a",
+     "title": "Recovery Plan for Continue research after list_directory",
+     "type": "DECOMP",
+     "state": "WORKING",
+     "created_at": "2026-10-19 04:21:23.432087",
+     "updated_at": "2026-10-19 04:21:23.447021"
+    }
+   ],
+   "attempts": [
+    {
+     "task_id": "07ad80f2-5535-4357-9518-4431f41d187d",
+     "started_at": "2026-10-19 03:55:03.233029",
+     "ended_at": "2026-10-19 04:16:49.667463",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "9fc49f20-b425-4aa7-89d5-b8df78ad961a",
+     "started_at": "2026-10-19 04:16:49.677815",
+     "ended_at": "2026-10-19 04:21:15.422401",
+     "outcome": "FAILED",
+     "resolution": "DECOMPOSE",
+     "reason": "Research task attempted multiple tool calls in a single variance-bearing invocation. Decompose the task into smaller oneshottable units.",
+     "failure_kind": "task_boundary_violation",
+     "verifier": null,
+     "duration_s": 265.7387
+    },
+    {
+     "task_id": "7722bed5-c1d9-4f82-9994-3af2e9883719",
+     "started_at": "2026-10-19 04:21:23.444869",
+     "ended_at": null,
+     "outcome": null,
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    }
+   ],
+   "model_calls": 3,
+   "prompt_tokens": 7758,
+   "completion_tokens": 1726,
+   "total_tokens": 9484,
+   "finish_length": 0
+  }
+ ],
+ "pipeline_fixed": [
+  {
+   "id": "bowling",
+   "rep": 1,
+   "root_task_id": "155d63f6-3167-470a-997d-c78380ebc158",
+   "start": "2026-10-19T03:52:41Z",
+   "end": "2026-10-19T04:52:41Z",
+   "wall_s": 3600.5,
+   "settle": "timeout",
+   "final_passed": false,
+   "any_passed": false,
+   "n_candidates": 0,
+   "candidates": [],
+   "tasks": [
+    {
+     "task_id": "155d63f6-3167-470a-997d-c78380ebc158",
+     "parent_task_id": null,
+     "title": "Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 03:52:41.438104",
+     "updated_at": "2026-10-19 04:22:15.306781"
+    },
+    {
+     "task_id": "6a306880-64ba-4686-afe3-c85be1612d61",
+     "parent_task_id": "155d63f6-3167-470a-997d-c78380ebc158",
+     "title": "Continue implementation: Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 04:12:29.263455",
+     "updated_at": "2026-10-19 04:39:07.434982"
+    },
+    {
+     "task_id": "113b35fe-40ef-489e-b1c0-6bf804e61278",
+     "parent_task_id": "6a306880-64ba-4686-afe3-c85be1612d61",
+     "title": "Continue implementation: Continue implementation: Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 04:22:15.297191",
+     "updated_at": "2026-10-19 04:45:53.538851"
+    },
+    {
+     "task_id": "25bf14ca-c07d-4a9b-9305-9c40103d8a21",
+     "parent_task_id": "113b35fe-40ef-489e-b1c0-6bf804e61278",
+     "title": "Continue implementation: Continue implementation: Continue implementation: Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 04:28:44.753987",
+     "updated_at": "2026-10-19 04:50:15.722075"
+    },
+    {
+     "task_id": "cad507dd-361d-448d-9265-9bd575bcd019",
+     "parent_task_id": "113b35fe-40ef-489e-b1c0-6bf804e61278",
+     "title": "Audit Recursive Continuation: Continue implementation: Continue implementation: Ten-pin bowling scorer",
+     "type": "JUDGE",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 04:28:44.757497",
+     "updated_at": "2026-10-19 04:39:07.436134"
+    },
+    {
+     "task_id": "51037ed2-9edf-4503-9465-41b326792262",
+     "parent_task_id": "25bf14ca-c07d-4a9b-9305-9c40103d8a21",
+     "title": "Recovery Plan for Continue implementation: Continue implementation: Continue implementation: Ten-pin bowling scorer",
+     "type": "DECOMP",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 04:39:07.362129",
+     "updated_at": "2026-10-19 04:40:37.481319"
+    },
+    {
+     "task_id": "9e93587c-d0bd-4b5d-a60f-1222371fe133",
+     "parent_task_id": "51037ed2-9edf-4503-9465-41b326792262",
+     "title": "Verification Review: Recovery Plan for Continue implementation: Continue implementation: Cont",
+     "type": "JUDGE",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 04:40:37.645886",
+     "updated_at": "2026-10-19 04:40:37.645890"
+    },
+    {
+     "task_id": "4a9d429c-ea2d-4743-a1c6-a9891263fab9",
+     "parent_task_id": "25bf14ca-c07d-4a9b-9305-9c40103d8a21",
+     "title": "Continue implementation: Continue implementation: Continue implementation: Continue implementation: Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 04:45:53.529386",
+     "updated_at": "2026-10-19 04:50:15.697499"
+    },
+    {
+     "task_id": "3b3e469e-5074-43c5-a352-84f17396de6e",
+     "parent_task_id": "4a9d429c-ea2d-4743-a1c6-a9891263fab9",
+     "title": "Continue implementation: Continue implementation: Continue implementation: Continue implementation: Continue implementation: Ten-pin bowling scorer",
+     "type": "IMPL",
+     "state": "WORKING",
+     "created_at": "2026-10-19 04:50:15.697683",
+     "updated_at": "2026-10-19 04:50:15.733429"
+    }
+   ],
+   "attempts": [
+    {
+     "task_id": "155d63f6-3167-470a-997d-c78380ebc158",
+     "started_at": "2026-10-19 03:55:06.183148",
+     "ended_at": "2026-10-19 04:12:29.273672",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "6a306880-64ba-4686-afe3-c85be1612d61",
+     "started_at": "2026-10-19 04:12:29.283365",
+     "ended_at": "2026-10-19 04:22:15.305547",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "113b35fe-40ef-489e-b1c0-6bf804e61278",
+     "started_at": "2026-10-19 04:22:15.314659",
+     "ended_at": "2026-10-19 04:28:44.768043",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "25bf14ca-c07d-4a9b-9305-9c40103d8a21",
+     "started_at": "2026-10-19 04:28:44.776925",
+     "ended_at": "2026-10-19 04:38:59.350784",
+     "outcome": "FAILED",
+     "resolution": "DECOMPOSE",
+     "reason": "Research task did not complete in one bounded turn and did not emit finalize_research. Reframe or decompose it into a oneshottable task.",
+     "failure_kind": "task_boundary_violation",
+     "verifier": null,
+     "duration_s": 614.5685
+    },
+    {
+     "task_id": "cad507dd-361d-448d-9265-9bd575bcd019",
+     "started_at": "2026-10-19 04:39:07.373197",
+     "ended_at": "2026-10-19 04:39:07.435582",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": 0.06164710270240903
+    },
+    {
+     "task_id": "51037ed2-9edf-4503-9465-41b326792262",
+     "started_at": "2026-10-19 04:39:07.443412",
+     "ended_at": "2026-10-19 04:39:07.449599",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": {
+      "recorded_at": "2026-10-19T04:40:37.467201+00:00",
+      "verification_kind": "model",
+      "verdict": "uncertain",
+      "confidence": 0.2,
+      "recommended_action": "verify_more",
+      "failure_modes": [
+       "other"
+      ],
+      "mechanism_failure_kind": "parse_failure",
+      "policy": {
+       "mode": "local_agent",
+       "sample_count": 0,
+       "recent_error_rate": 1.0,
+       "verifier_issue_rate": 1.0,
+       "verifier_mechanism_failure_rate": 1.0,
+       "cadence": 1,
+       "should_verify": true
+      }
+     },
+     "duration_s": null
+    },
+    {
+     "task_id": "25bf14ca-c07d-4a9b-9305-9c40103d8a21",
+     "started_at": "2026-10-19 04:40:37.653451",
+     "ended_at": "2026-10-19 04:45:53.537901",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "4a9d429c-ea2d-4743-a1c6-a9891263fab9",
+     "started_at": "2026-10-19 04:45:53.547296",
+     "ended_at": "2026-10-19 04:50:15.721063",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "3b3e469e-5074-43c5-a352-84f17396de6e",
+     "started_at": "2026-10-19 04:50:15.732872",
+     "ended_at": null,
+     "outcome": null,
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    }
+   ],
+   "model_calls": 6,
+   "prompt_tokens": 27017,
+   "completion_tokens": 3577,
+   "total_tokens": 30594,
+   "finish_length": 1
+  },
+  {
+   "id": "poker_hands",
+   "rep": 1,
+   "root_task_id": "4b0350d8-37c4-40c5-ba87-011e0b7dedfb",
+   "start": "2026-10-19T04:52:50Z",
+   "end": "2026-10-19T06:07:18Z",
+   "wall_s": 4468.5,
+   "settle": "operator_snapshot",
+   "note": "snapshot by operator at 2026-10-19T06:07:18Z: tree still open; the worker had turned to its own verifier-repair procedure (queued after three verifier timeouts) ahead of this task's next continuation",
+   "final_passed": false,
+   "any_passed": false,
+   "n_candidates": 1,
+   "candidates": [
+    {
+     "candidate_id": "a3ee2baa-7293-48f3-a874-118229159873",
+     "task_id": "d8aed4f8-5d92-4b7f-8047-8ab4eab58b8f",
+     "created_at": "2026-10-19 05:18:45.439816",
+     "passed": false,
+     "pytest": "missing candidate file",
+     "content": ""
+    }
+   ],
+   "tasks": [
+    {
+     "task_id": "4b0350d8-37c4-40c5-ba87-011e0b7dedfb",
+     "parent_task_id": null,
+     "title": "Texas hold'em hand comparison",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 04:52:50.912183",
+     "updated_at": "2026-10-19 05:27:23.032162"
+    },
+    {
+     "task_id": "d8aed4f8-5d92-4b7f-8047-8ab4eab58b8f",
+     "parent_task_id": "4b0350d8-37c4-40c5-ba87-011e0b7dedfb",
+     "title": "Continue implementation: Texas hold'em hand comparison",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 05:05:40.833816",
+     "updated_at": "2026-10-19 05:42:03.479672"
+    },
+    {
+     "task_id": "660abbb2-1752-47dc-8ea9-33bedda584ff",
+     "parent_task_id": "d8aed4f8-5d92-4b7f-8047-8ab4eab58b8f",
+     "title": "Recovery Plan for Continue implementation: Texas hold'em hand comparison",
+     "type": "DECOMP",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 05:18:54.061779",
+     "updated_at": "2026-10-19 05:20:24.122595"
+    },
+    {
+     "task_id": "551464d0-df71-4bb3-a8f0-b530e5b3f378",
+     "parent_task_id": "660abbb2-1752-47dc-8ea9-33bedda584ff",
+     "title": "Verification Review: Recovery Plan for Continue implementation: Texas hold'em hand comparison",
+     "type": "JUDGE",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 05:20:24.320169",
+     "updated_at": "2026-10-19 05:20:24.320172"
+    },
+    {
+     "task_id": "1389a4f2-a067-4fde-9458-387a238e312f",
+     "parent_task_id": "d8aed4f8-5d92-4b7f-8047-8ab4eab58b8f",
+     "title": "Continue implementation: Continue implementation: Texas hold'em hand comparison",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 05:27:23.022600",
+     "updated_at": "2026-10-19 05:50:00.645708"
+    },
+    {
+     "task_id": "72c3abca-eaa3-4560-8a2d-90a1e5c144fb",
+     "parent_task_id": "1389a4f2-a067-4fde-9458-387a238e312f",
+     "title": "Continue implementation: Continue implementation: Continue implementation: Texas hold'em hand comparison",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 05:37:07.855971",
+     "updated_at": "2026-10-19 06:00:08.102080"
+    },
+    {
+     "task_id": "ac5d8232-2454-4117-9350-85507099b377",
+     "parent_task_id": "1389a4f2-a067-4fde-9458-387a238e312f",
+     "title": "Audit Recursive Continuation: Continue implementation: Continue implementation: Texas hold'em hand comparison",
+     "type": "JUDGE",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 05:37:07.863185",
+     "updated_at": "2026-10-19 05:42:03.480598"
+    },
+    {
+     "task_id": "6469f33f-6ac4-4770-a1a3-8f5ee0859252",
+     "parent_task_id": "72c3abca-eaa3-4560-8a2d-90a1e5c144fb",
+     "title": "Recovery Plan for Continue implementation: Continue implementation: Continue implementation: Texas hold'em hand comparison",
+     "type": "DECOMP",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 05:42:03.394990",
+     "updated_at": "2026-10-19 05:43:33.567018"
+    },
+    {
+     "task_id": "f3d0a6e6-108c-48e4-b7ba-0500c27909ec",
+     "parent_task_id": "6469f33f-6ac4-4770-a1a3-8f5ee0859252",
+     "title": "Verification Review: Recovery Plan for Continue implementation: Continue implementation: Cont",
+     "type": "JUDGE",
+     "state": "COMPLETE",
+     "created_at": "2026-10-19 05:43:33.594940",
+     "updated_at": "2026-10-19 05:43:33.594943"
+    },
+    {
+     "task_id": "6b073327-4b91-4617-a468-d4e8154ae3cc",
+     "parent_task_id": "72c3abca-eaa3-4560-8a2d-90a1e5c144fb",
+     "title": "Continue implementation: Continue implementation: Continue implementation: Continue implementation: Texas hold'em hand comparison",
+     "type": "IMPL",
+     "state": "PUSHED",
+     "created_at": "2026-10-19 05:50:00.629647",
+     "updated_at": "2026-10-19 06:00:08.091242"
+    },
+    {
+     "task_id": "9fc4823c-ebc9-4612-8975-a63e64d0f0f3",
+     "parent_task_id": "6b073327-4b91-4617-a468-d4e8154ae3cc",
+     "title": "Continue implementation: Continue implementation: Continue implementation: Continue implementation: Continue implementation: Texas hold'em hand comparison",
+     "type": "IMPL",
+     "state": "PENDING",
+     "created_at": "2026-10-19 06:00:08.091525",
+     "updated_at": "2026-10-19 06:00:08.091529"
+    }
+   ],
+   "attempts": [
+    {
+     "task_id": "4b0350d8-37c4-40c5-ba87-011e0b7dedfb",
+     "started_at": "2026-10-19 04:55:25.654320",
+     "ended_at": "2026-10-19 05:05:40.844046",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "d8aed4f8-5d92-4b7f-8047-8ab4eab58b8f",
+     "started_at": "2026-10-19 05:05:40.853944",
+     "ended_at": "2026-10-19 05:18:46.050047",
+     "outcome": "FAILED",
+     "resolution": "DECOMPOSE",
+     "reason": "Declared validator rejected every implementation candidate: Error\n____________________________ test_pair_then_kickers ____________________________\n\n    def test_pair_then_kickers():\n>       assert mod.compare(\"5H 5D 2S 3C 4D\", \"4H 4D AS KC QD\") == 1\n               ^^^^^^^^^^^\nE       AttributeError: module 'refinery_target_poker_hands' has no attribute 'compare'\n\nstrata/eval/suites/refinery_tasks_v1/tests/test_poker_hands.py:44: AttributeError\n____________________________ test_two_pair_ordering ____________________________\n\n    def test_two_pair_ordering():\n>       assert mod.compare(\"KH KD 2S",
+     "failure_kind": "validator_failed",
+     "verifier": null,
+     "duration_s": 785.1904
+    },
+    {
+     "task_id": "660abbb2-1752-47dc-8ea9-33bedda584ff",
+     "started_at": "2026-10-19 05:18:54.074625",
+     "ended_at": "2026-10-19 05:18:54.081317",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": {
+      "recorded_at": "2026-10-19T05:20:24.106646+00:00",
+      "verification_kind": "model",
+      "verdict": "uncertain",
+      "confidence": 0.2,
+      "recommended_action": "verify_more",
+      "failure_modes": [
+       "other"
+      ],
+      "mechanism_failure_kind": "parse_failure",
+      "policy": {
+       "mode": "local_agent",
+       "sample_count": 0,
+       "recent_error_rate": 1.0,
+       "verifier_issue_rate": 0.0,
+       "verifier_mechanism_failure_rate": 1.0,
+       "cadence": 1,
+       "should_verify": true
+      }
+     },
+     "duration_s": null
+    },
+    {
+     "task_id": "d8aed4f8-5d92-4b7f-8047-8ab4eab58b8f",
+     "started_at": "2026-10-19 05:20:24.327833",
+     "ended_at": "2026-10-19 05:27:23.031116",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "1389a4f2-a067-4fde-9458-387a238e312f",
+     "started_at": "2026-10-19 05:27:23.040351",
+     "ended_at": "2026-10-19 05:37:07.878232",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "72c3abca-eaa3-4560-8a2d-90a1e5c144fb",
+     "started_at": "2026-10-19 05:37:07.896364",
+     "ended_at": "2026-10-19 05:41:55.385878",
+     "outcome": "FAILED",
+     "resolution": "DECOMPOSE",
+     "reason": "Research task selected a circuit-broken tool and would require another variance-bearing turn to continue. Decompose or replan the task instead of looping within the same attempt.",
+     "failure_kind": "task_boundary_violation",
+     "verifier": null,
+     "duration_s": 287.4794
+    },
+    {
+     "task_id": "ac5d8232-2454-4117-9350-85507099b377",
+     "started_at": "2026-10-19 05:42:03.416419",
+     "ended_at": "2026-10-19 05:42:03.480263",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": 0.061160939279943705
+    },
+    {
+     "task_id": "6469f33f-6ac4-4770-a1a3-8f5ee0859252",
+     "started_at": "2026-10-19 05:42:03.508779",
+     "ended_at": "2026-10-19 05:42:03.520336",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": {
+      "recorded_at": "2026-10-19T05:43:33.547002+00:00",
+      "verification_kind": "model",
+      "verdict": "uncertain",
+      "confidence": 0.2,
+      "recommended_action": "verify_more",
+      "failure_modes": [
+       "other"
+      ],
+      "mechanism_failure_kind": "parse_failure",
+      "policy": {
+       "mode": "local_agent",
+       "sample_count": 0,
+       "recent_error_rate": 1.0,
+       "verifier_issue_rate": 0.0,
+       "verifier_mechanism_failure_rate": 1.0,
+       "cadence": 1,
+       "should_verify": true
+      }
+     },
+     "duration_s": null
+    },
+    {
+     "task_id": "72c3abca-eaa3-4560-8a2d-90a1e5c144fb",
+     "started_at": "2026-10-19 05:43:33.609884",
+     "ended_at": "2026-10-19 05:50:00.644680",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    },
+    {
+     "task_id": "6b073327-4b91-4617-a468-d4e8154ae3cc",
+     "started_at": "2026-10-19 05:50:00.687118",
+     "ended_at": "2026-10-19 06:00:08.101161",
+     "outcome": "SUCCEEDED",
+     "resolution": null,
+     "reason": "",
+     "failure_kind": null,
+     "verifier": null,
+     "duration_s": null
+    }
+   ],
+   "model_calls": 14,
+   "prompt_tokens": 50632,
+   "completion_tokens": 11981,
+   "total_tokens": 62613,
+   "finish_length": 3
+  }
+ ],
+ "research_call_outcomes": {
+  "list_directory": 30,
+  "read_file": 8,
+  "write_library_file": 5,
+  "finalize_research": 2,
+  "read_file+list_directory": 1,
+  "<no tool call, finish=stop>": 1,
+  "read_file+read_file+list_directory": 1,
+  "<no tool call, finish=length>": 1
+ },
+ "model_calls": [
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:15:31Z",
+   "end": "2026-10-19T01:18:15Z",
+   "wall_s": 164.46,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 177,
+    "prompt_tokens": 2875,
+    "total_tokens": 3052,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:18:18Z",
+   "end": "2026-10-19T01:21:21Z",
+   "wall_s": 183.23,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 103,
+    "prompt_tokens": 2900,
+    "total_tokens": 3003,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:21:21Z",
+   "end": "2026-10-19T01:23:52Z",
+   "wall_s": 151.3,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 167,
+    "prompt_tokens": 2929,
+    "total_tokens": 3096,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:35:19Z",
+   "end": "2026-10-19T01:41:59Z",
+   "wall_s": 399.66,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 608,
+    "prompt_tokens": 487,
+    "total_tokens": 1095,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:47:57Z",
+   "end": "2026-10-19T01:47:57Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:02Z",
+   "end": "2026-10-19T01:48:02Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:08Z",
+   "end": "2026-10-19T01:48:08Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "plan_review",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:19Z",
+   "end": "2026-10-19T01:48:19Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:24Z",
+   "end": "2026-10-19T01:48:24Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:29Z",
+   "end": "2026-10-19T01:48:29Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:35Z",
+   "end": "2026-10-19T01:48:35Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:40Z",
+   "end": "2026-10-19T01:48:40Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:46Z",
+   "end": "2026-10-19T01:48:46Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:51Z",
+   "end": "2026-10-19T01:48:51Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:48:56Z",
+   "end": "2026-10-19T01:48:56Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:02Z",
+   "end": "2026-10-19T01:49:02Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:07Z",
+   "end": "2026-10-19T01:49:07Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:13Z",
+   "end": "2026-10-19T01:49:13Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:18Z",
+   "end": "2026-10-19T01:49:18Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:23Z",
+   "end": "2026-10-19T01:49:23Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "plan_review",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:25Z",
+   "end": "2026-10-19T01:49:25Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "other",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:34Z",
+   "end": "2026-10-19T01:49:34Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:40Z",
+   "end": "2026-10-19T01:49:40Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:45Z",
+   "end": "2026-10-19T01:49:45Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:50Z",
+   "end": "2026-10-19T01:49:50Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:49:56Z",
+   "end": "2026-10-19T01:49:56Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:50:01Z",
+   "end": "2026-10-19T01:50:01Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:50:07Z",
+   "end": "2026-10-19T01:50:07Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:50:12Z",
+   "end": "2026-10-19T01:50:12Z",
+   "wall_s": 0.0,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:23:52Z",
+   "end": "2026-10-19T01:50:15Z",
+   "wall_s": 1582.33,
+   "status": 502,
+   "role": "verifier",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:27:33Z",
+   "end": "2026-10-19T01:50:15Z",
+   "wall_s": 1361.77,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:32:35Z",
+   "end": "2026-10-19T01:50:15Z",
+   "wall_s": 1059.67,
+   "status": 502,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:25:41Z",
+   "end": "2026-10-19T01:50:15Z",
+   "wall_s": 1474.2,
+   "status": 502,
+   "role": "verifier",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:42:55Z",
+   "end": "2026-10-19T01:50:15Z",
+   "wall_s": 439.88,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:50:17Z",
+   "end": "2026-10-19T01:50:17Z",
+   "wall_s": 0.0,
+   "status": 503,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:50:25Z",
+   "end": "2026-10-19T02:00:28Z",
+   "wall_s": 602.24,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 642,
+    "prompt_tokens": 829,
+    "total_tokens": 1471,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:50:59Z",
+   "end": "2026-10-19T02:03:09Z",
+   "wall_s": 729.97,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 275,
+    "prompt_tokens": 2877,
+    "total_tokens": 3152,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:01:21Z",
+   "end": "2026-10-19T02:03:42Z",
+   "wall_s": 140.81,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:51:12Z",
+   "end": "2026-10-19T02:03:42Z",
+   "wall_s": 749.81,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T01:56:16Z",
+   "end": "2026-10-19T02:03:42Z",
+   "wall_s": 446.27,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:03:44Z",
+   "end": "2026-10-19T02:03:44Z",
+   "wall_s": 0.0,
+   "status": 503,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:03:52Z",
+   "end": "2026-10-19T02:06:43Z",
+   "wall_s": 170.52,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 486,
+    "prompt_tokens": 760,
+    "total_tokens": 1246,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:07:10Z",
+   "end": "2026-10-19T02:10:41Z",
+   "wall_s": 211.78,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 221,
+    "prompt_tokens": 3060,
+    "total_tokens": 3281,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:06:45Z",
+   "end": "2026-10-19T02:12:32Z",
+   "wall_s": 346.58,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 409,
+    "prompt_tokens": 751,
+    "total_tokens": 1160,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:10:41Z",
+   "end": "2026-10-19T02:15:25Z",
+   "wall_s": 283.54,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 117,
+    "prompt_tokens": 3088,
+    "total_tokens": 3205,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:15:25Z",
+   "end": "2026-10-19T02:19:02Z",
+   "wall_s": 216.98,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 240,
+    "prompt_tokens": 3113,
+    "total_tokens": 3353,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:19:02Z",
+   "end": "2026-10-19T02:28:11Z",
+   "wall_s": 549.09,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 449,
+    "prompt_tokens": 3591,
+    "total_tokens": 4040,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:24:04Z",
+   "end": "2026-10-19T02:29:38Z",
+   "wall_s": 333.35,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 260,
+    "prompt_tokens": 3591,
+    "total_tokens": 3851,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:29:08Z",
+   "end": "2026-10-19T02:30:50Z",
+   "wall_s": 101.77,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 220,
+    "prompt_tokens": 3591,
+    "total_tokens": 3811,
+    "prompt_tokens_details": {
+     "cached_tokens": 3587
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:30:50Z",
+   "end": "2026-10-19T02:35:32Z",
+   "wall_s": 281.95,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 468,
+    "prompt_tokens": 3686,
+    "total_tokens": 4154,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "finalize_research"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:35:32Z",
+   "end": "2026-10-19T02:48:27Z",
+   "wall_s": 775.06,
+   "status": 200,
+   "role": "verifier",
+   "usage": {
+    "completion_tokens": 1208,
+    "prompt_tokens": 2104,
+    "total_tokens": 3312,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:57:40Z",
+   "end": "2026-10-19T03:05:30Z",
+   "wall_s": 469.64,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 148,
+    "prompt_tokens": 2963,
+    "total_tokens": 3111,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T02:57:31Z",
+   "end": "2026-10-19T03:05:57Z",
+   "wall_s": 506.6,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 227,
+    "prompt_tokens": 2875,
+    "total_tokens": 3102,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:02:43Z",
+   "end": "2026-10-19T03:09:06Z",
+   "wall_s": 383.03,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 264,
+    "prompt_tokens": 2963,
+    "total_tokens": 3227,
+    "prompt_tokens_details": {
+     "cached_tokens": 2959
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:07:48Z",
+   "end": "2026-10-19T03:12:45Z",
+   "wall_s": 296.13,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 209,
+    "prompt_tokens": 2963,
+    "total_tokens": 3172,
+    "prompt_tokens_details": {
+     "cached_tokens": 2959
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:12:46Z",
+   "end": "2026-10-19T03:17:01Z",
+   "wall_s": 255.27,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 635,
+    "prompt_tokens": 482,
+    "total_tokens": 1117,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:17:03Z",
+   "end": "2026-10-19T03:22:12Z",
+   "wall_s": 308.73,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 632,
+    "prompt_tokens": 473,
+    "total_tokens": 1105,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:17:28Z",
+   "end": "2026-10-19T03:25:33Z",
+   "wall_s": 484.98,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 952,
+    "prompt_tokens": 472,
+    "total_tokens": 1424,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:35:28Z",
+   "end": "2026-10-19T03:42:50Z",
+   "wall_s": 442.23,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 295,
+    "prompt_tokens": 3974,
+    "total_tokens": 4269,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:30:26Z",
+   "end": "2026-10-19T03:44:55Z",
+   "wall_s": 868.5,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 744,
+    "prompt_tokens": 3974,
+    "total_tokens": 4718,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:40:32Z",
+   "end": "2026-10-19T03:57:19Z",
+   "wall_s": 1006.41,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 1815,
+    "prompt_tokens": 3974,
+    "total_tokens": 5789,
+    "prompt_tokens_details": {
+     "cached_tokens": 3970
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "write_library_file"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:45:32Z",
+   "end": "2026-10-19T04:08:10Z",
+   "wall_s": 1357.89,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 1933,
+    "total_tokens": 3981,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T03:55:03Z",
+   "end": "2026-10-19T04:16:49Z",
+   "wall_s": 1306.31,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 987,
+    "prompt_tokens": 3971,
+    "total_tokens": 4958,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T04:16:49Z",
+   "end": "2026-10-19T04:21:15Z",
+   "wall_s": 265.64,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 326,
+    "prompt_tokens": 3240,
+    "total_tokens": 3566,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file",
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T04:21:15Z",
+   "end": "2026-10-19T04:27:47Z",
+   "wall_s": 392.43,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 413,
+    "prompt_tokens": 547,
+    "total_tokens": 960,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "shipped",
+   "start": "2026-10-19T04:21:39Z",
+   "end": "2026-10-19T04:34:42Z",
+   "wall_s": 782.47,
+   "status": 200,
+   "role": "other",
+   "usage": {
+    "completion_tokens": 1133,
+    "prompt_tokens": 569,
+    "total_tokens": 1702,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T01:46:41Z",
+   "end": "2026-10-19T01:50:15Z",
+   "wall_s": 213.82,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T01:50:17Z",
+   "end": "2026-10-19T01:50:17Z",
+   "wall_s": 0.0,
+   "status": 503,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T01:50:25Z",
+   "end": "2026-10-19T01:58:25Z",
+   "wall_s": 479.76,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 156,
+    "prompt_tokens": 2880,
+    "total_tokens": 3036,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:01:21Z",
+   "end": "2026-10-19T02:03:42Z",
+   "wall_s": 141.08,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T01:56:17Z",
+   "end": "2026-10-19T02:03:42Z",
+   "wall_s": 445.12,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T01:51:15Z",
+   "end": "2026-10-19T02:03:42Z",
+   "wall_s": 747.35,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:03:44Z",
+   "end": "2026-10-19T02:03:44Z",
+   "wall_s": 0.0,
+   "status": 503,
+   "role": "failure_analysis",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:03:52Z",
+   "end": "2026-10-19T02:09:50Z",
+   "wall_s": 357.71,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 578,
+    "prompt_tokens": 748,
+    "total_tokens": 1326,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:08:56Z",
+   "end": "2026-10-19T02:14:56Z",
+   "wall_s": 359.86,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 376,
+    "prompt_tokens": 748,
+    "total_tokens": 1124,
+    "prompt_tokens_details": {
+     "cached_tokens": 744
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:13:59Z",
+   "end": "2026-10-19T02:20:24Z",
+   "wall_s": 385.25,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 520,
+    "prompt_tokens": 748,
+    "total_tokens": 1268,
+    "prompt_tokens_details": {
+     "cached_tokens": 744
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:19:01Z",
+   "end": "2026-10-19T02:25:29Z",
+   "wall_s": 388.17,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 624,
+    "prompt_tokens": 748,
+    "total_tokens": 1372,
+    "prompt_tokens_details": {
+     "cached_tokens": 244
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:24:05Z",
+   "end": "2026-10-19T02:30:31Z",
+   "wall_s": 385.84,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 393,
+    "prompt_tokens": 748,
+    "total_tokens": 1141,
+    "prompt_tokens_details": {
+     "cached_tokens": 744
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:29:08Z",
+   "end": "2026-10-19T02:34:30Z",
+   "wall_s": 322.05,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 524,
+    "prompt_tokens": 748,
+    "total_tokens": 1272,
+    "prompt_tokens_details": {
+     "cached_tokens": 744
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:34:10Z",
+   "end": "2026-10-19T02:37:33Z",
+   "wall_s": 203.28,
+   "status": 200,
+   "role": "failure_analysis",
+   "usage": {
+    "completion_tokens": 436,
+    "prompt_tokens": 748,
+    "total_tokens": 1184,
+    "prompt_tokens_details": {
+     "cached_tokens": 744
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:38:00Z",
+   "end": "2026-10-19T02:40:33Z",
+   "wall_s": 153.19,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 87,
+    "prompt_tokens": 2873,
+    "total_tokens": 2960,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:37:36Z",
+   "end": "2026-10-19T02:42:27Z",
+   "wall_s": 291.57,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 448,
+    "prompt_tokens": 739,
+    "total_tokens": 1187,
+    "prompt_tokens_details": {
+     "cached_tokens": 235
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:40:33Z",
+   "end": "2026-10-19T02:47:38Z",
+   "wall_s": 424.4,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 473,
+    "prompt_tokens": 3351,
+    "total_tokens": 3824,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:45:35Z",
+   "end": "2026-10-19T02:49:00Z",
+   "wall_s": 204.25,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 267,
+    "prompt_tokens": 3351,
+    "total_tokens": 3618,
+    "prompt_tokens_details": {
+     "cached_tokens": 3347
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:49:00Z",
+   "end": "2026-10-19T02:53:07Z",
+   "wall_s": 246.93,
+   "status": 200,
+   "role": "other",
+   "usage": {
+    "completion_tokens": 865,
+    "prompt_tokens": 514,
+    "total_tokens": 1379,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:53:09Z",
+   "end": "2026-10-19T02:57:14Z",
+   "wall_s": 245.53,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:57:16Z",
+   "end": "2026-10-19T02:57:16Z",
+   "wall_s": 0.0,
+   "status": 503,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T02:57:43Z",
+   "end": "2026-10-19T03:04:08Z",
+   "wall_s": 384.31,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 60,
+    "prompt_tokens": 2882,
+    "total_tokens": 2942,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:02:46Z",
+   "end": "2026-10-19T03:06:57Z",
+   "wall_s": 251.09,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 172,
+    "prompt_tokens": 2882,
+    "total_tokens": 3054,
+    "prompt_tokens_details": {
+     "cached_tokens": 2878
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:06:59Z",
+   "end": "2026-10-19T03:09:36Z",
+   "wall_s": 156.83,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 86,
+    "prompt_tokens": 2908,
+    "total_tokens": 2994,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:09:36Z",
+   "end": "2026-10-19T03:16:38Z",
+   "wall_s": 421.62,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 693,
+    "prompt_tokens": 3386,
+    "total_tokens": 4079,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file",
+    "read_file",
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:14:38Z",
+   "end": "2026-10-19T03:19:42Z",
+   "wall_s": 303.15,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 418,
+    "prompt_tokens": 3386,
+    "total_tokens": 3804,
+    "prompt_tokens_details": {
+     "cached_tokens": 3382
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:19:43Z",
+   "end": "2026-10-19T03:23:51Z",
+   "wall_s": 248.17,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 241,
+    "prompt_tokens": 3386,
+    "total_tokens": 3627,
+    "prompt_tokens_details": {
+     "cached_tokens": 3382
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:30:29Z",
+   "end": "2026-10-19T03:37:55Z",
+   "wall_s": 445.64,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 188,
+    "prompt_tokens": 3971,
+    "total_tokens": 4159,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:35:31Z",
+   "end": "2026-10-19T03:44:00Z",
+   "wall_s": 509.25,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 178,
+    "prompt_tokens": 3971,
+    "total_tokens": 4149,
+    "prompt_tokens_details": {
+     "cached_tokens": 3967
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:40:35Z",
+   "end": "2026-10-19T03:50:03Z",
+   "wall_s": 567.94,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 739,
+    "prompt_tokens": 3971,
+    "total_tokens": 4710,
+    "prompt_tokens_details": {
+     "cached_tokens": 3967
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "write_library_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:55:06Z",
+   "end": "2026-10-19T04:12:29Z",
+   "wall_s": 1042.97,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 217,
+    "prompt_tokens": 3974,
+    "total_tokens": 4191,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:12:29Z",
+   "end": "2026-10-19T04:22:15Z",
+   "wall_s": 585.91,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 589,
+    "prompt_tokens": 4468,
+    "total_tokens": 5057,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T03:45:35Z",
+   "end": "2026-10-19T04:23:24Z",
+   "wall_s": 2268.54,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 1933,
+    "total_tokens": 3981,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:22:15Z",
+   "end": "2026-10-19T04:28:44Z",
+   "wall_s": 389.34,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 393,
+    "prompt_tokens": 4540,
+    "total_tokens": 4933,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:28:44Z",
+   "end": "2026-10-19T04:38:59Z",
+   "wall_s": 614.47,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 4594,
+    "total_tokens": 6642,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:40:37Z",
+   "end": "2026-10-19T04:45:53Z",
+   "wall_s": 315.7,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 195,
+    "prompt_tokens": 4666,
+    "total_tokens": 4861,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:45:53Z",
+   "end": "2026-10-19T04:50:15Z",
+   "wall_s": 262.07,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 135,
+    "prompt_tokens": 4775,
+    "total_tokens": 4910,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:39:23Z",
+   "end": "2026-10-19T04:55:03Z",
+   "wall_s": 940.09,
+   "status": 200,
+   "role": "verifier",
+   "usage": {
+    "completion_tokens": 450,
+    "prompt_tokens": 1577,
+    "total_tokens": 2027,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:50:15Z",
+   "end": "2026-10-19T05:00:04Z",
+   "wall_s": 588.27,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 425,
+    "prompt_tokens": 5528,
+    "total_tokens": 5953,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "write_library_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:55:25Z",
+   "end": "2026-10-19T05:05:40Z",
+   "wall_s": 615.07,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 1452,
+    "prompt_tokens": 4156,
+    "total_tokens": 5608,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T04:38:59Z",
+   "end": "2026-10-19T05:09:55Z",
+   "wall_s": 1856.12,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 1794,
+    "total_tokens": 3842,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:05:40Z",
+   "end": "2026-10-19T05:12:23Z",
+   "wall_s": 402.64,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 996,
+    "prompt_tokens": 5315,
+    "total_tokens": 6311,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "finalize_research"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:12:23Z",
+   "end": "2026-10-19T05:18:45Z",
+   "wall_s": 381.77,
+   "status": 200,
+   "role": "implementation",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 2372,
+    "total_tokens": 4420,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:20:24Z",
+   "end": "2026-10-19T05:27:22Z",
+   "wall_s": 418.53,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 237,
+    "prompt_tokens": 5382,
+    "total_tokens": 5619,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:18:46Z",
+   "end": "2026-10-19T05:31:30Z",
+   "wall_s": 764.54,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 345,
+    "prompt_tokens": 2951,
+    "total_tokens": 3296,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:19:10Z",
+   "end": "2026-10-19T05:32:47Z",
+   "wall_s": 816.63,
+   "status": 200,
+   "role": "verifier",
+   "usage": {
+    "completion_tokens": 631,
+    "prompt_tokens": 1565,
+    "total_tokens": 2196,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:27:23Z",
+   "end": "2026-10-19T05:37:07Z",
+   "wall_s": 584.71,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 4777,
+    "total_tokens": 6825,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": [
+    "write_library_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:37:07Z",
+   "end": "2026-10-19T05:41:55Z",
+   "wall_s": 287.37,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 500,
+    "prompt_tokens": 4841,
+    "total_tokens": 5341,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "read_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:43:33Z",
+   "end": "2026-10-19T05:50:00Z",
+   "wall_s": 386.9,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 335,
+    "prompt_tokens": 4915,
+    "total_tokens": 5250,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:41:55Z",
+   "end": "2026-10-19T05:53:47Z",
+   "wall_s": 711.55,
+   "status": 200,
+   "role": "plan_review",
+   "usage": {
+    "completion_tokens": 353,
+    "prompt_tokens": 1978,
+    "total_tokens": 2331,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:42:19Z",
+   "end": "2026-10-19T05:54:59Z",
+   "wall_s": 759.63,
+   "status": 200,
+   "role": "verifier",
+   "usage": {
+    "completion_tokens": 620,
+    "prompt_tokens": 1578,
+    "total_tokens": 2198,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "stop",
+   "tool_calls": []
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T05:50:00Z",
+   "end": "2026-10-19T06:00:08Z",
+   "wall_s": 607.3,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 2048,
+    "prompt_tokens": 5036,
+    "total_tokens": 7084,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "length",
+   "tool_calls": [
+    "write_library_file"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T06:00:08Z",
+   "end": "2026-10-19T06:02:37Z",
+   "wall_s": 148.93,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 202,
+    "prompt_tokens": 2870,
+    "total_tokens": 3072,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T06:02:37Z",
+   "end": "2026-10-19T06:05:01Z",
+   "wall_s": 144.76,
+   "status": 200,
+   "role": "research",
+   "usage": {
+    "completion_tokens": 166,
+    "prompt_tokens": 2896,
+    "total_tokens": 3062,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    "list_directory"
+   ]
+  },
+  {
+   "instance": "fixed",
+   "start": "2026-10-19T06:05:02Z",
+   "end": "2026-10-19T06:07:24Z",
+   "wall_s": 142.36,
+   "status": 502,
+   "role": "research",
+   "usage": null,
+   "finish_reason": null,
+   "tool_calls": []
+  }
+ ],
+ "server_history": [
+  "started 2607285 ctx=32768 n=4096",
+  "started 2619629 2026-10-19T01:33:23Z ctx=65536 n=4096 parallel=2",
+  "started 2634391 2026-10-19T01:44:36Z ctx=32768 n=2048 parallel=1",
+  "started 2638949 2026-10-19T01:50:14Z ctx=32768 n=2048 parallel=1",
+  "started 2654203 2026-10-19T02:03:43Z ctx=49152 n=2048 parallel=3",
+  "started 2661904 2026-10-19T02:57:14Z ctx=49152 n=2048 parallel=3 reasoning_budget=0"
+ ],
+ "operator_actions": [
+  "2026-10-19T01:39:51Z 7d94ba2f-88a9-4028-b22a-14a80f14d31b {\"status\":\"stopped\",\"task_id\":\"7d94ba2f-88a9-4028-b22a-14a80f14d31b\"}",
+  "2026-10-19T01:39:52Z 0120e578-6229-45f4-8475-3930fdd137f5 {\"status\":\"stopped\",\"task_id\":\"0120e578-6229-45f4-8475-3930fdd137f5\"}",
+  "2026-10-19T01:39:52Z f8878386-f135-4536-b213-22da3487b522 {\"status\":\"stopped\",\"task_id\":\"f8878386-f135-4536-b213-22da3487b522\"}",
+  "2026-10-19T01:39:52Z c1bd2d1d-8ae1-4d5d-871a-c0097df78588 {\"status\":\"stopped\",\"task_id\":\"c1bd2d1d-8ae1-4d5d-871a-c0097df78588\"}",
+  "2026-10-19T01:39:52Z 1496d66d-f69e-40e2-a4f1-c939b701351d {\"status\":\"stopped\",\"task_id\":\"1496d66d-f69e-40e2-a4f1-c939b701351d\"}",
+  "2026-10-19T01:39:52Z 8ff0426a-d3d1-4ca8-ad61-4ca215733572 {\"status\":\"stopped\",\"task_id\":\"8ff0426a-d3d1-4ca8-ad61-4ca215733572\"}",
+  "2026-10-19T01:39:52Z 82b1dac8-1f73-4ebe-8d0e-4a6a9f58a0a4 {\"status\":\"stopped\",\"task_id\":\"82b1dac8-1f73-4ebe-8d0e-4a6a9f58a0a4\"}",
+  "2026-10-19T01:39:52Z 28c2498a-172f-44a6-bb49-9749ea932c98 {\"status\":\"stopped\",\"task_id\":\"28c2498a-172f-44a6-bb49-9749ea932c98\"}",
+  "2026-10-19T01:42:48Z restart system: local_agent loop idle with queue_depth 1 after stop_task",
+  "2026-10-19T01:48:33Z stop stale semver tree c7b2b257 (interrupted by llama-server restart at 01:44:36Z)",
+  "2026-10-19T01:48:33Z pipe f4e7b2ce-9604-458a-ab5b-c6664a05041c {\"status\":\"stopped\",\"task_id\":\"f4e7b2ce-9604-458a-ab5b-c6664a05041c\"}",
+  "2026-10-19T01:50:51Z reset both instances (git clean -fdX) after zombie llama-servers returned 502s",
+  "2026-10-19T01:52:17Z stopping pending startup procedure steps (preflight self-checks) in both instances to save CPU; running step left alone",
+  "2026-10-19T01:52:17Z pipe 8b55f31c-b935-4603-8cd5-6d219c0db403 {\"status\":\"stopped\",\"task_id\":\"8b55f31c-b935-4603-8cd5-6d219c0db403\"}",
+  "2026-10-19T01:52:20Z pipe ad622b4b-6202-443c-8cc8-28b5e06cad08 {\"status\":\"stopped\",\"task_id\":\"ad622b4b-6202-443c-8cc8-28b5e06cad08\"}",
+  "2026-10-19T01:52:22Z pipe dc7093cc-18c8-4194-a919-5f380e5723ce {\"status\":\"stopped\",\"task_id\":\"dc7093cc-18c8-4194-a919-5f380e5723ce\"}",
+  "2026-10-19T01:52:24Z pipe cda0a2f1-653d-4142-ae74-a90f6f462de7 {\"status\":\"stopped\",\"task_id\":\"cda0a2f1-653d-4142-ae74-a90f6f462de7\"}",
+  "2026-10-19T01:52:26Z pipe 93e6896d-0e7b-48bf-a114-b517b9e367e9 {\"status\":\"stopped\",\"task_id\":\"93e6896d-0e7b-48bf-a114-b517b9e367e9\"}",
+  "2026-10-19T01:52:29Z pipe df8f80b8-e976-4dc9-bd1f-3b241547c57a {\"status\":\"stopped\",\"task_id\":\"df8f80b8-e976-4dc9-bd1f-3b241547c57a\"}",
+  "2026-10-19T01:52:31Z pipe 0876e1c5-0f5c-4ec2-a0d3-347e74f787e7 {\"status\":\"stopped\",\"task_id\":\"0876e1c5-0f5c-4ec2-a0d3-347e74f787e7\"}",
+  "2026-10-19T01:52:33Z pipe 769aa8f3-ed3f-49ba-92de-8b7a4906f0e8 {\"status\":\"stopped\",\"task_id\":\"769aa8f3-ed3f-49ba-92de-8b7a4906f0e8\"}",
+  "2026-10-19T01:52:35Z pipe d2217b63-ce39-4393-ab84-f301f1681085 {\"status\":\"stopped\",\"task_id\":\"d2217b63-ce39-4393-ab84-f301f1681085\"}",
+  "2026-10-19T01:52:38Z pipeC 4ffa44f5-86b5-439c-98ff-56c69040a4b3 {\"status\":\"stopped\",\"task_id\":\"4ffa44f5-86b5-439c-98ff-56c69040a4b3\"}",
+  "2026-10-19T01:52:40Z pipeC 071ebb6e-5d30-4520-8f37-31485e3ecad3 {\"status\":\"stopped\",\"task_id\":\"071ebb6e-5d30-4520-8f37-31485e3ecad3\"}",
+  "2026-10-19T01:52:42Z pipeC 9733a48a-1c7f-4ed3-aa48-96e22cc86329 {\"status\":\"stopped\",\"task_id\":\"9733a48a-1c7f-4ed3-aa48-96e22cc86329\"}",
+  "2026-10-19T01:52:44Z pipeC 9e36ae08-2b3d-448c-97af-e1408f77e8a2 {\"status\":\"stopped\",\"task_id\":\"9e36ae08-2b3d-448c-97af-e1408f77e8a2\"}",
+  "2026-10-19T01:52:47Z pipeC fb9321d4-7448-490d-bd8f-f7d3ee4e315c {\"status\":\"stopped\",\"task_id\":\"fb9321d4-7448-490d-bd8f-f7d3ee4e315c\"}",
+  "2026-10-19T01:52:49Z pipeC 03838cbc-4fce-4872-941d-e5135741ae04 {\"status\":\"stopped\",\"task_id\":\"03838cbc-4fce-4872-941d-e5135741ae04\"}",
+  "2026-10-19T02:03:31Z restart llama-server parallel=3 ctx 49152 (16384/slot, as the first bench) so each client keeps its own prompt cache",
+  "2026-10-19T02:04:54Z pipe: admin stop commands for pending startup procedure steps not consumed by worker after 12 min; cancelled them directly in the scratch DB",
+  "2026-10-19T02:04:54Z pipeC: admin stop commands for pending startup procedure steps not consumed by worker after 12 min; cancelled them directly in the scratch DB",
+  "2026-10-19T02:29:09Z pipe: cancel pending startup-procedure tasks in scratch DB (admin stop not applied)",
+  "2026-10-19T02:29:09Z pipeC: cancel pending startup-procedure tasks in scratch DB (admin stop not applied)",
+  "pipe cancelled 2",
+  "pipeC cancelled 6",
+  "2026-10-19T02:57:04Z raw bowling with reasoning on hit the 2048-token cap (finish=length, no answer) after 962 s; switching all conditions to --reasoning-budget 0",
+  "2026-10-19T02:57:27Z reset both instances (git clean -fdX) after zombie llama-servers returned 502s",
+  "2026-10-19T02:59:47Z pipeC: cancel pending startup-procedure tasks in scratch DB (admin stop not applied)",
+  "2026-10-19T02:59:47Z pipe: cancel pending startup-procedure tasks in scratch DB (admin stop not applied)",
+  "pipeC cancelled 6",
+  "2026-10-19T03:19:43Z pipe: worker stopped; agent-preflight root marked COMPLETE and startup-procedure tasks cancelled in scratch DB; worker restarted",
+  "2026-10-19T03:19:54Z pipeC: worker stopped; agent-preflight root marked COMPLETE and startup-procedure tasks cancelled in scratch DB; worker restarted",
+  "2026-10-19T03:30:24Z pipe: worker restarted (local_agent loop idle with queued work)",
+  "2026-10-19T03:30:27Z pipeC: worker restarted (local_agent loop idle with queued work)",
+  "2026-10-19T03:52:36Z pipe: cancelled open trees after 300 s model read timeouts; workers restart with STRATA_MODEL_READ_TIMEOUT_S=3600",
+  "2026-10-19T03:52:36Z pipeC: cancelled open trees after 300 s model read timeouts; workers restart with STRATA_MODEL_READ_TIMEOUT_S=3600",
+  "2026-10-19T03:55:01Z pipe: worker restarted (local_agent loop idle with queued work: status IDLE, queue_depth 1)",
+  "2026-10-19T03:55:04Z pipeC: worker restarted (local_agent loop idle with queued work: status IDLE, queue_depth 1)",
+  "2026-10-19T04:07:17Z raw pilot stopped after 4 tasks (all failed) to give the two pipeline instances the CPU",
+  "2026-10-19T04:28:27Z B stopped after bowling showed the as-shipped path (IMPL -> research tool -> RESEARCH continuation, no code); CPU given to C",
+  "2026-10-19T04:52:50Z C: bowling recorded; driver v2 stopped; v3 (worker-restart kick) continues",
+  "2026-10-19T04:55:23Z pipeC: worker restarted (local_agent loop idle with queued work: status IDLE, queue_depth 1)",
+  "2026-10-19T05:13:27Z C: driver detached during poker (research finalized, implementation running) so the tree can run past 60 min; snapshot later with collect_tree.py",
+  "2026-10-19T06:07:18Z C poker snapshot taken; stopping all bench processes"
+ ],
+ "notes": [
+  "operator_actions line '2026-10-19T02:57:27Z reset both instances (git clean -fdX) after zombie llama-servers returned 502s' carries the reset script's fixed message; that second reset was for the switch to --reasoning-budget 0 (line 02:57:04Z).",
+  "pipeline_shipped 'bowling' and pipeline_fixed 'poker_hands' are operator snapshots of still-open task trees (settle=operator_snapshot); pipeline_fixed 'bowling' ended at the driver's 60-minute timeout.",
+  "model_calls includes calls Strata had already abandoned at its 8 s plan-review and 90 s verifier timeouts; the metering proxy did not forward the disconnect, so they ran to completion on the server.",
+  "Candidate content of '' means the candidate file existed but was empty (the implementation reply's content was empty after 2048 tokens)."
+ ]
+}

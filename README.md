@@ -35,20 +35,27 @@ The usual move is "use a bigger model." Strata moves the intelligence out of the
 
 ## What has been measured
 
-Measured October 19, 2026, using the README's default agent model (a 4B Qwen3.5 reasoning distill, Q4_K_M) on a 4-core ARM CPU with no GPU. Each item was run twice, through the eval harness and as a raw prompt; grading is deterministic (exact match or multiple choice, no LLM judge).
+Measured October 19, 2026, using the README's default agent model (a 4B Qwen3.5 reasoning distill, Q4_K_M) on a shared 4-core ARM CPU with no GPU. Details, every run and every operator action: [docs/results.md](docs/results.md).
 
-| Suite | Raw model | Harness |
-|---|---|---|
-| 20 mixed items (6 about Strata, 14 general) | 75% | 100% |
-| 5 items about Strata's operating model | 60% | 100% |
+**The refinery on real coding tasks: no improvement measured.**
 
-The gap is real, but narrower than it looks:
+The tasks were small Python functions graded only by their unit tests: a bowling scorer, a poker-hand comparator, an expression evaluator and a glob matcher. The model saw the spec and the full test file.
 
-- The raw model got every general item right, and so did the harness: instruction following, multi-step arithmetic and format compliance.
-- Six of the seven raw misses named the correct letter but wrapped it in an explanation, which the multiple-choice grader misreads.
-- Only one miss was a fact the model could not know without the project context.
+- **Raw model:** one call per task. It failed all four.
+- **Strata as shipped:** run the way a user runs it, with the API and worker started and the task submitted as an IMPL task with its tests as the declared validator. It wrote no code. The implementation step starts with one research call. That call used a tool, so the task turned into a research chain that never returned to writing code.
+- **Strata with a reviewed fix:** the chain goes back to implementation, and the declared tests now gate the attempt. The model still kept choosing research tools: it finished research in 2 of 49 logged research calls. In that one case the implementation call ran out of output tokens. The tests caught the empty file and the failure went into the retry machinery. No passing code came out.
 
-So what is measured here is that the scaffold makes a small model's answers usable and supplies missing project knowledge. The full refinery (decomposition, verification, retries) and self-improvement are not measured yet. Details, conditions and every answer: [docs/results.md](docs/results.md).
+Running Strata against a real model also found and fixed:
+
+- the README's run command started no worker;
+- a fixed 5-minute model timeout that a CPU-only host cannot meet;
+- a test validator that could not pass.
+
+The verifier's 90-second timeout still means it never runs on such a host. Coverage was small (one task through the shipped pipeline, two through the fixed one) because each pipeline call took 2 to 22 minutes on this host. A fuller run needs a faster machine.
+
+**The earlier context-only bench, corrected.** That bench sent one call with Strata's eval system prompt and project documents. It never exercised the refinery. Its multiple-choice grader read the article "a" and option headings as answers. With the grader fixed, the raw model scored 95% against the scaffold's 100% on 20 mixed items, and 100% against 100% on 5 items about Strata. The originally published raw scores were 75% and 60%. The one real difference is a fact about Strata that the raw model could not know.
+
+**Self-improvement: not measured.** The promotion cycle scores proposals with a cloud judge model. It cannot run with only a local model.
 
 ## Quickstart
 
@@ -72,8 +79,10 @@ Needs Python 3.11+ (the pinned SQLAlchemy 2.1 requires it) and Node 20.19+. Test
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-PYTHONPATH=. ./venv/bin/python strata/api/main.py      # API on http://127.0.0.1:8000
+START_BOOTSTRAP_SUPERVISOR=0 ./scripts/start_system.sh  # API on http://127.0.0.1:8000, plus the worker
 ```
+
+The API alone (`PYTHONPATH=. ./venv/bin/python strata/api/main.py`) serves the workbench but runs no tasks. The worker is a separate process, `scripts/worker_daemon.py`, and `start_system.sh` starts both, with logs in `strata/runtime/`. Leave out `START_BOOTSTRAP_SUPERVISOR=0` to also start the self-improvement supervisor, which needs a cloud trainer key. On a slow CPU-only host, set `STRATA_MODEL_READ_TIMEOUT_S` (default 300) above your longest model call.
 
 In a second terminal:
 
@@ -113,7 +122,7 @@ Start the API once first (as in Real mode above); it creates the database tables
 ./venv/bin/python -m pytest tests
 ```
 
-At this snapshot, with the API started first: **273 passed, 15 failed** of 288. On a fresh clone where the API has never run, the result is 270 passed and 18 failed, because those tables don't exist yet. One more test, `test_context_load_can_buffer_before_flush`, depends on timing and occasionally fails on a busy machine. The 15 failures below predate the snapshot and were left as found:
+At this snapshot, with the API started first: **300 passed, 15 failed** of 315. On a fresh clone where the API has never run, the result is 297 passed and 18 failed, because those tables don't exist yet. One more test, `test_context_load_can_buffer_before_flush`, depends on timing and occasionally fails on a busy machine. The 15 failures below predate the snapshot and were left as found:
 
 <details>
 <summary>Known failing tests</summary>
@@ -139,6 +148,19 @@ PYTHONPATH=. ./venv/bin/python scripts/bench_refinery.py \
 ```
 
 It runs the bundled suites raw and through the harness on the local agent tier only (no cloud calls), then rewrites the generated block of `docs/results.md` and `docs/results/refinery-bench.json`. At about 8 tokens per second, two reps take about 1.5 hours.
+
+### Re-running the refinery bench
+
+`scripts/refinery_tasks/` runs the coding-task suite (`strata/eval/suites/refinery_tasks_v1`) raw and through a running Strata:
+
+```bash
+PYTHONPATH=. ./venv/bin/python scripts/refinery_tasks/raw_pilot.py . \
+  http://127.0.0.1:1234/v1/chat/completions raw.jsonl --ids bowling,poker_hands
+PYTHONPATH=. ./venv/bin/python scripts/refinery_tasks/run_pipeline.py pipeline.jsonl proxy.jsonl \
+  --ids bowling,poker_hands --timeout-min 60
+```
+
+`run_pipeline.py` expects the API and worker to be running, as in Real mode. To count every model call, put `scripts/refinery_tasks/meter_proxy.py` between Strata and the model server, and pass its log as `proxy.jsonl`.
 
 ### Regenerating the demo data
 
