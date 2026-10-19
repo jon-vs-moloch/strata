@@ -5,8 +5,18 @@ from types import SimpleNamespace
 import sys
 
 from strata.orchestrator.user_questions import enqueue_user_question, get_question_for_source
-from strata.orchestrator.worker.resolution_policy import apply_resolution, determine_resolution
-from strata.orchestrator.worker.plan_review import generate_plan_review
+from strata.orchestrator.worker.resolution_policy import (
+    DEFAULT_VALIDATOR_RETRY_LIMIT,
+    apply_resolution,
+    determine_resolution,
+    should_retry_validator_rejection,
+    validator_retry_limit,
+)
+from strata.orchestrator.worker.plan_review import (
+    DEFAULT_PLAN_REVIEW_TIMEOUT_S,
+    generate_plan_review,
+    plan_review_timeout_s,
+)
 from strata.orchestrator.research import ResearchIterationLimitError
 from strata.schemas.core import AttemptResolutionSchema
 from strata.storage.models import AttemptOutcome, TaskState, TaskType
@@ -539,3 +549,114 @@ def test_generate_plan_review_prompt_includes_attempt_intelligence():
     assert review["recommendation"] == "internal_replan"
     assert "Attempt Intelligence:" in prompt
     assert "network_timeout" in prompt
+
+
+# ── Operator-tunable plan review timeout ─────────────────────────────────────
+
+
+def test_plan_review_timeout_defaults_to_8_seconds(monkeypatch):
+    monkeypatch.delenv("STRATA_PLAN_REVIEW_TIMEOUT_S", raising=False)
+    assert plan_review_timeout_s() == DEFAULT_PLAN_REVIEW_TIMEOUT_S == 8.0
+
+
+def test_plan_review_timeout_reads_environment_override(monkeypatch):
+    monkeypatch.setenv("STRATA_PLAN_REVIEW_TIMEOUT_S", "2.5")
+    assert plan_review_timeout_s() == 2.5
+
+
+# ── One validator-driven retry before other resolutions ──────────────────────
+
+VALIDATOR_REJECTION_MESSAGE = (
+    "Declared validator rejected every implementation candidate: "
+    "E AttributeError: module has no attribute 'compare'"
+)
+
+
+class ValidatorRejectionError(RuntimeError):
+    failure_kind = "validator_failed"
+
+
+def _storage_with_validator_rejections(count):
+    return DummyStorage(
+        attempts_by_task={
+            "root": [
+                SimpleNamespace(
+                    outcome=AttemptOutcome.FAILED,
+                    reason=VALIDATOR_REJECTION_MESSAGE,
+                    started_at=f"2026-01-01T00:00:0{index}",
+                )
+                for index in range(1, count + 1)
+            ]
+        }
+    )
+
+
+def _multistage_task():
+    # Title/description from test_multistage_task_deterministically_decomposes:
+    # on their own they deterministically decompose, so only the validator retry
+    # rule can turn the resolution into "reattempt".
+    task = DummyTask()
+    task.title = "Inspect, patch, and validate parser bug"
+    task.description = "Inspect the failure, patch the parser, then validate with tests."
+    return task
+
+
+def test_validator_retry_limit_defaults_to_1(monkeypatch):
+    monkeypatch.delenv("STRATA_VALIDATOR_RETRY_LIMIT", raising=False)
+    assert validator_retry_limit() == DEFAULT_VALIDATOR_RETRY_LIMIT == 1
+
+
+def test_should_retry_validator_rejection_ignores_other_failures():
+    assert should_retry_validator_rejection(DummyTask(), RuntimeError("generic"), _storage_with_validator_rejections(1)) is False
+
+
+def test_determine_resolution_retries_validator_rejection_once_before_decompose(monkeypatch):
+    monkeypatch.delenv("STRATA_VALIDATOR_RETRY_LIMIT", raising=False)
+    storage = _storage_with_validator_rejections(1)
+
+    resolution = asyncio.run(
+        determine_resolution(
+            _multistage_task(),
+            ValidatorRejectionError(VALIDATOR_REJECTION_MESSAGE),
+            PromptCapturingModel(),
+            storage,
+        )
+    )
+
+    assert resolution.resolution == "reattempt"
+    assert "validator" in resolution.reasoning.lower()
+    assert "failure log" in resolution.reasoning
+
+
+def test_determine_resolution_falls_through_after_validator_retry_budget(monkeypatch):
+    monkeypatch.delenv("STRATA_VALIDATOR_RETRY_LIMIT", raising=False)
+    storage = _storage_with_validator_rejections(2)
+
+    resolution = asyncio.run(
+        determine_resolution(
+            _multistage_task(),
+            ValidatorRejectionError(VALIDATOR_REJECTION_MESSAGE),
+            PromptCapturingModel(),
+            storage,
+        )
+    )
+
+    assert resolution.resolution != "reattempt"
+    assert resolution.resolution == "decompose"
+
+
+def test_determine_resolution_disables_validator_retry_via_environment(monkeypatch):
+    monkeypatch.setenv("STRATA_VALIDATOR_RETRY_LIMIT", "0")
+    storage = _storage_with_validator_rejections(1)
+
+    resolution = asyncio.run(
+        determine_resolution(
+            _multistage_task(),
+            ValidatorRejectionError(VALIDATOR_REJECTION_MESSAGE),
+            PromptCapturingModel(),
+            storage,
+        )
+    )
+
+    assert resolution.resolution != "reattempt"
+    assert resolution.resolution == "decompose"

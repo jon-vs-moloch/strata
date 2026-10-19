@@ -6,7 +6,6 @@
 
 import httpx
 import asyncio
-import os
 import json
 import re
 from typing import Any, Dict, Optional, List, Literal
@@ -17,6 +16,7 @@ from threading import Lock
 import time
 from pydantic import BaseModel, Field
 
+from strata.core.env_settings import env_seconds
 from strata.observability.writer import enqueue_provider_observability_snapshot, flush_observability_writes
 from strata.observability.host import get_host_telemetry_snapshot
 from strata.storage.models import ProviderTelemetrySnapshotModel
@@ -629,7 +629,7 @@ class GenericOpenAICompatibleProvider(BaseModelProvider):
             timeout = httpx.Timeout(timeout_arg)
         else:
             # A CPU-only host can need more than 5 minutes for one long prompt; let the operator raise the read timeout.
-            read_timeout_s = float(os.environ.get("STRATA_MODEL_READ_TIMEOUT_S") or 300.0)
+            read_timeout_s = env_seconds("STRATA_MODEL_READ_TIMEOUT_S", 300.0)
             timeout = httpx.Timeout(connect=10.0, read=read_timeout_s, write=30.0, pool=10.0)
 
         state = self._get_throttle_state(kwargs)

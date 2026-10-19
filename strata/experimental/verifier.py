@@ -13,11 +13,22 @@ from threading import Lock
 from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple
 
+from strata.core.env_settings import env_seconds
 from strata.core.lanes import infer_lane_from_task
 from strata.experimental.trace_review import build_task_trace_summary
 from strata.feedback.signals import register_feedback_signal
 from strata.observability.writer import enqueue_attempt_observability_artifact, flush_observability_writes
 from strata.storage.models import AttemptModel, AttemptOutcome, AttemptObservabilityArtifactModel, TaskModel
+
+
+DEFAULT_VERIFIER_TIMEOUT_S = 90.0
+
+
+def verifier_timeout_s() -> float:
+    """
+    @summary Operator-tunable verifier model call timeout in seconds.
+    """
+    return env_seconds("STRATA_VERIFIER_TIMEOUT_S", DEFAULT_VERIFIER_TIMEOUT_S)
 
 
 VERIFIER_REGISTRY_KEY = "output_verifier_registry"
@@ -484,16 +495,17 @@ Verification policy:
 Verification summary:
 {json.dumps(summary_payload, indent=2)}
 """.strip()
+        timeout_s = verifier_timeout_s()
         try:
             response = await asyncio.wait_for(
                 model_adapter.chat([{"role": "user", "content": prompt}], temperature=0.0),
-                timeout=90.0,
+                timeout=timeout_s,
             )
         except asyncio.TimeoutError:
             response = {
                 "content": "",
                 "status": "error",
-                "message": "Verifier model timed out after 90s",
+                "message": f"Verifier model timed out after {timeout_s:g}s",
                 "usage": {},
             }
         raw_content = response.get("content", "")

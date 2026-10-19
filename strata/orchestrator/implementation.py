@@ -9,6 +9,7 @@
 
 from typing import List, Dict, Any, Optional
 from strata.schemas.core import ResearchReport, ResearchReport as LocalResearchReport
+from strata.core.env_settings import env_int
 import os
 import json
 import httpx
@@ -77,6 +78,38 @@ IMPLEMENTATION_META_TOOLS = [
         }
     }
 ]
+
+DEFAULT_IMPL_RESEARCH_STEP_BUDGET = 3
+IMPL_RESEARCH_NOTE_CHARS = 800
+
+
+def impl_research_step_budget(constraints: dict) -> int:
+    """
+    @summary Resolve the research-step budget for an IMPL task (0 means unlimited).
+    @inputs constraints: task constraints dict, may carry impl_research_step_budget
+    @outputs non-negative step budget
+    """
+    raw = (constraints or {}).get("impl_research_step_budget")
+    if raw is not None:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value >= 0:
+            return value
+    return env_int("STRATA_IMPL_RESEARCH_STEP_BUDGET", DEFAULT_IMPL_RESEARCH_STEP_BUDGET)
+
+
+def _render_research_notes(notes: list) -> str:
+    blocks = []
+    for index, raw_note in enumerate(list(notes or []), start=1):
+        note = dict(raw_note or {})
+        blocks.append(
+            f"Step {index}: {note.get('tool')}({json.dumps(note.get('arguments') or {}, sort_keys=True)})\n"
+            f"{note.get('result') or ''}"
+        )
+    return "\n\n".join(blocks) if blocks else "No research findings were recorded; work from the task description."
+
 
 class ImplementationModule:
     """
@@ -179,13 +212,14 @@ class ImplementationModule:
     ) -> List[str] | TerminalToolCallOutcome:
         """
         @summary Execute a coding task with a two-pass research strategy.
+        @note Research is budgeted: once impl_research_steps reaches the step budget the task implements from its recorded research notes.
         """
         # Fetch task details from DB
         from strata.storage.models import TaskModel, CandidateModel
         task = self.storage.session.query(TaskModel).filter_by(task_id=task_id).first()
         if not task:
             return []
-            
+
         print(f"Implementing leaf task: {task.title}...")
         task_context = dict(task_context or {})
         task_graph_context = dict(task_context.get("task_trajectory") or {}) or _task_graph_snapshot(
@@ -196,24 +230,48 @@ class ImplementationModule:
             },
         )
         task_graph_block = _render_task_graph_prompt_block(task_graph_context)
-        
+
         # Pass 2: Local Research focused on the Files
-        local_research = await self.researcher.conduct_research(
-            task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
-            repo_path=task.repo_path,
-            context_hints={**dict(task.constraints or {}), "task_trajectory": task_graph_context},
-            task_context={
-                "task_id": task.task_id,
-                "parent_task_id": task.parent_task_id,
-                "title": task.title,
-                "type": getattr(task.type, "value", str(task.type)),
-                "state": getattr(task.state, "value", str(task.state)),
-                "session_id": task.session_id,
-                "task_trajectory": task_graph_context,
-            },
-            progress_fn=progress_fn,
-            attempt_id=attempt_id,
-        )
+        constraints = dict(task.constraints or {})
+        try:
+            steps_taken = int(constraints.get("impl_research_steps") or 0)
+        except (TypeError, ValueError):
+            steps_taken = 0
+        budget = impl_research_step_budget(constraints)
+        if budget > 0 and steps_taken >= budget:
+            local_research = ResearchReport(
+                context_gathered=_render_research_notes(constraints.get("impl_research_notes")),
+                key_constraints_discovered=[],
+                suggested_approach=(
+                    "The research step budget is spent; implement now from the gathered context "
+                    "and the task description."
+                ),
+                reference_urls=[],
+            )
+            if progress_fn:
+                progress_fn(
+                    step="research_budget",
+                    label="Research budget spent",
+                    detail=f"{steps_taken} of {budget} research steps used; generating code",
+                    attempt_id=attempt_id,
+                )
+        else:
+            local_research = await self.researcher.conduct_research(
+                task_description=f"Analyze files {task.constraints.get('target_files', [])} to implement: {task.description}",
+                repo_path=task.repo_path,
+                context_hints={**dict(task.constraints or {}), "task_trajectory": task_graph_context},
+                task_context={
+                    "task_id": task.task_id,
+                    "parent_task_id": task.parent_task_id,
+                    "title": task.title,
+                    "type": getattr(task.type, "value", str(task.type)),
+                    "state": getattr(task.state, "value", str(task.state)),
+                    "session_id": task.session_id,
+                    "task_trajectory": task_graph_context,
+                },
+                progress_fn=progress_fn,
+                attempt_id=attempt_id,
+            )
         if isinstance(local_research, TerminalToolCallOutcome):
             # Re-point the research handoff back at implementation, otherwise the
             # follow-up stays plain research and the IMPL task never produces code.
@@ -223,6 +281,18 @@ class ImplementationModule:
             # Keep one prefix: a continuation of a continuation would otherwise stack them.
             local_research.continuation_title = (base_title if base_title.startswith(prefix) else prefix + base_title)[:200]
             local_research.continuation_description = task.description
+            continuation_constraints = dict(local_research.continuation_constraints or {})
+            notes = list(constraints.get("impl_research_notes") or [])
+            notes.append(
+                {
+                    "tool": local_research.tool_name,
+                    "arguments": dict(local_research.tool_arguments or {}),
+                    "result": str(local_research.tool_result_preview or "")[:IMPL_RESEARCH_NOTE_CHARS],
+                }
+            )
+            continuation_constraints["impl_research_steps"] = steps_taken + 1
+            continuation_constraints["impl_research_notes"] = notes[-(max(budget, 1) if budget > 0 else 3):]
+            local_research.continuation_constraints = continuation_constraints
             return local_research
 
         # Get past failures to avoid infinite loops

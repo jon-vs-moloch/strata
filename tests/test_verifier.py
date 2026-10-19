@@ -4,9 +4,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.experimental.verifier import (
+    DEFAULT_VERIFIER_TIMEOUT_S,
     emit_verifier_attention_signal,
     repo_fact_contradictions,
     select_verification_policy,
+    verifier_timeout_s,
     verify_artifact,
     verify_task_output,
 )
@@ -185,6 +187,70 @@ def test_verify_task_output_can_use_model_judgment_when_no_contradiction_exists(
     assert artifact["verification_kind"] == "model"
     assert artifact["verdict"] == "uncertain"
     assert signal is not None
+
+
+# ── Verifier timeout is operator-tunable ─────────────────────────────────────
+
+
+class SlowModelAdapter:
+    """Chat that sleeps longer than the verifier timeout and parses its own JSON."""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.calls = 0
+
+    async def chat(self, *_args, **_kwargs):
+        self.calls += 1
+        await asyncio.sleep(self.seconds)
+        return {"status": "success", "content": '{"verdict":"good","confidence":0.9}'}
+
+    def extract_structured_object(self, raw_content):
+        import json
+
+        if not raw_content:
+            raise ValueError("empty verifier response")
+        return json.loads(raw_content)
+
+
+def test_verifier_timeout_defaults_to_90_seconds(monkeypatch):
+    monkeypatch.delenv("STRATA_VERIFIER_TIMEOUT_S", raising=False)
+    assert verifier_timeout_s() == DEFAULT_VERIFIER_TIMEOUT_S == 90.0
+
+
+def test_verifier_timeout_reads_environment_override(monkeypatch):
+    monkeypatch.setenv("STRATA_VERIFIER_TIMEOUT_S", "42")
+    assert verifier_timeout_s() == 42.0
+
+
+def test_verify_task_output_turns_model_timeout_into_uncertain(monkeypatch):
+    storage = make_storage()
+    task = storage.tasks.create(
+        title="Trainer summary",
+        description="Summarize the latest repo state carefully.",
+        session_id="trainer:default",
+        state=TaskState.COMPLETE,
+        type=TaskType.RESEARCH,
+        constraints={"lane": "trainer"},
+    )
+    attempt = storage.attempts.create(task_id=task.task_id)
+    attempt.outcome = AttemptOutcome.SUCCEEDED
+    storage.commit()
+
+    monkeypatch.setenv("STRATA_VERIFIER_TIMEOUT_S", "0.01")
+    adapter = SlowModelAdapter(1)
+    artifact = asyncio.run(
+        verify_task_output(
+            storage,
+            task=task,
+            attempt=attempt,
+            model_adapter=adapter,
+            context=TrainerExecutionContext(run_id="verify-timeout"),
+        )
+    )
+
+    assert adapter.calls == 1
+    assert artifact["verification_kind"] == "model"
+    assert artifact["verdict"] == "uncertain"
 
 
 # ── Annealing table: exact cadences at each threshold ───────────────────────

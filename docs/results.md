@@ -96,7 +96,7 @@ Code references are at `35bd2a32` unless noted.
 4. **A declared validator never gates success.** `EvaluationPipeline.evaluate_candidate` ran only on the failure path, for a metric (`strata/orchestrator/background.py:2100-2122`). Fixed in `751d2d0b`, with the empty-candidate hole closed in the nits commit.
 5. **The pytest validator could not pass.** It wrote the fenced answer, prose included, into the `.py` file. It called a bare `pytest`, and it copied `venv/` into its sandbox on every run. Fixed in `751d2d0b`.
 6. **The model read timeout was a fixed 300 s** (`strata/models/providers.py:630`). On this host long calls took up to 22 minutes. Each one failed three times and was resolved as transient, so no task got past its first step. `STRATA_MODEL_READ_TIMEOUT_S` now sets it; the bench used 3600.
-7. **The verifier and plan-review timeouts (90 s and 8 s) are fixed in code.** On slow hardware the verifier never runs. Not changed here.
+7. **The verifier and plan-review timeouts (90 s and 8 s) are fixed in code.** On slow hardware the verifier never runs. Not changed in this bench; since then `STRATA_VERIFIER_TIMEOUT_S` and `STRATA_PLAN_REVIEW_TIMEOUT_S` set them (defaults unchanged). See "Changes since this bench" below.
 8. **Startup self-checks run before user work and are expensive.** On a fresh database the worker queues the "Preflight" and "Agent Preflight" procedures, and the user's tasks wait behind them. On this host they made real model calls for over 40 minutes without finishing, and the bench cancelled them.
 9. **Operator stop did not take effect while the worker was busy.** `POST /admin/tasks/{id}/stop` returned "stopped" for pending tasks, but the worker had not applied the commands 12 minutes later. A direct SQLite update during that time failed with "database is locked". This looks like the worker holding a write transaction across model calls; that cause is not verified.
 10. **The worker sometimes sat idle with work queued.** Status was `IDLE` with `queue_depth: 1` after a restart or an idle spell, and this was seen four times. Each time, restarting the worker started the task. The root cause was not found. The bench driver therefore restarts the worker if no attempt starts within 150 s (`--kick-cmd`), and records each restart.
@@ -131,11 +131,20 @@ Every operator action is in the benchmark record, with its UTC time.
 ### Open items
 
 - Re-run on a host with a GPU, or at least an unshared CPU. Run all 16 tasks, two reps, with reasoning on and a larger output cap.
-- A configurable or adaptive verifier and plan-review timeout (defect 7).
+- An adaptive verifier and plan-review timeout. Defect 7 is now configurable (below), not adaptive.
+- A research step that ends with no tool call is still resolved as `decompose` (seen once on `bowling`). The research budget below does not cover that path.
 - The idle-worker and stop-not-applied defects (9, 10) need a reproduction with a stack dump.
 - Review nits left open:
   - the fence rule ("```python3" leaves a stray "3", STRATA-EVAL-02, P3);
   - the grader reads "Answer A says …, Answer B says …" as B.
+
+### Changes since this bench (not yet measured)
+
+Three fixes for what the run exposed. None has been re-measured; the rerun above will.
+
+- **Configurable timeouts (defect 7).** `STRATA_VERIFIER_TIMEOUT_S` (default 90) and `STRATA_PLAN_REVIEW_TIMEOUT_S` (default 8) set the verifier and failure-time plan-review timeouts, like `STRATA_MODEL_READ_TIMEOUT_S` (default 300). An invalid or non-positive value falls back to the default with a warning (`strata/core/env_settings.py`).
+- **Research-step budget for coding tasks.** An IMPL task's research step either calls `finalize_research` or runs one tool and hands off to an IMPL continuation. Each continuation now carries a step count and a short note of each tool result (`impl_research_steps`, `impl_research_notes`, up to 800 characters per note). Once the count reaches `STRATA_IMPL_RESEARCH_STEP_BUDGET` (default 3; 0 = no budget), the task skips research and generates code from those notes and the task description. A task can override the budget with the `impl_research_step_budget` constraint.
+- **One retry after a validator rejection.** When the declared validator rejects every candidate, the resolution policy now returns `reattempt` before any other rule, and the failure-time plan review cannot override it. The retry's prompt already lists earlier failures with their reasons, so it carries the test output. After `STRATA_VALIDATOR_RETRY_LIMIT` rejections (default 1; 0 = off) the existing rules apply again, which on `poker_hands` meant `decompose`.
 
 ## Context-only scaffold bench (October 19, 2026, superseded)
 

@@ -4,10 +4,20 @@
 """
 
 import logging
+from strata.core.env_settings import env_seconds
 from strata.experimental.trace_review import build_attempt_intelligence, render_attempt_intelligence
 from strata.storage.models import TaskModel, AttemptModel
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PLAN_REVIEW_TIMEOUT_S = 8.0
+
+
+def plan_review_timeout_s() -> float:
+    """
+    @summary Operator-tunable failure-time plan review timeout in seconds.
+    """
+    return env_seconds("STRATA_PLAN_REVIEW_TIMEOUT_S", DEFAULT_PLAN_REVIEW_TIMEOUT_S)
 
 async def generate_plan_review(task: TaskModel, attempt: AttemptModel, model_adapter, storage) -> dict:
     """

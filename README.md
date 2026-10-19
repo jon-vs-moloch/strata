@@ -82,7 +82,7 @@ python3 -m venv venv
 START_BOOTSTRAP_SUPERVISOR=0 ./scripts/start_system.sh  # API on http://127.0.0.1:8000, plus the worker
 ```
 
-The API alone (`PYTHONPATH=. ./venv/bin/python strata/api/main.py`) serves the workbench but runs no tasks. The worker is a separate process, `scripts/worker_daemon.py`, and `start_system.sh` starts both, with logs in `strata/runtime/`. Leave out `START_BOOTSTRAP_SUPERVISOR=0` to also start the self-improvement supervisor, which needs a cloud trainer key. On a slow CPU-only host, set `STRATA_MODEL_READ_TIMEOUT_S` (default 300) above your longest model call.
+The API alone (`PYTHONPATH=. ./venv/bin/python strata/api/main.py`) serves the workbench but runs no tasks. The worker is a separate process, `scripts/worker_daemon.py`, and `start_system.sh` starts both, with logs in `strata/runtime/`. Leave out `START_BOOTSTRAP_SUPERVISOR=0` to also start the self-improvement supervisor, which needs a cloud trainer key. On a slow CPU-only host, set `STRATA_MODEL_READ_TIMEOUT_S` (default 300) above your longest model call. `STRATA_VERIFIER_TIMEOUT_S` (default 90) and `STRATA_PLAN_REVIEW_TIMEOUT_S` (default 8) set the verifier and failure-time plan review call timeouts. `STRATA_IMPL_RESEARCH_STEP_BUDGET` (default 3; 0 = unlimited) caps how many research tool steps a coding task takes before it writes code from what it has gathered, and `STRATA_VALIDATOR_RETRY_LIMIT` (default 1; 0 = off) is how many times a validator rejection is retried with the test output before the task is restructured.
 
 In a second terminal:
 

@@ -16,6 +16,7 @@ from strata.storage.models import TaskModel, AttemptModel, AttemptResolution, At
 from strata.schemas.core import AttemptResolutionSchema, SubtaskDraft
 from strata.core.policy import requires_validator
 from strata.orchestrator.research import load_research_iteration_policy
+from strata.core.env_settings import env_int
 from strata.orchestrator.user_questions import (
     enqueue_user_question,
     ensure_question_escalation_for_source,
@@ -23,6 +24,16 @@ from strata.orchestrator.user_questions import (
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_VALIDATOR_RETRY_LIMIT = 1
+VALIDATOR_REJECTION_REASON_PREFIX = "declared validator rejected every implementation candidate"
+
+
+def validator_retry_limit() -> int:
+    """
+    @summary Operator-tunable number of validator rejections retried before restructuring.
+    """
+    return env_int("STRATA_VALIDATOR_RETRY_LIMIT", DEFAULT_VALIDATOR_RETRY_LIMIT)
 
 _UUIDISH_PATTERN = re.compile(r"\b[0-9a-f]{8,}(?:-[0-9a-f]{4,}){0,4}\b", re.IGNORECASE)
 _INTEGER_PATTERN = re.compile(r"\b\d+\b")
@@ -161,6 +172,33 @@ def _count_consecutive_matching_failures(storage, task: TaskModel, fingerprint: 
             break
         total += 1
     return total
+
+
+def _count_validator_rejections(storage, task: TaskModel) -> int:
+    if storage is None or not hasattr(storage, "attempts"):
+        return 0
+    total = 0
+    for attempt in storage.attempts.get_by_task_id(task.task_id) or []:
+        if getattr(getattr(attempt, "outcome", None), "value", None) != AttemptOutcome.FAILED.value:
+            continue
+        attempt_reason = str(getattr(attempt, "reason", "") or "").strip().lower()
+        if attempt_reason.startswith(VALIDATOR_REJECTION_REASON_PREFIX):
+            total += 1
+    return total
+
+
+def should_retry_validator_rejection(task: TaskModel, error: Exception, storage) -> bool:
+    """
+    @summary True while a validator rejection still has retry budget (the current FAILED attempt counts).
+    @inputs task: the failed task, error: the raised error, storage: the current StorageManager
+    @outputs boolean
+    """
+    if _failure_kind(error) != "validator_failed":
+        return False
+    limit = validator_retry_limit()
+    if limit <= 0:
+        return False
+    return _count_validator_rejections(storage, task) <= limit
 
 
 def _tooling_target_for_repeated_failure(task: TaskModel, error: Exception) -> str:
@@ -329,6 +367,16 @@ async def determine_resolution(task: TaskModel, error: Exception, model_adapter,
     failure_fingerprint = _normalize_failure_reason(error)
     repeated_failure_count = _count_consecutive_matching_failures(storage, task, failure_fingerprint)
     
+    # 0. Validator rejection -> reattempt once with the validator output in the failure log
+    if should_retry_validator_rejection(task, error, storage):
+        return AttemptResolutionSchema(
+            reasoning=(
+                "The declared validator rejected the candidate. Retry once with the validator output "
+                "in the failure log before restructuring the task."
+            ),
+            resolution="reattempt"
+        )
+
     # A. Parse Errors -> internal_replan
     if any(x in err_str for x in ["syntaxerror", "parse error", "invalid json"]):
         return AttemptResolutionSchema(

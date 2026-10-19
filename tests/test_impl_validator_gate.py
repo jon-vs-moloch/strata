@@ -12,7 +12,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from strata.orchestrator.evaluation import extract_python_source, ValidatorRegistry
-from strata.orchestrator.implementation import ImplementationModule
+from strata.orchestrator.implementation import (
+    IMPL_RESEARCH_NOTE_CHARS,
+    ImplementationModule,
+    impl_research_step_budget,
+)
 from strata.orchestrator.research import ResearchModule
 from strata.orchestrator.step_outcomes import TerminalToolCallOutcome
 from strata.orchestrator.worker import attempt_runner
@@ -359,3 +363,143 @@ def test_implement_task_continuation_title_does_not_stack(monkeypatch):
     monkeypatch.setattr(ResearchModule, "conduct_research", fake_conduct_research)
     outcome = asyncio.run(module.implement_task(task.task_id))
     assert outcome.continuation_title == "Continue implementation: Implement add helper"
+
+
+# --- implement_task research-step budget -------------------------------------
+
+
+def test_implement_task_records_research_step_in_continuation_constraints(monkeypatch):
+    storage = make_storage()
+    task = make_impl_task(storage, {"target_files": ["workspace/x.py"], "edit_type": "create"})
+
+    async def fake_conduct_research(self, **kwargs):
+        return TerminalToolCallOutcome(
+            tool_name="read_file",
+            tool_arguments={"path": "workspace/x.py"},
+            tool_result_preview="x" * (IMPL_RESEARCH_NOTE_CHARS + 40),
+            next_step_hint="consume the result",
+            source_module="research",
+            continuation_constraints={
+                "terminal_tool_step": True,
+                "allow_inherited_tool_result": True,
+            },
+        )
+
+    monkeypatch.setattr(ResearchModule, "conduct_research", fake_conduct_research)
+    module = ImplementationModule(
+        model_adapter=_StubModelAdapter(),
+        storage_manager=storage,
+        research_module=ResearchModule(_StubModelAdapter(), storage),
+    )
+
+    outcome = asyncio.run(module.implement_task(task.task_id))
+
+    constraints = outcome.continuation_constraints
+    assert outcome.continuation_task_type == "IMPL"
+    # Existing keys from the outcome are preserved, not replaced.
+    assert constraints["terminal_tool_step"] is True
+    assert constraints["allow_inherited_tool_result"] is True
+    assert constraints["impl_research_steps"] == 1
+    note = constraints["impl_research_notes"][0]
+    assert note["tool"] == "read_file"
+    assert note["arguments"] == {"path": "workspace/x.py"}
+    assert note["result"] == "x" * IMPL_RESEARCH_NOTE_CHARS
+
+
+class _RecordingModelAdapter:
+    """Async chat stub that records messages and returns a fenced code block."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def chat(self, messages, **kwargs):
+        self.calls.append(messages)
+        return {
+            "status": "success",
+            "content": "```python\ndef add(a, b):\n    return a + b\n```",
+            "usage": {},
+            "provider": "test",
+            "model": "stub",
+        }
+
+
+def test_implement_task_skips_research_when_budget_spent(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    storage = make_storage()
+    notes = [
+        {"tool": "read_file", "arguments": {"path": "workspace/x.py"}, "result": "def add(a, b):\n    return a + b"},
+        {"tool": "list_directory", "arguments": {"path": "workspace"}, "result": "x.py"},
+    ]
+    task = make_impl_task(storage, {"impl_research_steps": 3, "impl_research_notes": notes})
+
+    async def fail_conduct_research(self, **kwargs):
+        raise AssertionError("budget-spent IMPL task must implement from recorded notes, not research again")
+
+    monkeypatch.setattr(ResearchModule, "conduct_research", fail_conduct_research)
+
+    adapter = _RecordingModelAdapter()
+    module = ImplementationModule(
+        model_adapter=adapter,
+        storage_manager=storage,
+        research_module=ResearchModule(adapter, storage),
+    )
+
+    candidate_ids = asyncio.run(module.implement_task(task.task_id))
+
+    assert len(candidate_ids) == 1
+    assert len(adapter.calls) == 1
+    system_prompt = adapter.calls[0][0]["content"]
+    assert "Step 1: read_file" in system_prompt
+    assert "def add(a, b):" in system_prompt
+    assert "Step 2: list_directory" in system_prompt
+
+
+def test_implement_task_budget_zero_still_runs_research(monkeypatch):
+    monkeypatch.setenv("STRATA_IMPL_RESEARCH_STEP_BUDGET", "0")
+    storage = make_storage()
+    task = make_impl_task(
+        storage,
+        {"impl_research_steps": 10, "impl_research_notes": [{"tool": "read_file", "arguments": {}, "result": "old"}]},
+    )
+
+    research_calls = []
+
+    async def fake_conduct_research(self, **kwargs):
+        research_calls.append(kwargs)
+        return TerminalToolCallOutcome(
+            tool_name="read_file",
+            tool_arguments={"path": "workspace/x.py"},
+            tool_result_preview="fresh results",
+            source_module="research",
+        )
+
+    monkeypatch.setattr(ResearchModule, "conduct_research", fake_conduct_research)
+    module = ImplementationModule(
+        model_adapter=_StubModelAdapter(),
+        storage_manager=storage,
+        research_module=ResearchModule(_StubModelAdapter(), storage),
+    )
+
+    outcome = asyncio.run(module.implement_task(task.task_id))
+
+    assert len(research_calls) == 1
+    assert outcome.continuation_constraints["impl_research_steps"] == 11
+    # With budget 0 the notes keep their last 3 entries.
+    notes = outcome.continuation_constraints["impl_research_notes"]
+    assert len(notes) == 2
+    assert notes[-1]["result"] == "fresh results"
+
+
+def test_impl_research_step_budget_precedence(monkeypatch):
+    monkeypatch.delenv("STRATA_IMPL_RESEARCH_STEP_BUDGET", raising=False)
+    assert impl_research_step_budget({}) == 3
+
+    monkeypatch.setenv("STRATA_IMPL_RESEARCH_STEP_BUDGET", "5")
+    assert impl_research_step_budget({}) == 5
+    assert impl_research_step_budget({"impl_research_step_budget": 2}) == 2
+    # Invalid constraint values fall back to the environment, then to the default.
+    assert impl_research_step_budget({"impl_research_step_budget": "nope"}) == 5
+    assert impl_research_step_budget({"impl_research_step_budget": -2}) == 5
+    monkeypatch.setenv("STRATA_IMPL_RESEARCH_STEP_BUDGET", "not-a-number")
+    assert impl_research_step_budget({}) == 3
+    assert impl_research_step_budget({"impl_research_step_budget": 1}) == 1

@@ -32,8 +32,12 @@ from strata.orchestrator.worker.queue_recovery import recover_tasks
 from strata.orchestrator.worker.idle_policy import run_idle_tasks
 from strata.orchestrator.worker.telemetry import synthesize_model_performance
 from strata.orchestrator.worker.attempt_runner import run_attempt
-from strata.orchestrator.worker.resolution_policy import determine_resolution, apply_resolution
-from strata.orchestrator.worker.plan_review import generate_plan_review
+from strata.orchestrator.worker.resolution_policy import (
+    apply_resolution,
+    determine_resolution,
+    should_retry_validator_rejection,
+)
+from strata.orchestrator.worker.plan_review import generate_plan_review, plan_review_timeout_s
 from strata.orchestrator.capability_incidents import (
     annotate_capability_incident,
     get_capability_incident,
@@ -2034,7 +2038,7 @@ class BackgroundWorker:
                     )
                     review = await asyncio.wait_for(
                         generate_plan_review(task, attempt, lane_model, storage),
-                        timeout=8.0,
+                        timeout=plan_review_timeout_s(),
                     )
                     storage.attempts.set_plan_review(attempt.attempt_id, review)
                     storage.commit()
@@ -2053,7 +2057,11 @@ class BackgroundWorker:
                     logger.error(f"Failed to generate failure-time plan review for attempt {attempt.attempt_id}: {review_err}")
 
                 # --- RESOLUTION ---
-                resolution_data = resolution_from_plan_review(review) or fallback_resolution
+                resolution_data = (
+                    fallback_resolution
+                    if should_retry_validator_rejection(task, error, storage)
+                    else (resolution_from_plan_review(review) or fallback_resolution)
+                )
                 
                 # Map string resolution to Enum
                 from strata.storage.models import AttemptResolution
