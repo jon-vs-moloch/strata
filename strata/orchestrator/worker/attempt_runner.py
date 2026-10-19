@@ -18,7 +18,7 @@ from strata.procedures.registry import (
     ensure_draft_procedure_for_task,
     record_procedure_run,
 )
-from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome
+from strata.storage.models import TaskModel, TaskType, TaskState, AttemptOutcome, CandidateModel
 from strata.system_capabilities import bind_system_procedure, canonical_system_procedure_id
 from strata.orchestrator.research import ResearchModule, _normalize_research_context_hints
 from strata.orchestrator.decomposition import DecompositionModule
@@ -30,6 +30,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_CONTINUATION_DEPTH = 6
 DEFAULT_CONTINUATION_AUDIT_INTERVAL = 3
 DEFAULT_MAX_DECOMPOSITION_DEPTH = 3
+
+
+class ImplementationValidationError(Exception):
+    """
+    Raised when a task's declared validator rejects every generated
+    implementation candidate. The failure feeds the standard retry machinery:
+    run_attempt records a FAILED attempt whose reason is replayed to later
+    attempts via failure_log.
+    """
+
+    failure_kind = "validator_failed"
+
+    def __init__(self, message: str, autopsy: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        # Keeps candidate ids and per-candidate checks_failed for the failure
+        # autopsy artifact that run_attempt persists on the failure path.
+        self.autopsy = dict(autopsy or {})
 
 
 def _process_provenance_record(
@@ -1772,6 +1789,36 @@ async def _run_implementation(task, storage, model_adapter, *, progress_fn=None,
     )
     if isinstance(candidate_ids, TerminalToolCallOutcome):
         return candidate_ids
+    # Validator gate: a declared validator must run *before* the attempt succeeds,
+    # otherwise failing code is marked complete and the retry machinery never sees
+    # a test failure. Import lazily like background.py to avoid a heavy eager import.
+    constraints = dict(getattr(task, "constraints", {}) or {})
+    validator_name = str(constraints.get("validator") or "").strip()
+    if validator_name and validator_name != "noop":
+        from strata.orchestrator.evaluation import EvaluationPipeline
+        evaluator = EvaluationPipeline(storage)
+        scorecards = []
+        for cid in candidate_ids:
+            candidate = storage.session.query(CandidateModel).filter_by(candidate_id=cid).first()
+            if candidate is None:
+                continue
+            scorecards.append(await evaluator.evaluate_candidate(task, candidate))
+        if scorecards and not any(scorecard.valid for scorecard in scorecards):
+            last_scorecard = scorecards[-1]
+            checks_failed_text = "\n".join(
+                str(item) for item in (last_scorecard.checks_failed or [])
+            ).strip() or "Evaluator reported no detailed failure reasons."
+            # Keep the tail so the most informative end of the traceback survives.
+            raise ImplementationValidationError(
+                "Declared validator rejected every implementation candidate: "
+                f"{checks_failed_text[-3000:]}",
+                autopsy={
+                    "candidate_ids": [str(cid) for cid in candidate_ids],
+                    "checks_failed": [
+                        list(scorecard.checks_failed or []) for scorecard in scorecards
+                    ],
+                },
+            )
     _emit_task_communication(
         storage,
         task,

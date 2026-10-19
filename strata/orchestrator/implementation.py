@@ -215,6 +215,11 @@ class ImplementationModule:
             attempt_id=attempt_id,
         )
         if isinstance(local_research, TerminalToolCallOutcome):
+            # Re-point the research handoff back at implementation, otherwise the
+            # follow-up stays plain research and the IMPL task never produces code.
+            local_research.continuation_task_type = "IMPL"
+            local_research.continuation_title = f"Continue implementation: {task.title}"[:200]
+            local_research.continuation_description = task.description
             return local_research
 
         # Get past failures to avoid infinite loops

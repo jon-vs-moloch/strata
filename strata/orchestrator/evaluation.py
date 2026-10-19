@@ -24,6 +24,20 @@ from strata.orchestrator.worker.telemetry import record_metric
 
 logger = logging.getLogger(__name__)
 
+def extract_python_source(content: str) -> str:
+    """
+    @summary Return the executable python body from candidate content.
+    Candidates are prompted to emit a fenced ```python block (often with prose
+    around it), so code must be carved out of the fence before it is parsed,
+    written to disk, or executed.
+    """
+    code = content
+    if "```python" in code:
+        code = code.split("```python")[1].split("```")[0]
+    elif "```" in code:
+        code = code.split("```")[1].split("```")[0]
+    return code
+
 class ValidatorResult(BaseModel):
     success: bool
     message: str
@@ -53,6 +67,7 @@ class ValidatorRegistry:
 
     def _run_pytest(self, task: TaskModel, content: str) -> ValidatorResult:
         import subprocess
+        import sys
         import tempfile
         import shutil
         
@@ -77,7 +92,23 @@ class ValidatorRegistry:
             # In a real system, we'd use a docker container or a pre-built env.
             # Here, we'll copy the project excluding large/runtime dirs
             def ignore_func(path, names):
-                return {".git", "__pycache__", "strata/runtime", "strata/experimental"}
+                # shutil passes the directory being copied and the basenames in it,
+                # so the old "strata/runtime" entry (a path, not a basename) never
+                # matched. Skip junk dirs by basename and large runtime-owned dirs by
+                # their path relative to the project root.
+                relative_parent = os.path.relpath(path, ".").replace(os.sep, "/")
+                parent_parts = () if relative_parent == "." else tuple(relative_parent.split("/"))
+                skip_names = {".git", "__pycache__", "venv", ".venv", "node_modules"}
+                path_skips = {
+                    ("strata",): {"runtime"},
+                    ("strata", "experimental"): {"candidates"},
+                    ("memory",): {"vector_db"},
+                }
+                excluded = {name for name in names if name in skip_names}
+                for dir_parts, skip in path_skips.items():
+                    if parent_parts == dir_parts:
+                        excluded |= set(skip)
+                return excluded
             
             # Simple copy tree to the temp dir
             # Note: shutil.copytree(src, dst) - dst must not exist, which td is empty.
@@ -90,15 +121,19 @@ class ValidatorRegistry:
             if targets:
                 primary_target = os.path.join(sandbox_path, targets[0])
                 os.makedirs(os.path.dirname(primary_target), exist_ok=True)
+                # The candidate text is a fenced block plus prose, not raw python.
+                # Write the extracted source so the file is valid python at all.
                 with open(primary_target, "w", encoding="utf-8") as f:
-                    f.write(content)
+                    f.write(extract_python_source(content))
             
             # 4. RUN PYTEST
             try:
-                # We run pytest from the sandbox root
+                # We run pytest from the sandbox root. Use the same interpreter
+                # running this process so pytest exists even when `pytest` is
+                # not on PATH (e.g. worker started via ./venv/bin/python).
                 staged_test = os.path.join(sandbox_path, test_file)
                 result = subprocess.run(
-                    ["pytest", staged_test], 
+                    [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", staged_test],
                     capture_output=True, 
                     text=True, 
                     timeout=30,
@@ -108,16 +143,17 @@ class ValidatorRegistry:
                     summary = result.stdout.splitlines()[-1] if result.stdout.splitlines() else "Passed"
                     return ValidatorResult(success=True, message=f"Pytest passed: {summary}", score_impact=2.0)
                 else:
-                    return ValidatorResult(success=False, message=f"Pytest failed in isolation:\n{result.stdout}\n{result.stderr}")
+                    # Keep pytest's stdout/stderr for the failure autopsy but cap
+                    # it so long tracebacks do not blow up downstream prompts.
+                    output = f"{result.stdout}\n{result.stderr}"
+                    return ValidatorResult(success=False, message=f"Pytest failed in isolation:\n{output[-4000:]}")
             except Exception as e:
                 return ValidatorResult(success=False, message=f"Pytest execution error: {str(e)}")
 
     def _python_import_only(self, content: str) -> ValidatorResult:
         try:
-            # Strip markdown fences if present
-            code = content
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
+            # Reuse the shared fence-extraction rule instead of duplicating it.
+            code = extract_python_source(content)
             
             # Syntax check first
             ast.parse(code)
@@ -291,13 +327,8 @@ class EvaluationPipeline:
             return True, None # Skip for now
             
         try:
-            # Strip markdown fences if present
-            code = content
-            if "```python" in code:
-                code = code.split("```python")[1].split("```")[0]
-            elif "```" in code:
-                code = code.split("```")[1].split("```")[0]
-                
+            # Reuse the shared fence-extraction rule instead of duplicating it.
+            code = extract_python_source(content)
             ast.parse(code)
             return True, None
         except SyntaxError as e:
