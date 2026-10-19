@@ -139,7 +139,11 @@ def main():
         for c in cands:
             p = pathlib.Path(c["content_path"])
             content = p.read_text() if p.exists() else ""
-            ok, tail = run_tests(repo, t, extract_code(content)) if content else (False, "missing candidate file")
+            if content:
+                ok, tail = run_tests(repo, t, extract_code(content))
+            else:
+                # The October 19 run reported both cases as "missing candidate file".
+                ok, tail = False, ("empty candidate file" if p.exists() else "missing candidate file")
             graded.append({"candidate_id": c["candidate_id"], "task_id": c["task_id"], "created_at": c["created_at"], "passed": ok, "pytest": tail, "content": content})
         calls = proxy_calls(a.proxy_log, start, end)
         usage = lambda k: sum(int((x.get("usage") or {}).get(k) or 0) for x in calls)

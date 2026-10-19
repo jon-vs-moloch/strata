@@ -1,7 +1,7 @@
 """Raw single-call baseline for refinery_tasks_v1 coding tasks.
 Usage: python raw_pilot.py <repo_dir> <endpoint> <out.jsonl> [--reps N] [--temperature T] [--ids a,b]
-For each task: one chat call with the task prompt (task_prompt()), take the last fenced code
-block (or the whole reply), write it to <tmp>/<target_file>, run the task's pytest file there."""
+For each task: one chat call with the task prompt (task_prompt()), take the first fenced code
+block (or the whole reply; see extract_code), write it to <tmp>/<target_file>, run the task's pytest file there."""
 import argparse, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
 import httpx
 

@@ -39,7 +39,12 @@ Both Strata instances also carried the model read-timeout setting from this chan
 | `calc_expr` | fail: 6 of 7 tests fail; 1,992 tokens | not run | not run |
 | `glob_match` | fail: no answer, all 2,048 tokens spent reasoning; 2,997 tokens | not run | not run |
 
-Token counts include every model call the pipeline made, as logged by the metering proxy. Wall times are on a shared host and are only a rough guide; raw calls took 9 to 20 minutes each.
+Token counts include every model call made during the task's time window, as logged by the metering proxy.
+
+- For `poker_hands` (fixed), that is 14 calls:
+  - 7 research steps of the task and 1 implementation call;
+  - 2 plan reviews and 2 verifier calls, all four abandoned by Strata at its timeouts;
+  - 2 research calls of the verifier-repair procedure the worker queued during the task. Wall times are on a shared host and are only a rough guide; raw calls took 9 to 20 minutes each.
 
 **Coverage is small, and why.** One task ran through the shipped pipeline and two through the fixed one. The host gave about 2 to 7 generated tokens per second. On that host one pipeline call took 2 to 22 minutes, and one task took an hour or more without finishing. Four raw tasks took 62 minutes. Larger coverage needs a faster host. Every run is in [`results/refinery-tasks-bench.json`](results/refinery-tasks-bench.json).
 
@@ -70,7 +75,7 @@ What happened:
   - On `bowling`, the continuations went back to IMPL as intended. The model kept exploring (`read_file` on the not-yet-written target, then `list_directory` twice). One step produced no tool call at all and was decomposed. The task reached the 60-minute limit with no code.
   - On `poker_hands`, the second research step called `finalize_research` and the implementation call ran. Its output hit the 2,048-token cap with the whole answer in the reasoning channel, so the candidate file was empty.
   - The validator gate caught that: "Declared validator rejected every implementation candidate: … module … has no attribute 'compare'". The failure went to the resolution policy, which chose `decompose`, not a retry with the test output.
-  - After that the task went back to research. There followed seven more research steps and a second decomposition, after a research step picked a tool the circuit breaker had disabled. No further code was generated. The worker then turned to a self-repair procedure for its own verifier, queued after three verifier timeouts, ahead of the task's next step. The run was stopped there, 74 minutes in.
+  - After that the task went back to research. There followed five more research steps and a second decomposition, after a research step picked a tool the circuit breaker had disabled. No further code was generated. The worker then turned to a self-repair procedure for its own verifier, queued after three verifier timeouts, ahead of the task's next step. The run was stopped there, 74 minutes in.
 - **The verifier never verified anything.** `verify_task_output` gives the model 90 seconds, and failure-time plan review gets 8 seconds (`strata/experimental/verifier.py:488`, `strata/orchestrator/background.py:2036-2037`). On this host all 13 verifier and plan-review calls took between 292 s and 2,269 s, so every one timed out. Verification reviews were recorded as `uncertain` with mechanism failure `parse_failure`. After three such failures the worker queued a BUG_FIX "Process Repair: verification_process" task against itself.
 
 So, on this host and model:
