@@ -55,6 +55,7 @@ def test_leading_letter_forms() -> None:
     _assert_extract("B) Because the queue is empty", "B")
     _assert_extract("C. The scheduler", "C")
     _assert_extract("A manual system is best", "")
+    _assert_extract("A) Spawn autonomous tasks", "A")
 
 
 def test_grade_response_contract() -> None:

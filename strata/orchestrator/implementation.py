@@ -218,7 +218,10 @@ class ImplementationModule:
             # Re-point the research handoff back at implementation, otherwise the
             # follow-up stays plain research and the IMPL task never produces code.
             local_research.continuation_task_type = "IMPL"
-            local_research.continuation_title = f"Continue implementation: {task.title}"[:200]
+            base_title = str(task.title or "")
+            prefix = "Continue implementation: "
+            # Keep one prefix: a continuation of a continuation would otherwise stack them.
+            local_research.continuation_title = (base_title if base_title.startswith(prefix) else prefix + base_title)[:200]
             local_research.continuation_description = task.description
             return local_research
 

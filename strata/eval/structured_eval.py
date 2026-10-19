@@ -78,7 +78,8 @@ def _extract_choice_letter(text: str) -> str:
          marker wins since the stated final choice comes last;
       3. the last, then the first, non-empty line is a bare letter ("trailing
          letter" and "letter first, explanation after" styles);
-      4. a leading uppercase "B)"/"C."/"D:" (but NOT the article "A manual ...").
+      4. a leading uppercase letter followed by ")", "." or ":" ("A)", "B.", "D:");
+         "A" followed by a space is the article ("A manual ...") and does not count.
     The text is never uppercased wholesale, so the English article "a" cannot be
     mistaken for answer "A".
     """
@@ -104,7 +105,7 @@ def _extract_choice_letter(text: str) -> str:
         if line_match:
             return line_match.group(1).upper()
 
-    # 4. Leading "B)" / "C." / "D:" (uppercase only; "A manual ..." is an article).
+    # 4. Leading "A)" / "B." / "D:" (uppercase only; "A manual ..." is an article).
     if len(cleaned) >= 2 and cleaned[0] in "ABCD" and cleaned[1] in ").:":
         return cleaned[0]
 

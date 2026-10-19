@@ -1803,11 +1803,14 @@ async def _run_implementation(task, storage, model_adapter, *, progress_fn=None,
             if candidate is None:
                 continue
             scorecards.append(await evaluator.evaluate_candidate(task, candidate))
-        if scorecards and not any(scorecard.valid for scorecard in scorecards):
-            last_scorecard = scorecards[-1]
-            checks_failed_text = "\n".join(
-                str(item) for item in (last_scorecard.checks_failed or [])
-            ).strip() or "Evaluator reported no detailed failure reasons."
+        # No evaluated candidate is a rejection too: a declared validator must never be skipped.
+        if not any(scorecard.valid for scorecard in scorecards):
+            if scorecards:
+                checks_failed_text = "\n".join(
+                    str(item) for item in (scorecards[-1].checks_failed or [])
+                ).strip() or "Evaluator reported no detailed failure reasons."
+            else:
+                checks_failed_text = "No implementation candidate was produced."
             # Keep the tail so the most informative end of the traceback survives.
             raise ImplementationValidationError(
                 "Declared validator rejected every implementation candidate: "

@@ -323,3 +323,39 @@ def test_run_pytest_sandbox_skips_venv_and_runtime_dirs(pytest_project, monkeypa
     assert seen["strata"] == {"runtime"}
     assert seen["experimental"] == {"candidates"}
     assert seen["memory"] == {"vector_db"}
+
+
+def test_run_implementation_raises_when_no_candidate_with_validator(monkeypatch, tmp_path):
+    # A declared validator must never be skipped, even when no candidate was produced.
+    monkeypatch.chdir(tmp_path)
+    storage = make_storage()
+    task = make_impl_task(storage, _pytest_task_constraints())
+
+    async def fake_implement_task(self, task_id, *args, **kwargs):
+        return []
+
+    monkeypatch.setattr(ImplementationModule, "implement_task", fake_implement_task)
+    monkeypatch.setattr(attempt_runner, "_emit_task_communication", lambda *args, **kwargs: None)
+
+    with pytest.raises(ImplementationValidationError) as excinfo:
+        asyncio.run(_run_implementation(task, storage, _StubModelAdapter()))
+    assert "No implementation candidate was produced." in str(excinfo.value)
+
+
+def test_implement_task_continuation_title_does_not_stack(monkeypatch):
+    storage = make_storage()
+    task = make_impl_task(storage, {"target_files": ["workspace/x.py"], "edit_type": "create"})
+    task.title = "Continue implementation: Implement add helper"
+    storage.commit()
+
+    async def fake_conduct_research(self, **kwargs):
+        return TerminalToolCallOutcome(tool_name="list_directory", continuation_task_type="RESEARCH")
+
+    module = ImplementationModule(
+        model_adapter=_StubModelAdapter(),
+        storage_manager=storage,
+        research_module=ResearchModule(_StubModelAdapter(), storage),
+    )
+    monkeypatch.setattr(ResearchModule, "conduct_research", fake_conduct_research)
+    outcome = asyncio.run(module.implement_task(task.task_id))
+    assert outcome.continuation_title == "Continue implementation: Implement add helper"
