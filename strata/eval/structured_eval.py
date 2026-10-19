@@ -43,9 +43,72 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+# MD characters that can hide the shape of an answer ("**Answer: C**", "# Heading").
+_CHOICE_NOISE_CHARS = r"[*_`#]"
+
+# Whole-response / whole-line answer: "C", "c", "(B)", "B.", "Option D", "D)".
+_WHOLE_RESPONSE_RE = re.compile(r"^\(?(?:option\s+)?\(?([A-Da-d])\)?[.:)]?$", re.IGNORECASE)
+
+# Explicit "answer is C"-style markers. The LAST match wins because models often
+# discuss wrong options first and state their real choice at the end. Phrase and
+# connectors ("is"/"option"/"choice"/":"/"-"/"=", with whitespace/newlines between
+# parts) are matched case-insensitively, while the letter itself stays
+# case-sensitive so we can enforce:
+#   - uppercase A-D is always accepted as long as it is a standalone token
+#     (not followed by another letter/digit, e.g. "Answer: Cats" must fail), and
+#   - lowercase a-d is accepted only at a strong boundary (end of text/line or
+#     before one of .)]:,), so "the answer is a manual system" does NOT match
+#     while "Answer: c" and "answer is (b)." DO.
+_MARKERS_RE = re.compile(
+    r"(?i:\b(?:final\s+answer|correct\s+answer|the\s+answer|correct\s+option|correct\s+choice|best\s+answer|i\s+choose|i\s+pick|answer)"
+    r"(?:\s*(?:\b(?:is|option|choice)\b|[:=\-]))*"
+    r")"
+    r"\s*"
+    r"(?:\(?([A-D])\)?(?![A-Za-z0-9])|\(?([a-d])\)?(?=$|\n|[.):,\]]))"
+)
+
+
 def _extract_choice_letter(text: str) -> str:
-    match = re.search(r"\b([A-D])\b", text.upper())
-    return match.group(1) if match else ""
+    """
+    @summary Extract the answer letter A-D from a model response, or "".
+    @details Priority order (most explicit first, because a model that explains
+    itself often mentions wrong options before its real answer):
+      1. the whole response is just a letter / "(B)" / "Option D";
+      2. the last explicit marker ("final answer:", "answer is", ...) — the last
+         marker wins since the stated final choice comes last;
+      3. the last, then the first, non-empty line is a bare letter ("trailing
+         letter" and "letter first, explanation after" styles);
+      4. a leading uppercase "B)"/"C."/"D:" (but NOT the article "A manual ...").
+    The text is never uppercased wholesale, so the English article "a" cannot be
+    mistaken for answer "A".
+    """
+    # 0. Clean a copy: drop markdown noise, keep newlines and the case of words.
+    cleaned = re.sub(_CHOICE_NOISE_CHARS, "", text).strip()
+
+    # 1. Whole response is a bare/option letter.
+    whole = _WHOLE_RESPONSE_RE.fullmatch(cleaned)
+    if whole:
+        return whole.group(1).upper()
+
+    # 2. Last explicit marker phrase before a letter.
+    marker_matches = list(_MARKERS_RE.finditer(cleaned))
+    if marker_matches:
+        last = marker_matches[-1]
+        return (last.group(1) or last.group(2) or "").upper()
+
+    # 3. Last, then first, non-empty line is a bare/option letter
+    #    ("...explanation\n\nB" or "**C**\n\nexplanation...").
+    nonempty_lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    for line in (nonempty_lines[-1:] + nonempty_lines[:1]):
+        line_match = _WHOLE_RESPONSE_RE.fullmatch(line)
+        if line_match:
+            return line_match.group(1).upper()
+
+    # 4. Leading "B)" / "C." / "D:" (uppercase only; "A manual ..." is an article).
+    if len(cleaned) >= 2 and cleaned[0] in "ABCD" and cleaned[1] in ").:":
+        return cleaned[0]
+
+    return ""
 
 
 def _grade_response(response: str, expected_answer: str, grading: str) -> bool:
